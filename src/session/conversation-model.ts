@@ -920,16 +920,73 @@ export function hasAgentReplyAfterPrompt(
   return false;
 }
 
+export type RecordSessionUpdateOptions = {
+  /**
+   * Whether a prompt has ever been submitted to the adapter on this connection.
+   *
+   * ⚠️ THIS IS A MONOTONIC LATCH, NOT "IS A TURN RUNNING RIGHT NOW", AND THE
+   * DIFFERENCE IS THE WHOLE SAFETY ARGUMENT. Passing a per-turn flag here would
+   * also suppress *late* chunks that arrive after a turn has been marked
+   * finished — real model output — and deleting those from the record is far
+   * worse than the defect this option exists to fix. Latch it on at the first
+   * prompt and never clear it: the only window it then suppresses in is the one
+   * where model output is *impossible*.
+   *
+   * Omit it (the default) and nothing changes: a caller that cannot answer
+   * truthfully must not answer.
+   */
+  promptEverSubmitted?: boolean;
+};
+
+/**
+ * An `agent_message_chunk` that arrives before any prompt has been submitted is
+ * a WRONG-CHANNEL emission: it is content on the model-output channel that no
+ * model produced. Measured on devbox 2026-09-06 (brick 56d3532d) across all five
+ * adapters we launch: of `pi`, `codex`, `claude`, `claude-pty` and `opencode`,
+ * only `pi` does it — its `session/new` prelude pushes its startup banner (`pi
+ * vX.Y.Z` plus an npm update notice) as a chunk via `setTimeout(…, 0)`
+ * (`pi-acp` `agent.ts:397`), outside any turn.
+ *
+ * The damage is not cosmetic and not confined to a stray leading message: the
+ * chunk lands in `messages` as **content[0] of the agent's reply to the user's
+ * first prompt**, so anything reading that reply reads
+ * `"pi v0.84.4\n---\nPONG"` where the model said `"PONG"`.
+ *
+ * ⚠️ DROPPED HERE, NOT LABELLED, AND NOT LOST. The text stays in the session's
+ * own raw ACP stream sidecar (`<id>.stream.ndjson`) verbatim, and the CLI still
+ * renders it live over `onAcpOutputMessage`, which does not go through this
+ * model — so a human still sees the update notice. Labelling it instead would
+ * mean a new persisted field on `SessionAcpxState`, whose clone is an explicit
+ * allowlist that has silently dropped fields twice already (see
+ * `cloneSessionAcpxState`), plus matching work in acpx-ui — a record-shape
+ * change carrying adapter metadata. `session/load` already emits no banner at
+ * all, so the conversation was inconsistent about it either way; this makes it
+ * consistently absent.
+ *
+ * Scope is deliberately `agent_message_chunk` only. `agent_thought_chunk` would
+ * carry the same argument, but no adapter was measured emitting one pre-turn and
+ * an unmeasured widening is how a suppression grows past its evidence.
+ */
+function isPreTurnWrongChannelUpdate(update: ExtendedSessionUpdate): boolean {
+  return update.sessionUpdate === "agent_message_chunk";
+}
+
 export function recordSessionUpdate(
   conversation: SessionConversation,
   state: SessionAcpxState | undefined,
   notification: SessionNotification,
   timestamp = isoNow(),
+  options?: RecordSessionUpdateOptions,
 ): SessionAcpxState {
   const acpx = ensureAcpxState(state);
 
   const update = notification.update as ExtendedSessionUpdate;
   recordProgress(acpx, update);
+  if (options?.promptEverSubmitted === false && isPreTurnWrongChannelUpdate(update)) {
+    // Deliberately not folded into the conversation — see the comment above.
+    updateConversationTimestamp(conversation, timestamp);
+    return acpx;
+  }
   applySessionUpdate(conversation, acpx, update);
 
   updateConversationTimestamp(conversation, timestamp);

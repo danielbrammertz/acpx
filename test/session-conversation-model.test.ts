@@ -313,3 +313,107 @@ test("cloneSessionAcpxState preserves desired mode id", () => {
     effort: undefined,
   });
 });
+
+// brick 56d3532d — a pre-turn `agent_message_chunk` is a WRONG-CHANNEL emission.
+// Measured on devbox 2026-09-06: of the five adapters acpx launches, only `pi`
+// emits one (its `session/new` startup banner), and it lands as content[0] of
+// the agent's reply to the user's FIRST prompt — so the reply reads
+// "pi v0.84.4\n---\nPONG" where the model said "PONG".
+test("a pre-turn agent_message_chunk is not folded into the agent-message channel", () => {
+  const conversation = createSessionConversation("2026-09-06T23:00:00.000Z");
+
+  // The banner arrives AFTER the user prompt is recorded locally and BEFORE the
+  // prompt is submitted to the adapter — that ordering is the measured one, and
+  // it is why "the conversation has no user message yet" cannot be the gate.
+  recordPromptSubmission(
+    conversation,
+    "Reply with exactly the word: PONG",
+    "2026-09-06T23:00:01.000Z",
+  );
+
+  const banner = {
+    sessionId: "session-1",
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "pi v0.84.4\n---\n" },
+    },
+  } as SessionNotification;
+
+  let acpxState = recordSessionUpdate(conversation, undefined, banner, "2026-09-06T23:00:02.000Z", {
+    promptEverSubmitted: false,
+  });
+
+  assert.equal(
+    conversation.messages.length,
+    1,
+    "the suppressed banner must not create an agent message",
+  );
+  const first = conversation.messages[0];
+  assert.ok(
+    typeof first === "object" && first !== null && "User" in first,
+    "the only message must still be the user prompt",
+  );
+
+  // The real reply, once the prompt IS in flight, must land normally. Without
+  // this the assertion above is satisfied just as well by a handler that drops
+  // every agent chunk.
+  acpxState = recordSessionUpdate(
+    conversation,
+    acpxState,
+    {
+      sessionId: "session-1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "PONG" } },
+    } as SessionNotification,
+    "2026-09-06T23:00:03.000Z",
+    { promptEverSubmitted: true },
+  );
+
+  const last = conversation.messages.at(-1);
+  if (!(typeof last === "object" && last !== null && "Agent" in last)) {
+    assert.fail("expected the reply to be recorded as an agent message");
+  }
+  assert.deepEqual(
+    last.Agent.content,
+    [{ Text: "PONG" }],
+    "the reply must carry the model's words and nothing else",
+  );
+});
+
+test("the pre-turn gate is opt-in and scoped to agent_message_chunk", () => {
+  // 1. Option omitted -> unchanged behaviour. A caller that cannot answer
+  //    truthfully must not be silently answered for.
+  const legacy = createSessionConversation("2026-09-06T23:00:00.000Z");
+  recordSessionUpdate(
+    legacy,
+    undefined,
+    {
+      sessionId: "session-1",
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "banner" } },
+    } as SessionNotification,
+    "2026-09-06T23:00:01.000Z",
+  );
+  const legacyLast = legacy.messages.at(-1);
+  if (!(typeof legacyLast === "object" && legacyLast !== null && "Agent" in legacyLast)) {
+    assert.fail("expected the chunk to be recorded as an agent message");
+  }
+  assert.deepEqual(legacyLast.Agent.content, [{ Text: "banner" }]);
+
+  // 2. Pre-turn, but a DIFFERENT update kind -> still applied. The gate must not
+  //    widen into a general pre-turn mute: codex, claude and opencode all emit a
+  //    pre-turn `available_commands_update`, which is legitimate.
+  const scoped = createSessionConversation("2026-09-06T23:00:00.000Z");
+  const acpxState = recordSessionUpdate(
+    scoped,
+    undefined,
+    {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [{ name: "compact", description: "", input: null }],
+      },
+    } as unknown as SessionNotification,
+    "2026-09-06T23:00:01.000Z",
+    { promptEverSubmitted: false },
+  );
+  assert.deepEqual(acpxState.available_commands, ["compact"]);
+});

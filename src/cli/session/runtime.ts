@@ -1616,6 +1616,12 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
   );
   let bufferingConnectOutput = true;
   let promptTurnActive = false;
+  // Monotonic: latched at the first prompt and NEVER cleared. It answers "could
+  // this session/update possibly be model output yet?", which is what
+  // `recordSessionUpdate` needs to reject pi's pre-turn startup banner
+  // (brick 56d3532d) without ever being able to reject a real late chunk.
+  // `promptTurnActive` above is per-turn and must NOT be substituted here.
+  let promptEverSubmitted = false;
   let promptTurnHadSideEffects = false;
   // Fork: in-flight mid-turn-injected prompts. Tracked so a turn awaits all
   // of them before the queue-owner loop starts the next sequential task —
@@ -2271,7 +2277,15 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
       if (promptTurnActive) {
         promptTurnHadSideEffects = true;
       }
-      acpxState = recordConversationSessionUpdate(conversation, acpxState, notification);
+      acpxState = recordConversationSessionUpdate(
+        conversation,
+        acpxState,
+        notification,
+        undefined,
+        {
+          promptEverSubmitted,
+        },
+      );
       trimConversationForRuntime(conversation);
 
       // Detect teammate_spawned events to create subagent session records
@@ -2770,6 +2784,7 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
 
   const runPromptWithRetries = async (sessionId: string) => {
     promptTurnActive = true;
+    promptEverSubmitted = true;
     for (let attempt = 0; ; attempt++) {
       try {
         return await runPromptAttempt(sessionId, attempt);
