@@ -5,8 +5,9 @@ import {
   HARNESS_IDS,
   type HarnessAdapterIdentity,
   type HarnessCapabilityFacts,
+  type HarnessMeasurementSource,
 } from "../src/acp/harness-capabilities.js";
-import { AGENT_REGISTRY } from "../src/agent-registry.js";
+import { listAgentLaunchForms } from "../src/agent-registry.js";
 
 // 4791a88c — every capability claim cites the ADAPTER BUILD it was proven on.
 //
@@ -147,62 +148,179 @@ test("4791a88c: the checker DISCOVERS its subjects — a planted sixth block is 
   assert.deepEqual(citationProblems("pi", HARNESS_FACTS.pi), []);
 });
 
-test("4791a88c: a cited PIN cannot drift from AGENT_REGISTRY — on EITHER launch form", () => {
-  // ⚠️ THE ANTI-DRIFT ROW, AND IT WAS ONE DEPLOYMENT FROM GOING SILENT.
-  //
-  // It used to match only `npx <spec>`. But `resolvePiAcpCommand` returns
-  // `node /opt/pi-acp/dist/index.js` once the fork is installed — so the moment
-  // B5's bootstrap lands, pi would have dropped out of the checked set entirely,
-  // on exactly the harness whose identity is ambiguous and exactly when the fork
-  // makes it matter. **It failed toward SILENCE, and the population guard could
-  // not see it: `pinned.length > 0` stays true on opencode alone, so coverage
-  // would halve with every row green.**
-  //
-  // ⇒ Both launch forms are classified, and installing the fork now TIGHTENS the
-  // check (a resolved path demands a resolved-commit citation) instead of
-  // removing it.
-  const npxPinned: { id: string; spec: string }[] = [];
-  const resolvedPath: { id: string; path: string }[] = [];
-  for (const id of HARNESS_IDS) {
-    const command = AGENT_REGISTRY[id] ?? "";
-    const npx = /\bnpx\s+(?:-y\s+)?((?:@[^\s/]+\/)?[^\s@]+@[^\s]+)/.exec(command);
-    if (npx) {
-      npxPinned.push({ id, spec: npx[1] });
-      continue;
-    }
-    const local = /\bnode\s+(\/\S+)/.exec(command);
-    if (local) {
-      resolvedPath.push({ id, path: local[1] });
+type LaunchForm =
+  | { kind: "npx-pin"; command: string; spec: string }
+  | { kind: "resolved-path"; command: string; path: string }
+  | { kind: "unclassified"; command: string };
+
+function classifyLaunchForm(command: string): LaunchForm {
+  const npx = /\bnpx\s+(?:-y\s+)?((?:@[^\s/]+\/)?[^\s@]+@[^\s]+)/.exec(command);
+  if (npx) {
+    return { kind: "npx-pin", command, spec: npx[1] };
+  }
+  const local = /\bnode\s+(\/\S+)/.exec(command);
+  if (local) {
+    return { kind: "resolved-path", command, path: local[1] };
+  }
+  return { kind: "unclassified", command };
+}
+
+/**
+ * Every way a block's citations and the registry's launch forms can disagree.
+ *
+ * Extracted as a pure function of (citations, commands) for one reason: it is
+ * the only shape in which this row can be shown to GO RED. The row below runs it
+ * on the real table; the row after that runs it on planted stale citations and
+ * requires each to be caught, on every box, with no mutation of the tree.
+ */
+function driftProblems(
+  id: string,
+  measured: HarnessMeasurementSource,
+  commands: string[],
+): string[] {
+  const forms = commands.map(classifyLaunchForm);
+  if (forms.length === 0) {
+    return [`${id}: the registry enumerates NO launch form at all — the matcher is broken`];
+  }
+  const problems: string[] = [];
+  // A per-cell citation is a citation: pi's `/opt` build is cited in
+  // `cellOverrides` while its block names the npx fallback, and both forms are
+  // real, so both count as covering evidence.
+  const citations = [measured.adapter, ...Object.values(measured.cellOverrides ?? {})];
+  const npxSpecs = new Set(forms.flatMap((form) => (form.kind === "npx-pin" ? [form.spec] : [])));
+
+  for (const form of forms) {
+    if (form.kind === "unclassified") {
+      // ⚠️ REPORTED, NOT SKIPPED. The predecessor dropped an unrecognised command
+      // silently, which is how a launch form leaves the checked set without
+      // anything turning red.
+      problems.push(
+        `${id}: launch form "${form.command}" is neither an npx pin nor a resolved path — ` +
+          `the classifier cannot check it, and an unchecked form must not pass as a checked one`,
+      );
+    } else if (form.kind === "npx-pin") {
+      if (!citations.some((c) => c.kind === "package-range" && c.spec === form.spec)) {
+        problems.push(
+          `${id}: the registry can launch "${form.spec}" by npx, but no citation names that package-range`,
+        );
+      }
+    } else if (!citations.some((c) => c.kind === "resolved-commit")) {
+      problems.push(
+        `${id}: the registry can launch it from a resolved path (${form.path}), so that build is ` +
+          `IDENTIFIABLE — a package-range citation is stale for it and some citation must name its commit`,
+      );
     }
   }
+
+  // The BLOCK citation is documented as "what acpx RESOLVES", so it must still
+  // describe one of the forms acpx can resolve — otherwise a harness could push
+  // every real citation into `cellOverrides` and leave the block naming nothing.
+  const blockDescribesAForm = forms.some((form) =>
+    form.kind === "npx-pin"
+      ? measured.adapter.kind === "package-range" && measured.adapter.spec === form.spec
+      : form.kind === "resolved-path" && measured.adapter.kind === "resolved-commit",
+  );
+  if (!blockDescribesAForm) {
+    problems.push(
+      `${id}: the block citation (kind "${measured.adapter.kind}") describes none of the forms ` +
+        `the registry launches: ${commands.join(" | ")}`,
+    );
+  }
+
+  // ⚠️ THE INVERSE QUERY. Everything above asks "is each launch form cited?".
+  // Alone that is half a sweep: a citation naming a spec nothing launches any
+  // more is exactly the stale claim this file exists to reject, and it survives
+  // the forward direction untouched.
+  for (const citation of citations) {
+    if (citation.kind === "package-range" && !npxSpecs.has(citation.spec)) {
+      problems.push(
+        `${id}: cites package-range "${citation.spec}", which the registry launches on NO box — STALE`,
+      );
+    }
+  }
+  return problems;
+}
+
+test("4791a88c: a cited PIN cannot drift from AGENT_REGISTRY — on EITHER launch form", () => {
+  // ⚠️ THE ANTI-DRIFT ROW. IT WENT SILENT ON ONE HALF AND RED ON THE OTHER, AND
+  // BOTH WERE THE SAME MISTAKE (brick 82a18653).
+  //
+  // Its first form matched only `npx <spec>`, so when `resolvePiAcpCommand`
+  // began returning `node /opt/pi-acp/dist/index.js` pi would have dropped out
+  // of the checked set entirely — failing toward SILENCE, invisibly to the
+  // population guard, since `> 0` stays true on opencode alone.
+  //
+  // Its second form classified both shapes but still read ONE box's resolution
+  // (`AGENT_REGISTRY[id]`), and demanded static citations match it. `HARNESS_FACTS`
+  // is source; the launch form is box state. On 2026-09-06 the bootstrap put
+  // `/opt/pi-acp` on all five boxes and this row demanded a `resolved-commit`
+  // block citation from a table that must equally serve a box without the fork —
+  // **a requirement no single value can satisfy.** It passed everywhere on
+  // 2026-09-05 and failed everywhere on 2026-09-06 with no source change at all.
+  //
+  // ⇒ The subject is now every form the registry CAN launch. Installing the fork
+  // TIGHTENS the check — the resolved path demands a resolved-commit citation
+  // *in addition to* the npx fallback's package-range — instead of swapping one
+  // requirement for the other. And it is not a skip: **a row that passes by not
+  // looking would re-hide the drift the row exists to catch.**
+  assert.ok(HARNESS_IDS.length > 0, "no harnesses were examined at all");
+  const problems = HARNESS_IDS.flatMap((id) =>
+    driftProblems(id, HARNESS_FACTS[id].measuredAgainst, listAgentLaunchForms(id)),
+  );
+  assert.deepEqual(problems, [], problems.join("\n"));
+});
+
+test("4791a88c: the anti-drift check GOES RED on a stale citation — each way it can be stale", () => {
+  // ⚠️ THE POSITIVE CONTROL, ON THE PATH UNDER ASSERTION. The row above asserts
+  // an ABSENCE (no problems). An absence is worth nothing from an instrument that
+  // cannot produce a presence — and the previous form of this row was itself the
+  // proof, having spent a deployment window unable to see pi at all while
+  // reporting clean. Each case below is a drift the row is claimed to catch, run
+  // through the same function on the same real data, so it fires on every box
+  // rather than in one lane's one-off mutation.
+  const pi = HARNESS_FACTS.pi.measuredAgainst;
+  const codex = HARNESS_FACTS.codex.measuredAgainst;
+
+  // 1. The pin moved and the citation did not.
   assert.ok(
-    npxPinned.length + resolvedPath.length > 0,
-    "no harness classified as either npx-pinned or resolved-path — the matcher is broken",
+    driftProblems("pi", pi, ["npx pi-acp@^0.0.99", `node /opt/pi-acp/dist/index.js`]).some((p) =>
+      p.includes("no citation names that package-range"),
+    ),
+    "a bumped npx pin with an unchanged citation was not caught",
   );
 
-  for (const { id, spec } of npxPinned) {
-    const cited = HARNESS_FACTS[id as (typeof HARNESS_IDS)[number]].measuredAgainst.adapter;
-    assert.equal(
-      cited.kind,
-      "package-range",
-      `${id} is launched from an npx pin, so its citation must be a package-range naming that spec`,
-    );
-    assert.equal(
-      cited.kind === "package-range" ? cited.spec : "",
-      spec,
-      `${id}: the registry launches "${spec}" but the claims cite a different spec`,
-    );
-  }
+  // 2. A citation naming a spec nothing launches — the inverse direction, which
+  //    the forward check cannot see.
+  assert.ok(
+    driftProblems("pi", pi, [`node /opt/pi-acp/dist/index.js`]).some((p) => p.includes("STALE")),
+    "a package-range citation for a launch form that no longer exists was not caught",
+  );
 
-  for (const { id, path } of resolvedPath) {
-    const cited = HARNESS_FACTS[id as (typeof HARNESS_IDS)[number]].measuredAgainst.adapter;
-    assert.equal(
-      cited.kind,
-      "resolved-commit",
-      `${id} is launched from a resolved path (${path}), so a package-range citation is STALE — ` +
-        `the build is now identifiable and the citation must name its commit`,
-    );
-  }
+  // 3. A resolved path cited only by a package-range — the identifiable build
+  //    left unidentified. Built by stripping the `cellOverrides` that legitimately
+  //    carry pi's fork commit, so the input differs from the real block in exactly
+  //    the property under test.
+  const withoutForkCitations: HarnessMeasurementSource = { ...pi, cellOverrides: undefined };
+  assert.ok(
+    driftProblems("pi", withoutForkCitations, [`node /opt/pi-acp/dist/index.js`]).some((p) =>
+      p.includes("must name its commit"),
+    ),
+    "a resolved path with no resolved-commit citation anywhere was not caught",
+  );
+
+  // 4. A launch form the classifier does not understand is REPORTED, not dropped.
+  assert.ok(
+    driftProblems("codex", codex, ["some-custom-bridge --acp"]).some((p) =>
+      p.includes("neither an npx pin nor a resolved path"),
+    ),
+    "an unclassifiable launch form passed silently — the original defect",
+  );
+
+  // 5. CONTROL: the same function on the same blocks with their real forms must
+  //    return CLEAN, or "it flags everything" satisfies all four cases above
+  //    vacuously.
+  assert.deepEqual(driftProblems("pi", pi, listAgentLaunchForms("pi")), []);
+  assert.deepEqual(driftProblems("codex", codex, listAgentLaunchForms("codex")), []);
 });
 
 test("4791a88c: the two harnesses whose adapter and CLI move apart cite both", () => {
@@ -228,12 +346,25 @@ test("4791a88c: pi's fork-dependent cells cite the FORK, not the block's upstrea
   // printed first. A block-level citation over cells that differ from it is
   // "right by accident and wrong by intent".
   //
-  // ⚠️ THIS ROW NAMES ITS OWN EXIT CONDITION so it reads as a contract rather than
-  // an obstacle: when a box installs the fork, the BLOCK citation becomes a
-  // resolved-commit naming it (the anti-drift row above forces that), and these
-  // overrides then describe the SAME build as their block — at which point the
-  // "identical to the block" check will demand they be DELETED. That is the
-  // intended end state, not a regression.
+  // ⚠️ THIS ROW NAMES ITS OWN EXIT CONDITION so it reads as a contract rather
+  // than an obstacle — and that condition was RE-STATED by brick 82a18653,
+  // because the one written here was box-dependent and therefore unreachable.
+  //
+  // It used to read: "when a box installs the fork, the block citation becomes a
+  // resolved-commit naming it". A box cannot decide what a source file says. What
+  // installing the fork actually changes is that pi has TWO reachable launch
+  // forms and needs a citation for each — the block's npx package-range and these
+  // overrides' resolved-commit — which is the state the table is in today, on
+  // boxes with the fork and without it alike.
+  //
+  // The real exit condition is the one event that removes a form: when the
+  // upstream fallback in `resolvePiAcpCommand` is deleted (allowed only once
+  // every box builds `/opt/pi-acp`), pi's only form is the resolved path, the
+  // block's package-range becomes a citation nothing launches, and the anti-drift
+  // row's inverse check demands it be replaced by the fork's commit. These
+  // overrides then describe the SAME build as their block and the "identical to
+  // the block" check demands they be DELETED. That is the intended end state, not
+  // a regression.
   const overrides = HARNESS_FACTS.pi.measuredAgainst.cellOverrides ?? {};
   for (const cell of [
     "model.mechanism",

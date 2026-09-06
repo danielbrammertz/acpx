@@ -454,14 +454,23 @@ export type HarnessAdapterIdentity =
       entrySha256?: string;
     }
   /**
-   * The honest-but-ambiguous form, and **NOT a lesser citation**: pi and opencode
-   * are not bootstrapped components — they are npx-resolved at spawn, so there is
-   * **no commit to cite**. Measured: `info.json` carries `acpx`, `acpx-ui`,
-   * `claude-agent-acp`, `claude-pty-acp`, `codex-acp` and neither `pi-acp` nor
-   * `opencode` (control: `has("codex-acp")` → true).
+   * The honest-but-ambiguous form, and **NOT a lesser citation**: it is what an
+   * adapter npx-resolves at spawn, where there is **no commit to cite**.
    *
-   * ⇒ This arm is CORRECT for those two. What was wrong before was that its blind
-   * spot went unstated, so {@link cannotDistinguish} is REQUIRED.
+   * ⚠️ **WHICH ADAPTERS THOSE ARE IS NOT FIXED — IT CHANGES WHEN A BOOTSTRAP
+   * SHIPS.** Measured 2026-09-05, `info.json` carried `acpx`, `acpx-ui`,
+   * `claude-agent-acp`, `claude-pty-acp`, `codex-acp` and neither `pi-acp` nor
+   * `opencode`. **Re-measured on devbox 2026-09-06T23:00Z it carries `pi` and
+   * `pi-acp` too** (`pi-acp` → `af431c6e`, `state: ok`, `ref: main`), because the
+   * `e50f051` bootstrap built the fork onto the fleet that morning (control:
+   * `opencode` is still absent, so this is a read of the file rather than of a
+   * default). So pi now has BOTH a resolvable commit and an npx fallback, and it
+   * needs a citation for each — see {@link HarnessMeasurementSource.cellOverrides}
+   * and `test/harness-measurement-citations.test.ts` (brick 82a18653).
+   *
+   * ⇒ This arm is CORRECT for a form that is genuinely npx-resolved. What was
+   * wrong before was that its blind spot went unstated, so
+   * {@link cannotDistinguish} is REQUIRED.
    */
   | {
       kind: "package-range";
@@ -483,18 +492,24 @@ export type HarnessAdapterIdentity =
  * The nativai `pi-acp` FORK's build record — the identity of the adapter five of
  * pi's cells were actually proven on (brick ef5999ca / B5).
  *
- * ⚠️ **NOT what any box launches today.** `/opt/pi-acp` exists on neither devbox
- * nor staging (measured 2026-09-05), so `resolvePiAcpCommand` falls back to the
- * npx range and every box resolves UPSTREAM. That is precisely why the fork needs
- * its own citation rather than being folded into pi's block: **the block names
- * what acpx resolves; these five cells name what the claim was proven on, and
- * today those are different builds.**
+ * ⚠️ **THE FORK IS DEPLOYED, AND THIS RECORD DELIBERATELY DOES NOT NAME THE
+ * DEPLOYED BUILD.** The `e50f051` bootstrap built it onto the fleet on 2026-09-06
+ * (brick 82a18653 records the five-box read); measured on devbox
+ * 2026-09-06T23:00Z, `/opt/pi-acp/dist/index.js` exists and `info.json` resolves
+ * `pi-acp` to **`af431c6e`** — which is the CHILD of the `eb17203` cited below.
  *
- * Cited by BUILD RECORD because there is no `info.json` entry to resolve against
- * — the fork is a lane artifact at `/workspace/projects/pi-acp/b5-fork`, not a
- * bootstrapped component. Commit plus the entry file's sha256 is what ruling v3
- * prescribes for exactly that case, and it is what a version string cannot do
- * here: **the fork's `package.json` says `0.0.33`, identical to upstream's.**
+ * ⇒ The five cells are still cited by BUILD RECORD, and deliberately: they were
+ * proven on `eb17203`, and **nobody has re-run them on `af431c6e`.** Advancing
+ * this constant to the deployed commit would convert a measurement into an
+ * assumption — the exact move this field exists to prevent — so it names what was
+ * measured and this note names the gap. Commit plus the entry file's sha256 is
+ * what ruling v3 prescribes, and it is what a version string cannot do here:
+ * **the fork's `package.json` says `0.0.33`, identical to upstream's.**
+ *
+ * That the fork needs its own citation at all is unchanged and now structural:
+ * pi has TWO reachable launch forms, so **the block names the npx fallback and
+ * these cells name the build the claims were proven on** — different builds, both
+ * cited (brick 82a18653).
  */
 const PI_FORK_BUILD: HarnessAdapterIdentity = {
   kind: "resolved-commit",
@@ -1249,7 +1264,7 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
         // NO VERSION READ SEPARATES THEM. Under the old `adapter: string` this spec
         // satisfied the guard; the required field below is what stops that.
         cannotDistinguish:
-          "the nativai pi-acp FORK from UPSTREAM pi-acp — both publish 0.0.33, so no version read separates them. Which one runs is decided by resolvePiAcpCommand (src/agent-registry.ts): `node /opt/pi-acp/dist/index.js` when that path exists, else this npx range. Measured 2026-09-05 on devbox: /opt/pi-acp DOES NOT EXIST, so this box resolves UPSTREAM. Cells whose truth differs between the two carry their own cellOverrides.",
+          "the nativai pi-acp FORK from UPSTREAM pi-acp — both publish 0.0.33, so no version read separates them. Which one runs is decided by resolvePiAcpCommand (src/agent-registry.ts): `node /opt/pi-acp/dist/index.js` when that path exists, else this npx range. THIS SPEC CITES THE FALLBACK ARM ONLY, and which arm a box takes is box state, not a property of this file: measured 2026-09-05 devbox had no /opt/pi-acp and resolved UPSTREAM; the e50f051 bootstrap built the fork onto all five boxes on 2026-09-06, so they now resolve the FORK, whose commit is cited in cellOverrides (brick 82a18653). Cells whose truth differs between the two carry their own cellOverrides.",
       },
       harness: "@earendil-works/pi-coding-agent 0.84.4",
       source:
@@ -1270,10 +1285,13 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       // adapter KIND, which is `pi` for the fork and upstream alike. An override
       // equal to its block is dead weight that goes stale silently.
       //
-      // ⚠️ THIS IS A LANE BUILD, NOT A DEPLOYED ONE. No box installs the fork
-      // today (`/opt/pi-acp` absent on devbox and staging), so it is cited by its
-      // BUILD RECORD — commit plus the sha256 of the entry file — exactly as
-      // ruling v3 requires when there is no `info.json` entry to resolve.
+      // ⚠️ CITED BY BUILD RECORD — commit plus the sha256 of the entry file —
+      // because that is the build these cells were PROVEN on. The superseded
+      // wording gave a different reason ("no box installs the fork today"), and
+      // that reason expired on 2026-09-06 when the bootstrap put `/opt/pi-acp` on
+      // all five boxes; the citation did not, because a deployment does not
+      // re-prove anything. See PI_FORK_BUILD for the one-commit gap between what
+      // was measured and what is deployed (brick 82a18653).
       cellOverrides: {
         "model.mechanism": PI_FORK_BUILD,
         "fork.supported": PI_FORK_BUILD,
@@ -1370,10 +1388,11 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
     // NOT MEASURED, AND ITS TRUTH DEPENDS ON WHICH pi-acp IS RUNNING — say that
     // rather than pick one. ⚠️ A VERSION FIELD CANNOT SETTLE IT: the nativai fork
     // and upstream BOTH report `0.0.33`, so no version read separates them;
-    // identity is the spawn path resolved to a commit. Measured 2026-09-05 on
-    // devbox: `/opt/pi-acp` DOES NOT EXIST here, so this box resolves the
-    // registry-pinned upstream `pi-acp@^0.0.33` — the fallback the `measuredAgainst`
-    // warning above describes. Pi's own TUI has slash commands, but nobody has sent
+    // identity is the spawn path resolved to a commit. Measured on devbox
+    // 2026-09-06T23:00Z: `/opt/pi-acp/dist/index.js` EXISTS here, so this box
+    // resolves the FORK — the 2026-09-05 reading of this same line said the
+    // opposite, which is the point: the answer is box state and moves under the
+    // file. Pi's own TUI has slash commands, but nobody has sent
     // `/clear` as a PROMPT through either adapter, and the fork could add handling
     // upstream does not have. I2 R3/R11 enumerated pi's ACP surface for a different
     // question (`configOptions: null`, depth on `modes`) and no session-clear method

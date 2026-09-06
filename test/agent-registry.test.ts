@@ -5,6 +5,8 @@ import {
   AGENT_REGISTRY,
   BUILT_IN_AGENT_PACKAGES,
   DEFAULT_AGENT_NAME,
+  agentCommandEnvSeam,
+  listAgentLaunchForms,
   listBuiltInAgents,
   resolveBuiltInAgentLaunch,
   resolveInstalledBuiltInAgentLaunch,
@@ -211,6 +213,44 @@ test("pi command resolution: env seam wins, then the fork, then the pinned upstr
     "npx pi-acp@^0.0.33",
     "a blank override is not an override",
   );
+});
+
+test("82a18653: listAgentLaunchForms is BOX-INDEPENDENT — pi reports both arms either way", () => {
+  // ⚠️ THE PIN THAT KEEPS TWO OTHER FILES HONEST. `AGENT_REGISTRY.pi` is one
+  // box's answer; the pin-table and citation rows must hold on every box, so they
+  // read this instead. If it ever narrows to the local resolution those rows go
+  // quietly box-dependent again — which is precisely how they came to pass on all
+  // five boxes on 2026-09-05 and fail on all five on 2026-09-06.
+  //
+  // Asserted as a SET, not against `existsSync`: a check written against the box
+  // probe would agree with a broken enumeration on whichever box it ran.
+  const forms = listAgentLaunchForms("pi");
+  assert.deepEqual(
+    forms.toSorted(),
+    [`node ${PI_ACP_FORK_PATH}`, "npx pi-acp@^0.0.33"].toSorted(),
+    "pi must enumerate the fork AND the pinned upstream fallback, on every box",
+  );
+  // The box's own resolution is one of them — the control that this enumeration
+  // describes the registry rather than merely itself.
+  assert.ok(
+    process.env.ACPX_PI_ACP_COMMAND?.trim() || forms.includes(AGENT_REGISTRY.pi),
+    `this box resolved "${AGENT_REGISTRY.pi}", which is not one of ${JSON.stringify(forms)}`,
+  );
+});
+
+test("82a18653: listAgentLaunchForms reports a single form for the constant entries", () => {
+  assert.deepEqual(listAgentLaunchForms("codex"), ["node /opt/codex-acp/dist/index.js"]);
+  assert.deepEqual(listAgentLaunchForms("claude"), ["node /opt/claude-agent-acp/dist/index.js"]);
+  assert.deepEqual(listAgentLaunchForms("opencode"), [AGENT_REGISTRY.opencode]);
+  // ⚠️ The `/opt` three are enumerated from the SHIPPED constant, not from the
+  // env seam, so an operator override cannot make the shipped pin table or the
+  // shipped citations look wrong. `agentCommandEnvSeam` is how a caller learns
+  // the override exists.
+  assert.equal(agentCommandEnvSeam("codex"), "ACPX_CODEX_ACP_COMMAND");
+  assert.equal(agentCommandEnvSeam("opencode"), undefined);
+  // POPULATION / NEGATIVE: an unknown agent enumerates nothing rather than
+  // inventing a form.
+  assert.deepEqual(listAgentLaunchForms("no-such-agent"), []);
 });
 
 test("resolveInstalledBuiltInAgentLaunch returns undefined now that no built-in packages remain", () => {
