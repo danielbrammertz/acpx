@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { AvailabilityCapability } from "../src/models/capability-source.js";
 import {
   buildCatalogue,
   countModels,
@@ -326,9 +327,21 @@ test("availability: an EMPTY capability table yields an empty map, never a guess
 });
 
 test("availability: with a table it is a JOIN of selectability and the agent's capability", () => {
-  const capabilities = [
-    { id: "claude", acceptsArbitraryModelIds: true },
-    { id: "codex", acceptsArbitraryModelIds: false },
+  const capabilities: AvailabilityCapability[] = [
+    {
+      id: "claude",
+      acceptsArbitraryModelIds: true,
+      arbitraryModelSupport: "native",
+      idForm: "bare",
+      depthFusedIntoId: false,
+    },
+    {
+      id: "codex",
+      acceptsArbitraryModelIds: false,
+      arbitraryModelSupport: "none",
+      idForm: "bare",
+      depthFusedIntoId: true,
+    },
   ];
   const catalogue = buildCatalogue(
     [
@@ -340,7 +353,9 @@ test("availability: with a table it is a JOIN of selectability and the agent's c
   );
 
   const open = catalogue.models.find((m) => m.id === "a/x");
-  assert.deepEqual(open?.availability.claude, { ok: true });
+  // An `ok` seat now also carries the WIRE ID — for a `bare` harness, the row's
+  // own id (brick c4da2ff2).
+  assert.deepEqual(open?.availability.claude, { ok: true, modelId: "a/x" });
   assert.equal(open?.availability.codex?.ok, false);
   assert.equal(open?.availability.codex?.reason, "agent-fixed-backend");
 

@@ -46,24 +46,38 @@ test("the projection is EXACT — restoring `return listHarnessCapabilities()` g
   // leftover import or comment cannot keep it green. The full §8 struct has
   // many more fields (fork, primerChannel, usageReporting, …), so handing it
   // through unprojected fails here even though it type-checks.
+  //
+  // ⚠️ WIDENED ONCE, DELIBERATELY (2026-09-06, brick c4da2ff2): two fields → five.
+  // The EXACTNESS is the property worth keeping, not the number — the three
+  // added cells each bear on WHICH MODELS an agent can run or HOW they must be
+  // named to it (the criterion is stated in the module's own header). A future
+  // accidental widening must still go red here.
   for (const row of readHarnessCapabilities()) {
     assert.deepEqual(
       Object.keys(row).toSorted(),
-      ["acceptsArbitraryModelIds", "id"],
-      `${row.id}: the catalogue must see exactly the two fields the join reads`,
+      ["acceptsArbitraryModelIds", "arbitraryModelSupport", "depthFusedIntoId", "id", "idForm"],
+      `${row.id}: the catalogue must see exactly the fields the join reads`,
     );
   }
   // The control that proves the assertion above can distinguish the two: the
   // unprojected rows really do carry more, so the check is not vacuous.
   const unprojected = listHarnessCapabilities()[0];
   assert.ok(
-    Object.keys(unprojected ?? {}).length > 2,
+    Object.keys(unprojected ?? {}).length > 5,
     "the §8 struct must be wider than the projection, or this test proves nothing",
   );
 });
 
 test("the test seam still overrides, and null restores the REAL table", () => {
-  setHarnessCapabilitiesForTesting([{ id: "synthetic", acceptsArbitraryModelIds: true }]);
+  setHarnessCapabilitiesForTesting([
+    {
+      id: "synthetic",
+      acceptsArbitraryModelIds: true,
+      arbitraryModelSupport: "native",
+      idForm: "bare",
+      depthFusedIntoId: false,
+    },
+  ]);
   assert.deepEqual(
     readHarnessCapabilities().map((row) => row.id),
     ["synthetic"],
@@ -114,10 +128,18 @@ test("OpenRouter is locked for EVERY agent while no harness routes an arbitrary 
         assert.equal(availability.reason, model.unavailableReasons[0]?.reason);
         continue;
       }
-      const expected = capabilities.get(id)?.acceptsArbitraryModelIds === true;
+      const capability = capabilities.get(id);
+      const expected = capability?.acceptsArbitraryModelIds === true;
       assert.equal(availability.ok, expected, `${model.key}/${id}`);
       if (!expected) {
-        assert.equal(availability.reason, "agent-fixed-backend", `${model.key}/${id}`);
+        // The reason FOLLOWS the support kind, exactly as `ok` follows the
+        // derivation — never a per-harness literal. `none` is a fixed backend;
+        // every other kind means the harness can do it and acpx has not wired it.
+        assert.equal(
+          availability.reason,
+          capability?.arbitraryModelSupport === "none" ? "agent-fixed-backend" : "acpx-not-wired",
+          `${model.key}/${id}`,
+        );
       }
     }
   }

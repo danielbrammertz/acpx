@@ -162,9 +162,32 @@ export interface HarnessDefaultModel {
   id: string;
 }
 
+/**
+ * How a catalogue row's `(source, id)` becomes the id THIS harness accepts on
+ * the wire (brick c4da2ff2, problem 1).
+ *
+ *  - `bare`            — the row's `id`, verbatim.
+ *  - `source-prefixed` — `source + "/" + id`, because the harness namespaces its
+ *                        models by provider.
+ *
+ * ⚠️ **A PER-HARNESS PROPERTY, NOT A PER-SOURCE ONE — WHICH IS THE WHOLE REASON
+ * THIS CELL EXISTS.** The obvious shortcut, `source === "openrouter" ? \`openrouter/${id}\`
+ * : id`, is correct for pi and opencode and **silently wrong for codex**, whose
+ * ids carry no prefix at all; and it would be wrong again the day claude's
+ * `via-shim` path is wired, because the shim takes an unprefixed OpenRouter id.
+ * A UI-side derivation on the source cannot express that, so it must be declared
+ * here and shipped (`availability.<agent>.modelId`).
+ *
+ * The other half of the wire id — the `[rung]` codex fuses in — is NOT restated
+ * here: it is already expressed by `depth.mechanism === "compose-into-id"`, and
+ * a second cell saying the same thing is a second cell that can disagree.
+ */
+export type ModelIdForm = "bare" | "source-prefixed";
+
 export interface HarnessModelSupport {
   mechanism: ModelMechanism;
   catalogue: ModelCatalogue;
+  idForm: ModelIdForm;
 }
 
 export interface HarnessDepthSupport {
@@ -825,6 +848,19 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       mechanism: "set-model",
       // SDK-queried `initializationResult.models` + two hardcoded injections (MAP §3.1)
       catalogue: "acp",
+      // MEASURED 2026-09-06 on TWO live turns against the deployed
+      // `/opt/claude-agent-acp` (brick c4da2ff2): the wire id is the bare alias.
+      //   (a) session 8686e427 — acpx sent `opus`; the adapter advertised
+      //       `default | opus[1m] | sonnet | haiku | opus | fable`.
+      //   (b) a completed turn on an isolated rig — acpx sent `sonnet`, the turn
+      //       ended `end_turn`, and Claude Code's OWN transcript recorded
+      //       `message.model = claude-sonnet-5`.
+      // ⚠️ `claude-sonnet-5` is the SERVED api model, NOT the wire id. Two model
+      // ids appear in that file and only one is the one to send; they are told
+      // apart by the field's ROLE (what acpx SENT vs what the provider SERVED),
+      // never by position. Shipping the served id would put a string the
+      // catalogue does not contain into the picker.
+      idForm: "bare",
     },
     depth: {
       // `{id:"effort", category:"thought_level", type:"select"}`, claude-agent-acp :3939-3947 (MAP §3.1)
@@ -936,6 +972,22 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       mechanism: "set-model",
       // `SUPPORTED_MODELS = [opus, sonnet, haiku]`, claude-pty-acp :149-154 (MAP §3.1)
       catalogue: "static",
+      // MEASURED 2026-09-06 on the live ACP wire against the deployed
+      // `/opt/claude-pty-acp` (adapter self-report
+      // `independent-claude-acp-transcript 0.9.0-c`), brick c4da2ff2, with a
+      // control that fires in BOTH directions on the same path:
+      //   POSITIVE  `sonnet` accepted at `session/set_model`; the adapter's own
+      //             launch argv reads
+      //             ["/home/node/.local/bin/claude","--model","sonnet","--effort","high",…]
+      //             — acpx's id reaches the harness VERBATIM, and the depth
+      //             travels as a SEPARATE flag rather than fused into the id.
+      //   NEGATIVE  `opus[1m]` REFUSED, ACP -32602:
+      //             `Unsupported model "opus[1m]". Available models: opus, sonnet, haiku`
+      // (The prompt that followed died with `tmux-lost` — a rig artifact, the
+      // adapter launching a hardcoded `/home/node/.local/bin/claude` under a
+      // foreign HOME. The id is settled at `session/set_model`, which is where
+      // both observations above were taken; no served response was measured.)
+      idForm: "bare",
     },
     depth: {
       // the ONLY config option it advertises, claude-pty-acp :148,155,714-722 (MAP §3.1)
@@ -1038,6 +1090,11 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       // The pin is stored for the NEXT turn (codex-acp CodexAcpServer.ts:406-447).
       mechanism: "compose-into-id",
       catalogue: "acp", // app-server-queried `listModels`, paginated (MAP §3.1)
+      // NO provider prefix — codex ids are `family[effort]` and a BARE FAMILY IS
+      // REFUSED. The bracket is not stated here: `depth.mechanism ===
+      // "compose-into-id"` below already says it, and one fact in two cells is
+      // one fact that can disagree with itself.
+      idForm: "bare",
     },
     depth: {
       // No `effort` config option at all — only a `fastMode` boolean; effort
@@ -1152,6 +1209,11 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       // `models` array and NO `session/set_model`.
       mechanism: "config-option",
       catalogue: "acp", // the whole roster is enumerable from the handshake, with display names (I1 R11)
+      // MEASURED on a live turn by the opencode-models lane (brick 4c7a38b2):
+      // the id acpx sends equals `providerID + "/" + modelID`, i.e. the
+      // catalogue row's `source + "/" + id`. Corroborated by this box's own
+      // session store — e.g. `openrouter/z-ai/glm-5.3-flash`.
+      idForm: "source-prefixed",
     },
     depth: {
       // I1 R8: reasoning effort is OpenCode's "variant", exposed as the ACP
@@ -1311,6 +1373,13 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       // changed rather than the call merely returning.
       mechanism: "set-model",
       catalogue: "acp", // `session/new`/`session/load` return `models.availableModels`
+      // MEASURED: pi's own transcript stores `provider` and `modelId`
+      // SEPARATELY (`provider="openrouter"`, `modelId="moonshotai/kimi-k2-thinking"`)
+      // and the id acpx sends is the two rejoined — the catalogue row's
+      // `source + "/" + id`. Corroborated by pi's `available_models`
+      // advertisement on this box, every row of which is `openrouter/<slug>`,
+      // and by the session store — e.g. `openrouter/qwen/qwen3-coder-flash`.
+      idForm: "source-prefixed",
     },
     depth: {
       // I2 R8: thinking level rides the ACP MODE selector; `configOptions` is

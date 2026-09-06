@@ -7,6 +7,7 @@
  * 22:58:57Z: "ACPX needs to be the basis for all of this."
  */
 
+import type { ArbitraryModelSupport } from "../acp/harness-capabilities.js";
 import { readHarnessCapabilities } from "./capability-source.js";
 import type { AvailabilityCapability } from "./capability-source.js";
 import { deriveDepthDescriptor } from "./depth.js";
@@ -24,6 +25,7 @@ import type {
   ModelCatalogue,
   UnavailableReason,
 } from "./types.js";
+import { deriveWireModelId } from "./wire-model-id.js";
 
 /** Rows newer than this many days carry the `newest` badge. */
 const NEWEST_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
@@ -203,7 +205,7 @@ function availabilityFor(
   if (nativeAgentTypes) {
     // A harness-native row belongs to exactly the agent types that can spawn it.
     return nativeAgentTypes.includes(capability.id)
-      ? { ok: true }
+      ? available(model, capability)
       : {
           ok: false,
           reason: "other-harness",
@@ -212,15 +214,97 @@ function availabilityFor(
   }
 
   if (!capability.acceptsArbitraryModelIds) {
+    return arbitraryModelDenial(capability);
+  }
+
+  return available(model, capability);
+}
+
+/**
+ * An `ok` answer, carrying the wire id the caller must send.
+ *
+ * ⚠️ **A ROW WITH NO STATABLE WIRE ID IS NOT AVAILABLE.** `deriveWireModelId`
+ * returns `null` only where acpx cannot name an id that is valid on its own — a
+ * depth-fused harness on a row whose ladder has no default rung — and for such a
+ * harness a bare id is REFUSED at the adapter. Returning `ok: true` with no
+ * `modelId` would hand the picker a row it can only offer by guessing, which is
+ * the failure this whole field exists to end. So the absence is reported as an
+ * unavailability with its own reason rather than as a silently incomplete `ok`.
+ */
+function available(model: CatalogueModel, capability: AvailabilityCapability): AgentAvailability {
+  const modelId = deriveWireModelId({
+    row: model,
+    idForm: capability.idForm,
+    depthFusedIntoId: capability.depthFusedIntoId,
+  });
+  if (modelId === null) {
+    return {
+      ok: false,
+      reason: "no-wire-id",
+      message:
+        `${capability.id} fuses the thinking depth into the model id, and ${model.key} ` +
+        `advertises no default depth — acpx cannot state an id to send`,
+    };
+  }
+  return { ok: true, modelId };
+}
+
+/**
+ * WHY an arbitrary model id is refused — **keyed on the SUPPORT KIND, never on
+ * the harness NAME**, so a harness that changes kind cannot silently keep a
+ * reason that has stopped being true.
+ *
+ * ## This split is a CORRECTNESS fix, not a UX one (brick c4da2ff2)
+ *
+ * Every locked harness used to collapse to `agent-fixed-backend`, and **for
+ * claude that was FALSE**: its `arbitraryModelSupport` is `via-shim`, the shim
+ * exists, and the `openrouter-deepseek [claude/openrouter]` profile exists — what
+ * is missing is **acpx's own picker→shim wiring**. We were reporting our
+ * unfinished plumbing as a fact about claude's backend, to every consumer of the
+ * payload and not merely to the picker. A wrong reason outlives the UI that
+ * works around it.
+ *
+ * The same was true of opencode for as long as `provisioned` was declared and
+ * the spawn was not yet routed — which is precisely why this is keyed on the
+ * kind: that harness's answer corrected itself when the routing landed, with no
+ * edit here.
+ *
+ *   `none`        → `agent-fixed-backend` — the backend genuinely is fixed.
+ *                   PERMANENT; nothing acpx builds will change it.
+ *   anything else → `acpx-not-wired`      — the harness CAN reach arbitrary
+ *                   models; acpx is what is missing. A shipping target, not a
+ *                   property of the harness.
+ */
+function arbitraryModelDenial(capability: AvailabilityCapability): AgentAvailability {
+  if (capability.arbitraryModelSupport === "none") {
     return {
       ok: false,
       reason: "agent-fixed-backend",
-      message: `${capability.id} sessions cannot be created with an arbitrary model id`,
+      message: `${capability.id} runs on a fixed backend and cannot be created with an arbitrary model id`,
     };
   }
-
-  return { ok: true };
+  return {
+    ok: false,
+    reason: "acpx-not-wired",
+    message: `${capability.id} ${ARBITRARY_MODEL_GAP[capability.arbitraryModelSupport]}`,
+  };
 }
+
+/**
+ * The gap, per kind — a TOTAL map, not a switch with a fallback.
+ *
+ * A new {@link ArbitraryModelSupport} member fails to compile here rather than
+ * silently inheriting whichever sentence a `default:` arm happened to hold. That
+ * is the same property `HarnessCapabilityFacts` buys by omitting the derived
+ * fields: make the wrong thing a type error, not something a reviewer catches.
+ */
+const ARBITRARY_MODEL_GAP = {
+  "via-shim":
+    "can reach arbitrary models through a credential-profile shim, but acpx does not yet wire a model selection into it",
+  provisioned:
+    "can reach arbitrary models once acpx provisions them into its own config, and acpx does not provision for it yet",
+  native: "accepts arbitrary model ids natively, but acpx does not route that support yet",
+} satisfies Record<Exclude<ArbitraryModelSupport, "none">, string>;
 
 // ── Assembly ─────────────────────────────────────────────────────────────────
 
