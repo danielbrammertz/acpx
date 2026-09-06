@@ -9008,7 +9008,16 @@ for (const [label, extraArgs] of [
       });
 
       const result = await runCli(
-        ["--format", "json", "pi", "sessions", "copy", "--from", `source-pi-${label}`, ...extraArgs],
+        [
+          "--format",
+          "json",
+          "pi",
+          "sessions",
+          "copy",
+          "--from",
+          `source-pi-${label}`,
+          ...extraArgs,
+        ],
         homeDir,
       );
 

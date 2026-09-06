@@ -382,13 +382,13 @@ A directory is removed only when **every** clause holds:
 
 Everything else is **kept and reported**:
 
-| reason | meaning |
-| --- | --- |
-| `liveProcess` | a running process names this directory |
-| `openRecord` | a record exists and is still open — including open-but-idle |
-| `tooYoung` | no record claims it, and it was written recently |
-| `unrecognised` | **no record claims it.** Never removed, whatever its age |
-| `unmeasured` | the `/proc` census could not be taken, so the run refused |
+| reason         | meaning                                                     |
+| -------------- | ----------------------------------------------------------- |
+| `liveProcess`  | a running process names this directory                      |
+| `openRecord`   | a record exists and is still open — including open-but-idle |
+| `tooYoung`     | no record claims it, and it was written recently            |
+| `unrecognised` | **no record claims it.** Never removed, whatever its age    |
+| `unmeasured`   | the `/proc` census could not be taken, so the run refused   |
 
 ⚠️ **`unrecognised` is retain-and-report, deliberately.** A directory the sweep
 cannot name is the category it understands _least_, so it gets the _most_
