@@ -245,7 +245,15 @@ test("SHAPE 5 — an OpenRouter row is refused for an agent that cannot take an 
   );
   assert.equal(error.outputCode, "USAGE");
   assert.equal(error.detailCode, "MODEL_NOT_AVAILABLE_FOR_AGENT");
-  assert.match(error.message, /arbitrary model id/);
+  // ⚠️ THE WORDING CHANGED ON PURPOSE (2026-09-06, brick c4da2ff2). It used to
+  // read "claude sessions cannot be created with an arbitrary model id" — which
+  // was FALSE about claude: its `arbitraryModelSupport` is `via-shim`, the shim
+  // and the `openrouter-deepseek [claude/openrouter]` profile both exist, and
+  // what is missing is acpx's own picker→shim wiring. The refusal now names OUR
+  // gap instead of asserting a property of claude's backend. Asserted on the
+  // stable half of the sentence — that the user is told acpx is what is missing,
+  // and where to look — rather than on prose that should be free to improve.
+  assert.match(error.message, /acpx does not yet/);
   assert.match(error.message, /acpx models --agent claude/);
 });
 
