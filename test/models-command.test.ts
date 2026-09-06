@@ -235,16 +235,36 @@ test("SHAPE 4 — and the same in the other direction, which is what the deleted
 test("SHAPE 5 — an OpenRouter row is refused for an agent that cannot take an arbitrary id", () => {
   // MEASURED P1: `--model z-ai/glm-5.3` on claude reached the adapter and came
   // back as `-32603 Internal error`, "not a recognized model id. Run /model…".
+  //
+  // ⚠️ THE EXEMPLAR MOVED FROM `claude` TO `codex`, AND THE SHAPE IS UNCHANGED
+  // (brick 007eaac8). claude was the specimen this refusal was measured on, but
+  // its `via-shim` support is now ROUTED, so an OpenRouter row is genuinely
+  // available to it — see the row below, which is this test's other half. codex
+  // is `none`: its backend is fixed by design and permanently unroutable, so it
+  // is the exemplar that cannot go stale the next time a harness is wired.
   const error = caught(() =>
     validateModelSelection(catalogueWith(), {
       model: "moonshotai/kimi-k3",
-      agentName: "claude",
+      agentName: "codex",
     }),
   );
   assert.equal(error.outputCode, "USAGE");
   assert.equal(error.detailCode, "MODEL_NOT_AVAILABLE_FOR_AGENT");
   assert.match(error.message, /arbitrary model id/);
-  assert.match(error.message, /acpx models --agent claude/);
+  assert.match(error.message, /acpx models --agent codex/);
+});
+
+test("SHAPE 5's other half — claude now ACCEPTS an OpenRouter row, because via-shim is routed", () => {
+  // Daniel's founding item 6, asserted where its refusal used to live: the same
+  // call that threw `MODEL_NOT_AVAILABLE_FOR_AGENT` above now returns the row.
+  // Keeping the two rows adjacent is deliberate — a reader who finds only the
+  // refusal would conclude the band is still locked for every harness.
+  const resolved = validateModelSelection(catalogueWith(), {
+    model: "moonshotai/kimi-k3",
+    agentName: "claude",
+  });
+  assert.equal(resolved?.source, "openrouter");
+  assert.equal(resolved?.id, "moonshotai/kimi-k3");
 });
 
 test("SHAPE 5 — a row the CATALOGUE blocks is refused with the catalogue's own reason", () => {

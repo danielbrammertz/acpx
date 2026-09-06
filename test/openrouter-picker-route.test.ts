@@ -105,7 +105,11 @@ test("an OpenRouter slug routes; a claude-native alias does not", async () => {
   );
   for (const native of ["sonnet", "opus", "haiku", "default", "opus[1m]"]) {
     assert.equal(
-      await resolveOpenRouterRouteModel({ agentCommand: "claude-agent-acp", model: native, options }),
+      await resolveOpenRouterRouteModel({
+        agentCommand: "claude-agent-acp",
+        model: native,
+        options,
+      }),
       undefined,
       `${native} must stay on the claude backend`,
     );

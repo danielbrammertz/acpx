@@ -107,12 +107,6 @@ import {
 } from "./auth-env.js";
 import { resolveBrickContext } from "./brick-context.js";
 import {
-  assertNoOpenRouterProfileConflict,
-  openRouterBoxCredentialMissing,
-  resolveOpenRouterBoxCredential,
-  resolveOpenRouterRouteModel,
-} from "./openrouter-routing.js";
-import {
   materializeClaudeForkSession,
   resolveClaudeUuidForAcpxIndex,
 } from "./claude-fork-index.js";
@@ -146,6 +140,12 @@ import {
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
 import { RequestedModelUnsupportedError } from "./model-support.js";
+import {
+  assertNoOpenRouterProfileConflict,
+  openRouterBoxCredentialMissing,
+  resolveOpenRouterBoxCredential,
+  resolveOpenRouterRouteModel,
+} from "./openrouter-routing.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import {
   formatSessionControlAcpSummary,
@@ -1099,13 +1099,11 @@ export class AcpClient {
    * and therefore the served model, survives the reconnect.
    */
   private async applyProfileEnv(env: NodeJS.ProcessEnv): Promise<void> {
-    const profileId = this.options.sessionContext?.profileId?.trim();
     if (this.shimHandle) {
-      env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
-      env.ANTHROPIC_AUTH_TOKEN = " ";
-      delete env.ANTHROPIC_CUSTOM_HEADERS;
+      this.reinjectRunningShim(env);
       return;
     }
+    const profileId = this.options.sessionContext?.profileId?.trim();
     // ⚠️ RESOLVED EVEN WHEN A PROFILE IS SET — that is what makes the conflict
     // DETECTABLE. Deciding the route on `profileId` first would take the legacy
     // route and silently bill a picker-chosen model to the profile's account,
@@ -1114,16 +1112,26 @@ export class AcpClient {
       agentCommand: this.options.agentCommand,
       model: this.options.sessionOptions?.model,
     });
-    if (profileId && routeModel !== undefined) {
-      assertNoOpenRouterProfileConflict({ profileId, routeModel });
-    }
     if (profileId) {
+      if (routeModel !== undefined) {
+        assertNoOpenRouterProfileConflict({ profileId, routeModel });
+      }
       await this.startProfileShim(env, profileId);
       return;
     }
     if (routeModel !== undefined) {
       await this.startPickerShim(env, routeModel);
     }
+  }
+
+  /** Reconnect: point the adapter back at the shim process that is still running. */
+  private reinjectRunningShim(env: NodeJS.ProcessEnv): void {
+    if (!this.shimHandle) {
+      return;
+    }
+    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
+    env.ANTHROPIC_AUTH_TOKEN = " ";
+    delete env.ANTHROPIC_CUSTOM_HEADERS;
   }
 
   /**

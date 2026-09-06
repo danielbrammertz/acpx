@@ -143,7 +143,10 @@ export async function applyRequestedModelIfAdvertised(
   // Without this branch, wiring the shim ALONE would break every picker-route
   // create: claude-agent-acp advertises only its own aliases, so the slug would
   // reach `assertRequestedModelSupported` and be refused.
-  if (params.client.outOfBandModelId !== undefined && params.client.outOfBandModelId === rawRequested) {
+  if (
+    params.client.outOfBandModelId !== undefined &&
+    params.client.outOfBandModelId === rawRequested
+  ) {
     return { applied: true };
   }
   const guarded = guardServedModel({

@@ -27,8 +27,12 @@
  * in the same edit, with no window where acpx offers a band it does not serve.
  */
 
+import {
+  loadBoxProviders,
+  resolveBoxProviderKey,
+  type BoxProviderLookupOptions,
+} from "../config/providers.js";
 import { AcpxOperationalError } from "../errors.js";
-import { loadBoxProviders, resolveBoxProviderKey } from "../config/providers.js";
 import { findModelsById, loadCatalogue } from "../models/catalogue.js";
 import { nativeAgentTypesForSource } from "../models/harness-models.js";
 import { parseModelRef } from "../models/model-slug-validation.js";
@@ -128,48 +132,65 @@ export async function resolveOpenRouterRouteModel(params: {
   options?: OpenRouterRouteOptions;
 }): Promise<string | undefined> {
   const raw = params.model?.trim();
-  if (!raw) {
-    return undefined;
-  }
   const harness = harnessIdForAgentCommand(params.agentCommand);
-  if (!harnessRoutesModelViaShim(harness, params.options?.routedSupport)) {
+  if (!raw || !harnessRoutesModelViaShim(harness, params.options?.routedSupport)) {
     return undefined;
   }
 
   const ref = parseModelRef(raw);
-  // An explicit non-OpenRouter source prefix settles it without a catalogue read.
-  if (ref.source !== null && ref.source !== OPENROUTER_SOURCE) {
-    return undefined;
-  }
+  // An explicit source prefix settles it without a catalogue read, either way.
   // A bracket is a context-window hint on claude (`sonnet[1m]`), never part of an
   // OpenRouter slug — and OpenRouter's own `:free` / `:batch` suffixes survive
   // `parseModelRef` intact, so `ref.id` is exactly what OpenRouter expects.
-  if (ref.source === OPENROUTER_SOURCE) {
-    return ref.id;
+  if (ref.source !== null) {
+    return ref.source === OPENROUTER_SOURCE ? ref.id : undefined;
   }
 
-  // ⚠️ NEVER THROWS INTO SESSION CREATION. `loadBoxProviders` degrades on a
-  // missing or malformed file for exactly this reason, and the catalogue read is
-  // on the same path: an unreadable cache must mean "acpx cannot say", which is
-  // the stand-aside answer, not a failed spawn.
-  let catalogue: ModelCatalogue;
+  const catalogue = await loadRouteCatalogue(params.options);
+  return catalogue === undefined ? undefined : routeIdFromCatalogue(catalogue, ref.id, harness);
+}
+
+/**
+ * ⚠️ NEVER THROWS INTO SESSION CREATION. `loadBoxProviders` degrades on a missing
+ * or malformed file for exactly this reason, and the catalogue read is on the
+ * same path: an unreadable cache must mean "acpx cannot say", which is the
+ * stand-aside answer, not a failed spawn.
+ */
+async function loadRouteCatalogue(
+  options: OpenRouterRouteOptions | undefined,
+): Promise<ModelCatalogue | undefined> {
+  if (options?.catalogue) {
+    return options.catalogue;
+  }
   try {
-    catalogue = params.options?.catalogue ?? (await loadCatalogue({ offline: true }));
+    return await loadCatalogue({ offline: true });
   } catch {
     return undefined;
   }
-  const rows = findModelsById(catalogue, ref.id);
-  if (rows.length === 0) {
-    return undefined; // unknown here, or a cold cache — stand aside either way
-  }
+}
+
+/**
+ * ⚠️ A HARNESS-NATIVE ROW WINS. If the id also answers to a source this agent can
+ * spawn natively (`sonnet` under `claude-subscription`), the native reading is the
+ * one the caller meant and no shim is started — a resolver that merely asked *"is
+ * this id in the catalogue?"* would take a claude session off its subscription
+ * silently. Only rows that are exclusively OpenRouter take the route.
+ */
+function routeIdFromCatalogue(
+  catalogue: ModelCatalogue,
+  id: string,
+  harness: HarnessId | undefined,
+): string | undefined {
+  const rows = findModelsById(catalogue, id);
   const nativeToThisAgent = rows.some((row) => {
     const owners = nativeAgentTypesForSource(row.source);
-    return owners !== null && harness !== undefined && owners.includes(harness);
+    return harness !== undefined && owners !== null && owners.includes(harness);
   });
   if (nativeToThisAgent) {
     return undefined;
   }
-  return rows.some((row) => row.source === OPENROUTER_SOURCE) ? ref.id : undefined;
+  // An empty `rows` is an unknown slug OR a cold cache — stand aside on both.
+  return rows.some((row) => row.source === OPENROUTER_SOURCE) ? id : undefined;
 }
 
 /**
@@ -225,20 +246,10 @@ export type OpenRouterBoxCredential = {
 export function resolveOpenRouterBoxCredential(
   options?: OpenRouterRouteOptions,
 ): OpenRouterBoxCredential | undefined {
-  const lookup = {
-    ...(options?.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
-    ...(options?.providersPath !== undefined ? { providersPath: options.providersPath } : {}),
-    ...(options?.env !== undefined ? { env: options.env } : {}),
-  };
   const sourceEnv = options?.env ?? process.env;
-  const entry = loadBoxProviders(lookup).providers.find(
-    (provider) => provider.name === OPENROUTER_SOURCE,
-  );
-  if (entry) {
-    const key = resolveBoxProviderKey(entry, sourceEnv);
-    if (key) {
-      return { key, origin: "providers.json", envName: entry.env };
-    }
+  const fromFile = credentialFromProvidersFile(options, sourceEnv);
+  if (fromFile) {
+    return fromFile;
   }
   const ambient = sourceEnv.OPENROUTER_API_KEY;
   if (typeof ambient === "string" && ambient.trim().length > 0) {
@@ -247,8 +258,34 @@ export function resolveOpenRouterBoxCredential(
   return undefined;
 }
 
+/** The route's options, narrowed to what `loadBoxProviders` takes. Split out
+ *  only to keep the resolver under the complexity budget. */
+function providerLookup(options: OpenRouterRouteOptions | undefined): BoxProviderLookupOptions {
+  return {
+    ...(options?.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+    ...(options?.providersPath !== undefined ? { providersPath: options.providersPath } : {}),
+    ...(options?.env !== undefined ? { env: options.env } : {}),
+  };
+}
+
+function credentialFromProvidersFile(
+  options: OpenRouterRouteOptions | undefined,
+  sourceEnv: NodeJS.ProcessEnv,
+): OpenRouterBoxCredential | undefined {
+  const entry = loadBoxProviders(providerLookup(options)).providers.find(
+    (provider) => provider.name === OPENROUTER_SOURCE,
+  );
+  if (!entry) {
+    return undefined;
+  }
+  const key = resolveBoxProviderKey(entry, sourceEnv);
+  return key ? { key, origin: "providers.json", envName: entry.env } : undefined;
+}
+
 /** The refusal for a box that holds no OpenRouter credential at all. */
-export function openRouterBoxCredentialMissing(routeModel: string): OpenRouterBoxCredentialMissingError {
+export function openRouterBoxCredentialMissing(
+  routeModel: string,
+): OpenRouterBoxCredentialMissingError {
   return new OpenRouterBoxCredentialMissingError(
     `[acpx] --model "${routeModel}" is an OpenRouter model, but this box holds no OpenRouter ` +
       `credential: ~/.acpx/providers.json declares no "${OPENROUTER_SOURCE}" entry and ` +
