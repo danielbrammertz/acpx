@@ -1,10 +1,21 @@
-// brick://4271b338 — install the owner reaper FROM THIS FILE, not only from the
-// launcher. This file reaches the real CLI, which spawns `__queue-owner` daemons;
-// `scripts/run-tests.mjs` reaps them via `--import`, but a bare `node --test
-// <file>` — the targeted run our own briefs sanction — passes no preload, so every
-// owner is orphaned to ppid 1 and lives out the PRODUCTION 30-minute idle release
-// while the run reports green. Idempotent beside the preload; enforced by
-// `owner-reaper-coverage.test.ts`.
+// brick://4271b338 — ⚠️ DELIBERATELY INERT HERE. DO NOT DELETE AS DEAD CODE.
+//
+// Every other file carrying this import spawns `__queue-owner` daemons and needs
+// the reaper (a bare `node --test <file>` passes no `--import` preload, so nothing
+// reaps and nothing self-releases). THIS file does not spawn: it only imports the
+// CLI module in-process. The reap here identifies nothing and kills nothing —
+// `identified=0 killed=0` — which is the whole cost of the line.
+//
+// It is here because `owner-reaper-coverage.test.ts` demands the import of every
+// test file that so much as REFERENCES `src/cli.js`, a query deliberately broader
+// than "spawns an owner". The asymmetry is the point: a false positive costs this
+// one inert import, a false negative costs a fleet-visible daemon leak that no test
+// output mentions. Narrowing the guard to "actually spawns" would mean teaching it
+// to recognise spawning — a cleverer guard with a silent failure mode, which is
+// exactly what `install-owner-reaper.ts`'s header warns about.
+//
+// So: if you are here because this line looks pointless, it is. That is recorded,
+// not overlooked. Removing it reds the guard.
 import "./install-owner-reaper.js";
 import assert from "node:assert/strict";
 import test from "node:test";
