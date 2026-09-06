@@ -9,6 +9,7 @@ import {
   harnessRoutesModelViaShim,
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
+  resolveOpenRouterRoute,
   resolveOpenRouterRouteModel,
 } from "../src/acp/openrouter-routing.js";
 import { buildCatalogue } from "../src/models/catalogue.js";
@@ -290,6 +291,79 @@ test("a profile AND a picker-chosen OpenRouter model is refused, naming both acc
       assert.match(error.message, /openrouter-deepseek/);
       assert.match(error.message, /some-vendor\/some-model/);
       assert.match(error.message, /providers\.json/, "the box key must be named, not implied");
+      return true;
+    },
+  );
+});
+
+// ── The DECISION — the composition, not the pieces ───────────────────────────
+
+test("the route decision: profile, picker, none — and the ORDER that decides them", async () => {
+  // ⚠️ THE COMPOSITION IS WHAT MATTERS HERE. Every piece above is individually
+  // correct; what decides whether a picker-chosen model quietly bills the wrong
+  // account is the order the three questions are asked in. That is why the
+  // decision is a pure function rather than four lines inside the client, where
+  // it could only be exercised by spawning an adapter.
+  const options = { catalogue: catalogue() };
+  const model = anOpenRouterId();
+
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model,
+      profileId: undefined,
+      options,
+    }),
+    { kind: "picker", model },
+  );
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model: undefined,
+      profileId: "openrouter-deepseek",
+      options,
+    }),
+    { kind: "profile", profileId: "openrouter-deepseek" },
+    "a profile with no picked model keeps the LEGACY route, unchanged",
+  );
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model: "sonnet",
+      profileId: "  ",
+      options,
+    }),
+    { kind: "none" },
+    "a blank profile id is no profile, and a native alias is no picker route",
+  );
+  // A claude-native model on a profile session still takes the profile route —
+  // today's behaviour, deliberately unchanged (the `--profile X --model sonnet`
+  // silent-ignore wart is pre-existing and filed separately, not fixed here).
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model: "sonnet",
+      profileId: "openrouter-deepseek",
+      options,
+    }),
+    { kind: "profile", profileId: "openrouter-deepseek" },
+  );
+});
+
+test("the decision REFUSES a profile plus a picker-chosen OpenRouter model", async () => {
+  // The case the rejected one-route design could not even see: it would have
+  // returned the profile route here and billed the picked model to the profile's
+  // account, silently. This assertion is the whole reason the model is resolved
+  // BEFORE the profile is honoured.
+  await assert.rejects(
+    resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model: anOpenRouterId(),
+      profileId: "openrouter-deepseek",
+      options: { catalogue: catalogue() },
+    }),
+    (error: Error & { detailCode?: string }) => {
+      assert.equal(error.detailCode, "OPENROUTER_ROUTE_CONFLICT");
       return true;
     },
   );

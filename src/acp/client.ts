@@ -141,10 +141,9 @@ import {
 } from "./jsonrpc.js";
 import { RequestedModelUnsupportedError } from "./model-support.js";
 import {
-  assertNoOpenRouterProfileConflict,
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
-  resolveOpenRouterRouteModel,
+  resolveOpenRouterRoute,
 } from "./openrouter-routing.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import {
@@ -1103,24 +1102,20 @@ export class AcpClient {
       this.reinjectRunningShim(env);
       return;
     }
-    const profileId = this.options.sessionContext?.profileId?.trim();
-    // ⚠️ RESOLVED EVEN WHEN A PROFILE IS SET — that is what makes the conflict
-    // DETECTABLE. Deciding the route on `profileId` first would take the legacy
-    // route and silently bill a picker-chosen model to the profile's account,
-    // which is the billing-decision-by-omission this brick exists to prevent.
-    const routeModel = await resolveOpenRouterRouteModel({
+    // ⚠️ THE DECISION IS `resolveOpenRouterRoute`'s, NOT THIS METHOD'S — it is a
+    // pure function precisely so the ORDER the three questions are asked in can
+    // be tested without spawning an adapter. This method only EXECUTES the answer.
+    const route = await resolveOpenRouterRoute({
       agentCommand: this.options.agentCommand,
       model: this.options.sessionOptions?.model,
+      profileId: this.options.sessionContext?.profileId,
     });
-    if (profileId) {
-      if (routeModel !== undefined) {
-        assertNoOpenRouterProfileConflict({ profileId, routeModel });
-      }
-      await this.startProfileShim(env, profileId);
+    if (route.kind === "profile") {
+      await this.startProfileShim(env, route.profileId);
       return;
     }
-    if (routeModel !== undefined) {
-      await this.startPickerShim(env, routeModel);
+    if (route.kind === "picker") {
+      await this.startPickerShim(env, route.model);
     }
   }
 

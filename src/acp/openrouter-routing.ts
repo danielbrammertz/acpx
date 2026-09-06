@@ -193,6 +193,50 @@ function routeIdFromCatalogue(
   return rows.some((row) => row.source === OPENROUTER_SOURCE) ? id : undefined;
 }
 
+/** Which of the three routes a spawn takes, decided in ONE place. */
+export type OpenRouterRoute =
+  | { kind: "none" }
+  | { kind: "profile"; profileId: string }
+  | { kind: "picker"; model: string };
+
+/**
+ * THE ROUTE DECISION, as a pure function.
+ *
+ * ⚠️ IT EXISTS SEPARATELY FROM `AcpClient.applyProfileEnv` BECAUSE THE COMPOSITION
+ * IS THE LOAD-BEARING PART, and testing the pieces is not testing it. Each half —
+ * "is this an OpenRouter slug", "is there a profile", "refuse both" — is trivially
+ * testable and individually correct; what decides whether a picker-chosen model
+ * quietly bills the wrong account is the ORDER they are asked in. Left inside the
+ * client, that order could only be exercised by spawning an adapter.
+ *
+ * ⚠️ THE MODEL IS RESOLVED EVEN WHEN A PROFILE IS SET, and that is not wasted
+ * work — it is what makes the conflict DETECTABLE. Returning `profile` on the
+ * strength of `profileId` alone would take the legacy route and silently bill a
+ * picker-chosen model to the profile's account: the billing-decision-by-omission
+ * this brick exists to prevent, and the case the rejected one-route design could
+ * not even see.
+ */
+export async function resolveOpenRouterRoute(params: {
+  agentCommand: string | undefined;
+  model: string | undefined;
+  profileId: string | undefined | null;
+  options?: OpenRouterRouteOptions;
+}): Promise<OpenRouterRoute> {
+  const profileId = params.profileId?.trim();
+  const routeModel = await resolveOpenRouterRouteModel({
+    agentCommand: params.agentCommand,
+    model: params.model,
+    ...(params.options ? { options: params.options } : {}),
+  });
+  if (profileId) {
+    if (routeModel !== undefined) {
+      assertNoOpenRouterProfileConflict({ profileId, routeModel });
+    }
+    return { kind: "profile", profileId };
+  }
+  return routeModel === undefined ? { kind: "none" } : { kind: "picker", model: routeModel };
+}
+
 /**
  * Refuse a spawn that names TWO OpenRouter accounts — a profile (its own account,
  * its own budget) and a picker-chosen model (the box key).
