@@ -187,14 +187,22 @@ export function advertisedAfterModelApply(
  * `session/set_config_option`, and hand the refreshed advertisement back.
  *
  * ⚠️ The validation is the load-bearing half, not the send. OpenCode resolves a
- * model against its BUNDLED catalogue and rejects an unknown slug **locally,
- * before any network call** (I1 R6) — so an unvalidated send fails at the
- * adapter with an unusable error (`{"name":"UnknownError"}`, the real cause only
- * in its debug log, I1 "Useless user-facing errors"), and acpx would already
- * have persisted the value. Refusing here means nothing is written and the
- * session stays usable, which is the whole point of D2's fix.
+ * model against ITS OWN catalogue and rejects an unknown slug **locally, without
+ * ever putting the request on the wire to the provider** (I1 R6) — so an
+ * unvalidated send fails at the adapter with an unusable error
+ * (`{"name":"UnknownError"}`, the real cause only in its debug log, I1 "Useless
+ * user-facing errors"), and acpx would already have persisted the value. Refusing
+ * here means nothing is written and the session stays usable, which is the whole
+ * point of D2's fix.
  *
- * An id that is genuinely wanted but not in the bundled catalogue is reached by
+ * ⚠️ **THAT CATALOGUE IS NOT BUNDLED — OpenCode FETCHES IT LIVE from models.dev
+ * at runtime and caches it** (`src/acp/harness-config-dir.ts`,
+ * `composeOverBoxConfig` rule 1). It is the REJECTION that is local, not the
+ * roster's provenance: the set of resolvable ids is a property of the version AND
+ * the moment, and it churns between runs — which is why a row COUNT is not a
+ * valid control for anything measured through it.
+ *
+ * An id that is genuinely wanted but not in that catalogue is reached by
  * PROVISIONING it — `provider.openrouter.models.<id>` in the per-session
  * `opencode.json` — after which it IS advertised and this check passes. The
  * check is therefore not a ceiling on "any OpenRouter model"; it is the thing
@@ -218,7 +226,7 @@ async function applyModelAsConfigOption(
   if (!advertised.has(requestedModel)) {
     throw new RequestedModelUnsupportedError(
       `Cannot apply --model "${requestedModel}": the agent did not advertise that model ` +
-        `(${advertised.size} advertised). This harness resolves models against its own bundled ` +
+        `(${advertised.size} advertised). This harness resolves models against its own ` +
         `catalogue and rejects an unknown id locally, so acpx refuses before persisting one it ` +
         `could never apply. Nothing was written — the session is unchanged.`,
     );

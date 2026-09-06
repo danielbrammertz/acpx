@@ -2082,10 +2082,16 @@ export class AcpClient {
 
   /**
    * ⚠️ VALIDATE BEFORE SENDING. A config-option harness resolves the slug against
-   * its own bundled catalogue and rejects an unknown one LOCALLY, behind an error
+   * its own model catalogue and rejects an unknown one LOCALLY, behind an error
    * that names nothing useful (I1: `{"name":"UnknownError"}`, the real cause only
    * in its debug log). So acpx refuses first and writes nothing — the (b) floor
    * F-9 restored, kept for the case that warrants it.
+   *
+   * ⚠️ **"LOCALLY" IS NOT "FROM A BUNDLED SET".** The one config-option harness
+   * today is opencode, and its catalogue is FETCHED LIVE from models.dev at
+   * runtime and cached — see `src/acp/harness-config-dir.ts`
+   * (`composeOverBoxConfig`, rule 1). What is local is the REJECTION, not the
+   * provenance of the roster it rejects against.
    */
   private assertModelAdvertisedAsConfigOption(modelId: string): void {
     const option = (this.latestConfigOptions ?? []).find((entry) => entry.id === "model");
