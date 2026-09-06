@@ -2873,11 +2873,19 @@ export class AcpClient {
   private async waitForSessionUpdateDrain(idleMs: number, timeoutMs: number): Promise<void> {
     const normalizedIdleMs = Math.max(0, idleMs);
     const normalizedTimeoutMs = Math.max(normalizedIdleMs, timeoutMs);
+    // The budget bounds how long we WAIT, never whether we LOOK. `deadline` is an
+    // absolute instant computed here and re-read below, so any delay in between
+    // spends it before the first completeness check runs — and for a 0ms budget
+    // (the callers that pass `replayDrainTimeoutMs: 0`) a single clock tick is
+    // enough. Testing it at the TOP of the loop therefore made the loop body
+    // conditional on the scheduler: on a loaded box this threw
+    // "…after 0ms" having polled nothing, in ~1ms. Check first, then decide
+    // whether there is budget left to wait for another pass.
     const deadline = Date.now() + normalizedTimeoutMs;
     let lastObserved = this.observedSessionUpdates;
     let idleSince = Date.now();
 
-    while (Date.now() <= deadline) {
+    for (;;) {
       const observed = this.observedSessionUpdates;
       if (observed !== lastObserved) {
         lastObserved = observed;
@@ -2894,12 +2902,16 @@ export class AcpClient {
         }
       }
 
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Timed out waiting for session replay drain after ${normalizedTimeoutMs}ms`,
+        );
+      }
+
       await new Promise<void>((resolve) => {
         setTimeout(resolve, DRAIN_POLL_INTERVAL_MS);
       });
     }
-
-    throw new Error(`Timed out waiting for session replay drain after ${normalizedTimeoutMs}ms`);
   }
 
   async waitForSessionUpdatesIdle(options?: {

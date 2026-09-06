@@ -867,6 +867,51 @@ test("AcpClient loadSessionWithOptions injects the context-window hint into _met
   });
 });
 
+// b1f672ff. The drain's budget is an absolute instant computed at entry and
+// re-read to decide whether to poll; a 0ms budget (what loadSession/forkSession
+// callers pass in these tests) is therefore spent by a single clock tick before
+// the first completeness check ever runs, and the wait fails "after 0ms" having
+// polled nothing. On a loaded box that tick is a scheduler preemption between
+// two adjacent statements — which is why this surfaced only under full-suite
+// load. A clock that advances on every read makes the tick certain, so this is
+// that load condition made deterministic rather than a green-run argument.
+test("AcpClient waitForSessionUpdateDrain looks once before it declares a spent budget (b1f672ff)", async () => {
+  const client = makeClient();
+  const drain = asInternals(client).waitForSessionUpdateDrain;
+  assert.equal(
+    typeof drain,
+    "function",
+    "the drain internal must be reachable, or this test asserts nothing",
+  );
+
+  // `processedSessionUpdates` is read ONLY inside the loop body (never before
+  // it, unlike `observedSessionUpdates`, which seeds `lastObserved`), so this
+  // counts loop passes and not entries into the method.
+  let bodyPasses = 0;
+  const processed = asInternals(client).processedSessionUpdates;
+  Object.defineProperty(client, "processedSessionUpdates", {
+    get: () => {
+      bodyPasses += 1;
+      return processed;
+    },
+    configurable: true,
+  });
+
+  const realNow = Date.now;
+  let tick = 0;
+  Date.now = () => realNow.call(Date) + tick++;
+  try {
+    await drain?.call(client, 0, 0);
+  } finally {
+    Date.now = realNow;
+  }
+
+  assert.ok(
+    bodyPasses > 0,
+    "the drain must poll at least once before it can time out — it returned without looking",
+  );
+});
+
 test("AcpClient createSession injects brick context on the system-prompt channel", async () => {
   const cwd = path.resolve("/tmp/acpx-client-brick-context");
   const client = makeClient({
