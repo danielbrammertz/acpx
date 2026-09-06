@@ -25,6 +25,14 @@
 //     directly, AND checked structurally against `sessions --help` so the CLI
 //     and its own error text cannot drift apart again.
 
+// brick://4271b338 — install the owner reaper FROM THIS FILE, not only from the
+// launcher. This file reaches the real CLI, which spawns `__queue-owner` daemons;
+// `scripts/run-tests.mjs` reaps them via `--import`, but a bare `node --test
+// <file>` — the targeted run our own briefs sanction — passes no preload, so every
+// owner is orphaned to ppid 1 and lives out the PRODUCTION 30-minute idle release
+// while the run reports green. Idempotent beside the preload; enforced by
+// `owner-reaper-coverage.test.ts`.
+import "./install-owner-reaper.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
