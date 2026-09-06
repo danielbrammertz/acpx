@@ -21,7 +21,12 @@
  * never touches the network — it reads the cache or it stands aside.
  */
 
-import { depthMechanismForAgentCommand } from "../acp/harness-capabilities.js";
+import {
+  depthMechanismForAgentCommand,
+  harnessIdForAgentCommand,
+  harnessProvisionsModelCatalogue,
+} from "../acp/harness-capabilities.js";
+import { stripProviderPrefix } from "../acp/harness-config-dir.js";
 import { AcpxOperationalError } from "../errors.js";
 import { findModelsById, loadCatalogue } from "./catalogue.js";
 import { nativeAgentTypesForSource } from "./harness-models.js";
@@ -180,7 +185,77 @@ export type ValidationInput = {
    * form that works today.
    */
   assertBracketAsEffort?: boolean;
+  /**
+   * Set for a harness acpx PROVISIONS the model catalogue for (pi, opencode —
+   * `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR`). It resolves `openrouter/<id>` to
+   * the catalogue row `<id>` FOR THE LOOKUP ONLY.
+   *
+   * ⚠️ WITHOUT IT THE GATE IS BACKWARDS FOR THESE TWO HARNESSES, AND THAT IS THE
+   * WHOLE REASON THIS FLAG EXISTS (brick a5eddb8d §7.2). MEASURED at 11cadc6e
+   * against the real cache: `openrouter/moonshotai/kimi-k2-thinking` — pi's
+   * ACTUAL wire form — is refused `MODEL_SLUG_UNKNOWN`, while the bare
+   * `moonshotai/kimi-k2-thinking` it admits is the form measured to die at apply
+   * with a 502. So admitting pi/opencode to {@link MODEL_VALIDATED_AGENTS}
+   * without this flag would refuse working creates and wave broken ones through.
+   *
+   * ⚠️ IT RESOLVES THE LOOKUP, NEVER THE ID THAT IS SENT. `raw` is untouched, so
+   * every error still names what the caller typed; and
+   * {@link validateSessionModelFlags} returns `undefined` for such a harness so
+   * the flag reaches the spawn byte-identical. Rewriting a bare id INTO the
+   * prefixed form is the picker's `source + "/" + id` trap — correct for pi and
+   * opencode, silently wrong for codex — and is deliberately not done anywhere
+   * here.
+   */
+  provisionsModelCatalogue?: boolean;
 };
+
+/**
+ * Resolve `openrouter/<id>` to the catalogue row `<id>`, for a harness whose
+ * spawn will apply THE SAME STRIP a few milliseconds later.
+ *
+ * The rule is not re-implemented: {@link stripProviderPrefix} is imported from
+ * `src/acp/harness-config-dir.ts`, which is where provisioning uses it
+ * (`:1259-1266` opencode, `:1355-1356` pi). One rule in one place is what stops
+ * the gate and the write from ever disagreeing about the same string.
+ *
+ * Pinning `source` is not cosmetic: an id the caller explicitly prefixed with
+ * `openrouter/` IS a source-qualified reference, and saying so makes
+ * `candidatesFor` narrow to OpenRouter rows exactly as `openrouter:<id>` does.
+ */
+function resolveProvisionedRef(ref: ParsedModelRef): ParsedModelRef {
+  const stripped = stripProviderPrefix(ref.id);
+  if (stripped === ref.id) {
+    return ref;
+  }
+  return { ...ref, source: "openrouter", id: stripped };
+}
+
+/** Parse, then resolve the provider prefix for a provisioning harness. */
+function refForLookup(raw: string, provisionsModelCatalogue: boolean | undefined): ParsedModelRef {
+  const parsed = parseModelRef(raw);
+  return provisionsModelCatalogue === true ? resolveProvisionedRef(parsed) : parsed;
+}
+
+/**
+ * The create path's two mutually-exclusive shapes, in one place so the exclusion
+ * is visible: a provisioning harness gets the prefix resolution and NO effort
+ * ladder; everything else gets the effort and no resolution. `assertBracketAsEffort`
+ * is orthogonal — it follows the depth MECHANISM, not the harness.
+ */
+function validationInputFor(
+  params: { model: string | undefined; reasoningEffort: string | undefined; agentName?: string },
+  provisionsModelCatalogue: boolean,
+  depthFusedIntoId: boolean,
+): ValidationInput {
+  return {
+    model: params.model,
+    agentName: params.agentName,
+    ...(provisionsModelCatalogue
+      ? { provisionsModelCatalogue: true }
+      : { reasoningEffort: params.reasoningEffort }),
+    ...(depthFusedIntoId ? { assertBracketAsEffort: true } : {}),
+  };
+}
 
 /**
  * Returns the resolved model when the catalogue could answer, `null` when it
@@ -196,7 +271,7 @@ export function validateModelSelection(
     return null;
   }
 
-  const ref = parseModelRef(raw);
+  const ref = refForLookup(raw, input.provisionsModelCatalogue);
   const byId = findModelsById(catalogue, ref.id);
   const candidates = candidatesFor(byId, ref, input.agentName);
 
@@ -449,17 +524,60 @@ export async function validateModelSelectionFromCache(
 }
 
 /**
- * The agent names acpx holds a native model list for. Validation is scoped to
- * these, and NOT because they are the interesting ones — because for any other
- * harness (gemini today; opencode and pi tomorrow) acpx cannot tell an unknown
- * slug from one it simply does not enumerate, and rejecting on ignorance would
- * break a create that works today. A harness joins this set when its models
- * join the catalogue.
+ * The agent names acpx holds a NATIVE model list for (`harness-models.ts`).
+ *
+ * ⚠️ THESE ROWS ARE TRANSCRIBED CONSTANTS, AND THE ADVERTISED SET IS PER-SEAT,
+ * NOT PER-VERSION — so this arm catches a typo and an unreachable source, and is
+ * NOT a pre-flight against the advertised list. MEASURED 2026-09-06 by
+ * hp-r3-acpx-hod: at the very `@openai/codex 0.153.3` {@link CODEX_FAMILIES}'
+ * comment cites, the deployed seat advertised 5 families / 25 ids — missing
+ * astra, 5.4-mini and codex-spark, and carrying gpt-5.2 the table does not list.
+ * Disagreement in BOTH directions at one version. No table acpx can hold makes
+ * this arm authoritative; for these three the authority is the wire, and the
+ * honest remedy is the LATE error `assertRequestedModelSupported` already emits
+ * (brick a5eddb8d §5). Do not "repair" the table on the strength of one seat.
  */
-const MODEL_VALIDATED_AGENTS = new Set(["claude", "claude-pty", "codex"]);
+const NATIVE_MODEL_LIST_AGENTS = new Set(["claude", "claude-pty", "codex"]);
 
-export function isModelValidatedAgent(agentName: string | undefined): boolean {
-  return agentName !== undefined && MODEL_VALIDATED_AGENTS.has(agentName);
+/**
+ * Whether acpx can judge a `--model` for this session at all. TWO ARMS, and they
+ * are here for DIFFERENT and unequal reasons — the distinction is the finding of
+ * brick a5eddb8d, so do not collapse them into one list.
+ *
+ * 1. **A native-row harness** ({@link NATIVE_MODEL_LIST_AGENTS}) — judged against
+ *    acpx's transcribed rows, with the per-seat caveat above.
+ * 2. **A harness acpx PROVISIONS the catalogue for** (pi, opencode) — asked of
+ *    the DESCRIPTOR, never of the agent name, because it is the same predicate
+ *    `client.ts:998` routes the provisioning write on.
+ *
+ * ⚠️ ARM 2 IS NOT A WEAKER VERSION OF ARM 1 — IT IS THE ONLY AUTHORITY THERE IS.
+ * For a provisioning harness acpx WRITES the requested id into the harness's own
+ * catalogue before `session/new` (`harness-config-dir.ts:1259-1266` opencode,
+ * `:1355-1356` pi), so the harness advertises whatever was asked for and
+ * `assertRequestedModelSupported` ends up checking acpx's own write. That is why
+ * a bogus id was accepted at create and died only at turn time — the wire check
+ * is structurally incapable of catching it, and deferring to it is not an option.
+ * MEASURED 2026-09-06 at 11cadc6e on the box's real cache: of 430 OpenRouter rows,
+ * 293 carry `availability.pi.ok === true` and 293 `availability.opencode.ok ===
+ * true` (0 for claude / claude-pty / codex), and all 430 carry an entry for each —
+ * so the catalogue does answer for these two, and an empty-map false negative is
+ * excluded.
+ *
+ * Anything acpx does not enumerate (gemini; the raw `--agent` escape hatch)
+ * stands aside: it cannot tell an unknown slug from one it does not know, and
+ * rejecting on ignorance would break a create that works today.
+ *
+ * `agentCommand` is optional so the predicate keeps answering arm 1 for callers
+ * that only hold a name; a caller that omits it simply never gets arm 2.
+ */
+export function isModelValidatedAgent(
+  agentName: string | undefined,
+  agentCommand?: string,
+): boolean {
+  if (agentName !== undefined && NATIVE_MODEL_LIST_AGENTS.has(agentName)) {
+    return true;
+  }
+  return harnessProvisionsModelCatalogue(harnessIdForAgentCommand(agentCommand));
 }
 
 /**
@@ -559,8 +677,25 @@ function assertBracketInLadder(model: CatalogueModel, ref: ParsedModelRef): void
  * Called on the `sessions new` path. Returns the id to actually spawn with —
  * resolved and, where the harness fuses depth into the id, composed. `undefined`
  * means "leave the flag exactly as the caller wrote it", which covers the raw
- * `--agent` escape hatch, a harness acpx does not enumerate, and a cold cache.
- * Throws one of the five shapes (exit 2) otherwise.
+ * `--agent` escape hatch, a harness acpx does not enumerate, a cold cache, and —
+ * since brick a5eddb8d — every harness acpx PROVISIONS the catalogue for.
+ *
+ * ⚠️ A PROVISIONING HARNESS IS VALIDATED AND NEVER SUBSTITUTED, AND THE TWO HALVES
+ * ARE ONE DECISION. `composeEffectiveModelId` returns the catalogue row's `id`,
+ * i.e. the BARE slug — so on pi, whose wire form is `openrouter/<id>`, a caller
+ * who wrote the working prefixed form would have it rewritten into the form
+ * MEASURED to die at apply with a 502. Refusing to substitute is what keeps the
+ * flag byte-identical to what the caller wrote; naming a better form is
+ * `availability.<agent>.modelId`'s job (brick c4da2ff2), and GUESSING one here is
+ * the picker's `source + "/" + id` trap — right for pi and opencode, silently
+ * wrong for codex.
+ *
+ * ⚠️ `--reasoning-effort` is deliberately NOT judged for such a harness. The
+ * OpenRouter row's `depth` ladder comes from the model's `supported_parameters`,
+ * and whether that describes pi's and opencode's depth MECHANISM is unmeasured —
+ * so judging it there could only produce a false refusal on a create that works
+ * today. Named limitation, recorded in brick a5eddb8d §7.3; it is the depth
+ * lane's to close, not a gap to paper over here.
  */
 export async function validateSessionModelFlags(params: {
   agentName: string | undefined;
@@ -572,17 +707,29 @@ export async function validateSessionModelFlags(params: {
   if (params.hasRawAgentOverride) {
     return undefined;
   }
-  if (!isModelValidatedAgent(params.agentName)) {
+  if (!isModelValidatedAgent(params.agentName, params.agentCommand)) {
     return undefined;
   }
+  // Asked of the DESCRIPTOR, never of the agent NAME: it is the same predicate
+  // `client.ts:998` routes the provisioning write on, so the gate and the write
+  // can never disagree about which harnesses this applies to. It also means an
+  // agent command that does not classify stands aside entirely rather than
+  // falling through to the native-row arm and refusing pi's working
+  // `openrouter/<id>` form.
+  const provisionsModelCatalogue = harnessProvisionsModelCatalogue(
+    harnessIdForAgentCommand(params.agentCommand),
+  );
   const depthFusedIntoId = depthMechanismForAgentCommand(params.agentCommand) === "compose-into-id";
+  const resolved = await validateModelSelectionFromCache(
+    validationInputFor(params, provisionsModelCatalogue, depthFusedIntoId),
+  );
+  // VALIDATE, THEN STOP. The refusals above have already run — this returns after
+  // them, never instead of them, so a provisioning harness is fully gated and
+  // merely never has its flag rewritten.
+  if (provisionsModelCatalogue) {
+    return undefined;
+  }
   const ref = params.model?.trim() ? parseModelRef(params.model) : null;
-  const resolved = await validateModelSelectionFromCache({
-    model: params.model,
-    reasoningEffort: params.reasoningEffort,
-    agentName: params.agentName,
-    ...(depthFusedIntoId ? { assertBracketAsEffort: true } : {}),
-  });
   if (resolved === null || ref === null) {
     return undefined;
   }
