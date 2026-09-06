@@ -28,8 +28,18 @@ import {
  *
  * ## Why one mechanism and not three
  *
- * Both new harnesses resolve a model against a **bundled catalogue** and reject
- * an unknown slug **locally, before any network call** (I1 R6, I2 R5). So "any
+ * Both new harnesses resolve a model against **their own model catalogue** and
+ * reject an unknown slug **locally, without ever putting the request on the wire
+ * to the provider** (I1 R6, I2 R5).
+ *
+ * ⚠️ **THE TWO CATALOGUES ARE NOT THE SAME KIND OF ARTIFACT, AND ONLY PI'S IS
+ * BUNDLED.** pi's ships with the package (`@earendil-works/pi-agent-core`);
+ * **OpenCode's is FETCHED LIVE from models.dev at runtime and cached** under
+ * `$XDG_CACHE_HOME/opencode/`, so it carries a network dependency, a cache, and a
+ * row count that moves between runs. The measurement and what reasoning from
+ * "bundled" gets wrong are on {@link composeOverBoxConfig}.
+ *
+ * So "any
  * OpenRouter model" is not free: it requires generating a catalogue fragment
  * into the harness's own config — and that is the same directory the primer
  * already needs, and the same one the model pin goes in. Three requirements,
@@ -1257,8 +1267,11 @@ function writeOpenCodeConfigDir(dir: string, input: HarnessConfigDirInput): Harn
     config.model = input.model;
   }
   if (input.provisionModelId) {
-    // I1 R6: declaring the slug here is what makes an id outside the bundled
-    // models.dev snapshot resolvable at all. Measured: before the declaration
+    // I1 R6: declaring the slug here is what makes an id outside OpenCode's own
+    // models.dev catalogue resolvable at all — a catalogue it FETCHES LIVE at
+    // runtime and caches, NOT a bundled snapshot (`composeOverBoxConfig`, rule 1),
+    // so which ids are "outside" it is a property of the version AND the moment.
+    // Measured: before the declaration
     // OpenCode fails LOCALLY (`ProviderModelNotFoundError … Did you mean:`);
     // after it, the identical request reaches OpenRouter and fails UPSTREAM
     // instead — which is what proves the request was forwarded.

@@ -1013,9 +1013,17 @@ test("importSession accepts a pi archive whose command is the DEPLOYED /opt fork
 // these two exactly as broken. Table-driven so the fifth adapter cannot be
 // forgotten the way pi and opencode were.
 for (const [agentName, expectedAgentCommand, deployedForkCommand] of [
-  ["claude", "npx -y @agentclientprotocol/claude-agent-acp@^0.4.4", "node /opt/claude-agent-acp/dist/index.js"],
+  [
+    "claude",
+    "npx -y @agentclientprotocol/claude-agent-acp@^0.4.4",
+    "node /opt/claude-agent-acp/dist/index.js",
+  ],
   ["codex", "npx -y @agentclientprotocol/codex-acp@^0.0.1", "node /opt/codex-acp/dist/index.js"],
-  ["claude-pty", "npx -y @agentclientprotocol/claude-pty-acp@^0.1.0", "node /opt/claude-pty-acp/dist/index.js"],
+  [
+    "claude-pty",
+    "npx -y @agentclientprotocol/claude-pty-acp@^0.1.0",
+    "node /opt/claude-pty-acp/dist/index.js",
+  ],
   ["opencode", "npx -y opencode-ai@1.18.28 acp", "node /opt/opencode-ai/dist/index.js"],
 ] as const) {
   test(`importSession accepts a ${agentName} archive whose command is the deployed /opt fork path`, async () => {
@@ -1032,7 +1040,10 @@ for (const [agentName, expectedAgentCommand, deployedForkCommand] of [
         name: "debug",
       });
       await writeSessionRecordFile(homeDir, source);
-      await exportSession({ agentName, agentCommand: expectedAgentCommand, cwd, name: "debug" }, archivePath);
+      await exportSession(
+        { agentName, agentCommand: expectedAgentCommand, cwd, name: "debug" },
+        archivePath,
+      );
       await fs.rm(sessionFilePath(homeDir, source.acpxRecordId));
 
       const archive = JSON.parse(await fs.readFile(archivePath, "utf8")) as {

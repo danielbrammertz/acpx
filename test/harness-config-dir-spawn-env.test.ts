@@ -265,12 +265,15 @@ test("the config dir opencode receives is REAL — the files exist where the env
 test("acpx does NOT provision a catalogue entry for a pinned model today", async () => {
   // ⚠️ FOUND AFTER MERGE. The first version passed the pinned model as
   // `provisionModelId` unconditionally, so EVERY opencode session declared
-  // `provider.openrouter.models.<slug>: {}` — including for the 358 models
-  // already in OpenCode's bundled snapshot, which is all acpx can pin today
-  // (`acceptsArbitraryModelIds` is false for opencode).
+  // `provider.openrouter.models.<slug>: {}` — including for the ~358 models
+  // already in OpenCode's own catalogue, which is all acpx can pin today
+  // (`acceptsArbitraryModelIds` is false for opencode). ⚠️ That catalogue is
+  // FETCHED LIVE from models.dev and cached, not bundled, so the count is a
+  // moving baseline (359 → 362 → 361 across three runs minutes apart) and must
+  // never be used as a control — hence the `~`.
   //
   // Declaring an EMPTY config over an EXISTING catalogue entry is unmeasured: if
-  // OpenCode replaces rather than deep-merges, the model loses its bundled
+  // OpenCode replaces rather than deep-merges, the model loses its catalogue
   // metadata INCLUDING its reasoning support — and the `effort` option is
   // advertised from exactly that, so the post-model re-read would find no ladder
   // and depth would silently stop working for every pinned model.
@@ -357,8 +360,11 @@ test("F-8: a spawn with NO sessionContext still gets a UNIQUE dir, never a share
 });
 
 /**
- * An OpenRouter slug no harness ships in its bundled catalogue, so its presence
- * in a written config file can only have come from acpx provisioning it.
+ * An OpenRouter slug no harness's own model catalogue carries, so its presence in
+ * a written config file can only have come from acpx provisioning it. (Neither
+ * catalogue is a fixed set: pi's is bundled but box-overlaid, and OpenCode's is
+ * fetched live from models.dev and churns — which is why the slug is a nonsense
+ * one rather than merely an unpopular real id.)
  */
 const PROVISIONED_SLUG = "openrouter/zzz-acpx-cba6fa92/routing-probe";
 

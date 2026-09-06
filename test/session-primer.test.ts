@@ -508,7 +508,11 @@ test("createSession (claude): the brick block STILL rides the stream leg after t
       const append = systemPromptAppend(captured.newSessionMeta) ?? "";
       // Positive control on the same path: without the primer marker this row
       // measured nothing and its brick assertion would be vacuous.
-      assert.match(append, /PRIMER-STREAM/, "the agents.md render is missing — this row is NOT RUN");
+      assert.match(
+        append,
+        /PRIMER-STREAM/,
+        "the agents.md render is missing — this row is NOT RUN",
+      );
       assert.match(append, /STREAM-BRICK-BLOCK/, "the brick block was MOVED off the stream leg");
       assert.ok(
         append.indexOf("PRIMER-STREAM") < append.indexOf("STREAM-BRICK-BLOCK"),
@@ -562,6 +566,9 @@ test("968519c3: every harness carries its primer on EXACTLY ONE channel — stre
   const streamCount = HARNESS_IDS.filter((id) => routing[id].stream !== "none").length;
   const configDirCount = HARNESS_IDS.filter((id) => routing[id].declared === "config-file").length;
   assert.ok(streamCount > 0, "no harness routes to the stream leg — the table is degenerate");
-  assert.ok(configDirCount > 0, "no harness routes to the config-dir leg — the table is degenerate");
+  assert.ok(
+    configDirCount > 0,
+    "no harness routes to the config-dir leg — the table is degenerate",
+  );
   assert.equal(streamCount + configDirCount, HARNESS_IDS.length);
 });

@@ -104,7 +104,7 @@ test("an unadvertised model is REFUSED before anything is sent (D2 cannot return
       await applyRequestedModelIfAdvertised({
         client,
         sessionId: "ses_1",
-        requestedModel: "openrouter/not-in-the-bundled-catalogue",
+        requestedModel: "openrouter/not-in-the-catalogue",
         models: undefined,
         advertisedConfigOptions: [MODEL_OPTION],
         agentCommand: AGENT_REGISTRY.opencode,
