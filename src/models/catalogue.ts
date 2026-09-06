@@ -274,6 +274,16 @@ function available(model: CatalogueModel, capability: AvailabilityCapability): A
  *   anything else → `acpx-not-wired`      — the harness CAN reach arbitrary
  *                   models; acpx is what is missing. A shipping target, not a
  *                   property of the harness.
+ *
+ * ## ⚠️ `acpx-not-wired` IS EXPECTED TO BECOME UNREACHABLE FOR CLAUDE
+ *
+ * When **007eaac8** wires the picker→shim path, claude's OpenRouter rows go
+ * `ok: true` and this branch stops firing for it. **That is the intended end
+ * state, and it is why the reason must never be described to anyone as a lasting
+ * property of claude** — it describes the pre-routing state, and it stays
+ * correct for any future `via-shim` harness that arrives unrouted. Keyed on the
+ * kind, that transition needs no edit here: it is the same self-correction
+ * opencode's answer already made when its routing landed.
  */
 function arbitraryModelDenial(capability: AvailabilityCapability): AgentAvailability {
   if (capability.arbitraryModelSupport === "none") {

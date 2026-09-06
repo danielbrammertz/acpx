@@ -1,11 +1,24 @@
 /**
- * The WIRE ID — the string a caller must actually send as `--model` /
- * `sessionOptions.model` so that a given harness accepts a given catalogue row.
+ * **THE ID THAT DETERMINES WHICH MODEL SERVES THE SESSION** — the string a
+ * caller sends as `--model` / `sessionOptions.model` for a given catalogue row
+ * on a given harness.
  *
  * Brick c4da2ff2 problem 1: acpx-ui's picker was sending the catalogue row's
  * `id` (`qwen/qwen3.8-max-0902`) to a harness that advertises
  * `openrouter/qwen/qwen3.8-max-0902`, and the user saw their own model listed as
  * available inside the refusal.
+ *
+ * ## ⚠️ ON THE NAME — the DEFINITION is authoritative, not the word "wire"
+ *
+ * This module was written when the id a caller sends and the id on the ACP wire
+ * were the same thing on every route acpx had, so "wire id" named it exactly.
+ * They **diverge on claude via the OpenRouter shim** (brick 007eaac8): the
+ * **slug** determines the served model, while the id going to the adapter stays
+ * a **claude alias**. The field's answer there is the slug — the alias is an
+ * implementation detail of the shim route. **Where the two disagree, follow
+ * "determines which model serves", not the filename.** (Ruled by the acpx lead,
+ * 2026-09-06; the name is kept only so the import path stays stable for the
+ * lane building that route.)
  *
  * ## Why this is per-(MODEL, AGENT) and cannot live on the model
  *

@@ -96,8 +96,25 @@ export type AgentAvailability = {
   reason?: string;
   message?: string;
   /**
-   * **The WIRE ID — what a caller must actually send as `--model` /
-   * `sessionOptions.model` for THIS model on THIS agent type.**
+   * **THE ID THAT DETERMINES WHICH MODEL SERVES THE SESSION** — what a caller
+   * sends as `--model` / `sessionOptions.model` for THIS model on THIS agent
+   * type.
+   *
+   * ⚠️ **THE DEFINITION IS "DETERMINES WHICH MODEL SERVES", NOT "THE STRING SENT
+   * ON THE ACP WIRE", AND THE DIFFERENCE IS NOT PEDANTRY.** This field was first
+   * derived as the wire id, which was correct for the five seats it was measured
+   * on — and stops being well-formed the moment a route exists where the two
+   * diverge. On **claude via the OpenRouter shim** they do: the picker's **slug**
+   * is what selects the model, while the id travelling the ACP wire to the
+   * adapter stays a **claude alias** (the adapter must accept one; the shim
+   * rewrites the outbound model regardless). Read as "the wire id" that seat has
+   * TWO answers; read as this, it has one — **the slug** — because the alias is
+   * an implementation detail of the shim route.
+   *
+   * The two coincide on four routes and diverge on one. **A definition that only
+   * holds for the seats that existed when it was written** is exactly the class
+   * of comment this wording replaces. (Ruled by the acpx lead 2026-09-06 on L7's
+   * finding; bricks c4da2ff2 / 007eaac8.)
    *
    * Present IFF {@link ok}. The invariant is structural, the same
    * null-when-the-boolean-is-true rule the harness descriptor's reasons follow:
