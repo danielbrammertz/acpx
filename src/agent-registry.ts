@@ -127,17 +127,21 @@ export function resolvePiAcpCommand(
     : `npx pi-acp@${ACP_ADAPTER_PACKAGE_RANGES.pi}`;
 }
 
+const CODEX_ACP_FORK_COMMAND = `node /opt/codex-acp/dist/index.js`;
+const CLAUDE_ACP_FORK_COMMAND = `node /opt/claude-agent-acp/dist/index.js`;
+const CLAUDE_PTY_ACP_FORK_COMMAND = `node /opt/claude-pty-acp/dist/index.js`;
+
 export const AGENT_REGISTRY: Record<string, string> = {
   pi: resolvePiAcpCommand(),
   openclaw: "openclaw acp",
-  codex: process.env.ACPX_CODEX_ACP_COMMAND || `node /opt/codex-acp/dist/index.js`,
-  claude: process.env.ACPX_CLAUDE_ACP_COMMAND || `node /opt/claude-agent-acp/dist/index.js`,
+  codex: process.env.ACPX_CODEX_ACP_COMMAND || CODEX_ACP_FORK_COMMAND,
+  claude: process.env.ACPX_CLAUDE_ACP_COMMAND || CLAUDE_ACP_FORK_COMMAND,
   gemini: "gemini --acp",
   cursor: "cursor-agent acp",
   copilot: "copilot --acp --stdio",
   // Same built /opt-fork env-seam pattern as claude/codex; alphabetical-tail
   // position per the listBuiltInAgents ordering convention.
-  "claude-pty": process.env.ACPX_CLAUDE_PTY_ACP_COMMAND || `node /opt/claude-pty-acp/dist/index.js`,
+  "claude-pty": process.env.ACPX_CLAUDE_PTY_ACP_COMMAND || CLAUDE_PTY_ACP_FORK_COMMAND,
   droid: "droid exec --output-format acp",
   iflow: "iflow --experimental-acp",
   kilocode: "npx -y @kilocode/cli acp",
@@ -147,6 +151,79 @@ export const AGENT_REGISTRY: Record<string, string> = {
   qoder: "qodercli --acp",
   qwen: "qwen --acp",
   trae: "traecli acp serve",
+};
+
+/**
+ * The commands acpx SHIPS for the agents whose {@link AGENT_REGISTRY} entry is
+ * not a constant — every form each can resolve to, with both the env seam and
+ * the box probe at their defaults.
+ *
+ * ## ⚠️ WHY THIS EXISTS, AND WHAT IT COSTS TO NOT HAVE IT (brick 82a18653)
+ *
+ * `AGENT_REGISTRY` is a SNAPSHOT of what THIS box resolves at import, and for
+ * `pi` that snapshot flips the moment a box builds `/opt/pi-acp`. Two assertions
+ * — the pin-table row in `test/adapter-version-pins.test.ts` and the anti-drift
+ * row in `test/harness-measurement-citations.test.ts` — read the snapshot as if
+ * it were the registry's whole behaviour. They therefore passed on all five
+ * boxes on 2026-09-05 and failed on all five on 2026-09-06, with nothing about
+ * the registry, the pin table or the citations having changed: the bootstrap
+ * rolled out `/opt/pi-acp`, and the tests were measuring the box.
+ *
+ * **A rule that must hold FLEET-WIDE cannot be computed from one box's
+ * resolution**, and the repair is not to skip on box state — a test that passes
+ * by not looking would re-hide the drift those rows exist to catch. It is to
+ * check every form the registry CAN launch, which is what this table names.
+ *
+ * ⚠️ The env seam (`ACPX_PI_ACP_COMMAND`, `ACPX_CODEX_ACP_COMMAND`, …) is
+ * deliberately EXCLUDED here: it is an operator escape hatch pointing acpx at
+ * something acpx does not ship, so it is not a form the shipped pin table or the
+ * shipped citations can be expected to describe. `AGENT_REGISTRY` still honours
+ * it, and `listAgentLaunchForms` reports it — see there.
+ */
+const BUILT_IN_LAUNCH_FORMS: Record<string, readonly string[]> = {
+  // Both arms of the resolver, derived from it rather than restated, so a change
+  // to either arm cannot leave this table describing the old one.
+  pi: [resolvePiAcpCommand({}, () => true), resolvePiAcpCommand({}, () => false)],
+  codex: [CODEX_ACP_FORK_COMMAND],
+  claude: [CLAUDE_ACP_FORK_COMMAND],
+  "claude-pty": [CLAUDE_PTY_ACP_FORK_COMMAND],
+};
+
+/**
+ * Every command the built-in registry can launch `agentName` with, **on any
+ * box** — box-independent and env-independent by construction, so a check
+ * written against it holds fleet-wide.
+ *
+ * Returns `[]` for an agent the registry does not know.
+ *
+ * ⚠️ **This is what acpx SHIPS, which is not always what this box RUNS.** An
+ * `ACPX_*_ACP_COMMAND` override replaces the shipped command at runtime and is
+ * not listed here; `agentCommandEnvSeam` names the variable that does it, and
+ * `test/agent-registry.test.ts` pins that `AGENT_REGISTRY` never resolves to
+ * anything outside `listAgentLaunchForms(agent) ∪ {that override}` — the control
+ * that keeps this enumeration answerable to the live box rather than merely
+ * self-consistent.
+ */
+export function listAgentLaunchForms(agentName: string): string[] {
+  const normalized = normalizeAgentName(agentName);
+  const builtIn = BUILT_IN_LAUNCH_FORMS[normalized];
+  if (builtIn) {
+    return [...new Set(builtIn)];
+  }
+  const snapshot = AGENT_REGISTRY[normalized];
+  return snapshot === undefined ? [] : [snapshot];
+}
+
+/** The env var that replaces `agentName`'s shipped command, where one exists. */
+export function agentCommandEnvSeam(agentName: string): string | undefined {
+  return AGENT_COMMAND_ENV_SEAMS[normalizeAgentName(agentName)];
+}
+
+const AGENT_COMMAND_ENV_SEAMS: Record<string, string> = {
+  pi: "ACPX_PI_ACP_COMMAND",
+  codex: "ACPX_CODEX_ACP_COMMAND",
+  claude: "ACPX_CLAUDE_ACP_COMMAND",
+  "claude-pty": "ACPX_CLAUDE_PTY_ACP_COMMAND",
 };
 
 // `claude`, `codex`, and `claude-pty` are intentionally absent here. Their
