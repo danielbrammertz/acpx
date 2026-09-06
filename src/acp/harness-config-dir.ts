@@ -1573,8 +1573,16 @@ function jsonlSessionDirectoryName(cwd: string): string {
  * prefixed form as the key produces `provider.openrouter.models.openrouter/…`,
  * which the harness never looks up — and the failure is a local "model not
  * found" that reads exactly like the un-provisioned case it was meant to fix.
+ *
+ * ⚠️ EXPORTED SO THE CREATE-TIME `--model` PRE-FLIGHT CAN ASK THE SAME QUESTION
+ * (brick a5eddb8d). `validateSessionModelFlags` must resolve `openrouter/<id>`
+ * to the catalogue row `<id>` before looking it up, and that resolution has to be
+ * THE SAME RULE the provisioning write applies to the same string a few
+ * milliseconds later — otherwise the gate refuses ids the spawn would have
+ * provisioned fine, or admits ones it would not. Re-implementing it there is what
+ * would let the two drift; importing it is what makes them one fact.
  */
-function stripProviderPrefix(modelId: string): string {
+export function stripProviderPrefix(modelId: string): string {
   const trimmed = modelId.trim();
   return trimmed.startsWith("openrouter/") ? trimmed.slice("openrouter/".length) : trimmed;
 }

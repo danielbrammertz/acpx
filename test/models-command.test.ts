@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { listHarnessCapabilities } from "../src/acp/harness-capabilities.js";
 import { buildCatalogue } from "../src/models/catalogue.js";
 import {
   composeEffectiveModelId,
+  isModelValidatedAgent,
   ModelSlugError,
   parseModelRef,
   validateModelSelection,
@@ -499,6 +501,217 @@ test("validation is skipped for the raw --agent escape hatch and for unenumerate
     }),
     undefined,
   );
+});
+
+// ── brick a5eddb8d: the create-time pre-flight for PROVISIONING harnesses ─────
+//
+// For pi and opencode acpx WRITES the requested id into the harness's own
+// catalogue before `session/new` (`client.ts:998` → `harness-config-dir.ts`
+// `:1259-1266` / `:1355-1356`), so the harness advertises whatever was asked for
+// and the wire check ends up validating acpx's own write. The cached OpenRouter
+// catalogue is therefore not a proxy for the advertised list — it is the only
+// authority, and this is the only place the question can be asked.
+
+/** Both launch forms, so the tests never depend on whether `/opt/pi-acp` exists on the box. */
+const PI_COMMAND = "node /opt/pi-acp/dist/index.js";
+const PI_COMMANDS = [PI_COMMAND, "npx pi-acp@^0.0.33"];
+const OPENCODE_COMMAND = "npx -y opencode-ai@1.18.28 acp";
+
+test("a provisioning harness resolves `openrouter/<id>` FOR THE LOOKUP — the form that actually works", () => {
+  // ⚠️ THE REGRESSION THIS PINS. pi's wire form is `openrouter/<id>`. Without the
+  // resolution, admitting pi to the gate REFUSES that form `MODEL_SLUG_UNKNOWN`
+  // while admitting the bare id measured to die at apply with a 502 — i.e. the
+  // gate would be exactly backwards for the harness it was added for.
+  const catalogue = catalogueWith();
+  const resolved = validateModelSelection(catalogue, {
+    model: "openrouter/moonshotai/kimi-k3",
+    agentName: "pi",
+    provisionsModelCatalogue: true,
+  });
+  assert.equal(resolved?.key, "openrouter:moonshotai/kimi-k3");
+  // The bare form still resolves too — the flag widens what is admitted, never narrows it.
+  assert.equal(
+    validateModelSelection(catalogue, {
+      model: "moonshotai/kimi-k3",
+      agentName: "pi",
+      provisionsModelCatalogue: true,
+    })?.key,
+    "openrouter:moonshotai/kimi-k3",
+  );
+  // POSITIVE CONTROL for the flag itself: WITHOUT it the prefixed form is refused,
+  // so the assertion above cannot be passing for some unrelated reason.
+  const withoutFlag = caught(() =>
+    validateModelSelection(catalogue, { model: "openrouter/moonshotai/kimi-k3", agentName: "pi" }),
+  );
+  assert.equal(withoutFlag.detailCode, "MODEL_SLUG_UNKNOWN");
+});
+
+test("a bogus slug is REFUSED in BOTH forms — the residual brick a5eddb8d was filed for", () => {
+  const catalogue = catalogueWith();
+  for (const model of ["deepseek/zzq7-nope", "openrouter/deepseek/zzq7-nope"]) {
+    const error = caught(() =>
+      validateModelSelection(catalogue, {
+        model,
+        agentName: "pi",
+        provisionsModelCatalogue: true,
+      }),
+    );
+    assert.equal(error.detailCode, "MODEL_SLUG_UNKNOWN", model);
+    // The refusal names WHAT THE CALLER TYPED, not the resolved lookup id — `raw`
+    // is deliberately untouched by the resolution.
+    assert.ok(error.message.includes(`"${model}"`), error.message);
+    assert.match(error.message, /acpx models --search/);
+  }
+});
+
+test("the `openrouter/` resolution is gated on the DESCRIPTOR — codex is untouched by it", () => {
+  // The charter's trap in the other direction: `source + "/" + id` is right for pi
+  // and opencode and silently WRONG for codex, whose ids are bare `family[effort]`.
+  // Nothing here may leak into a non-provisioning harness.
+  const error = caught(() =>
+    validateModelSelection(catalogueWith(), {
+      model: "openrouter/moonshotai/kimi-k3",
+      agentName: "codex",
+    }),
+  );
+  assert.equal(error.detailCode, "MODEL_SLUG_UNKNOWN");
+});
+
+test("a provisioning harness is VALIDATED but NEVER SUBSTITUTED — the flag reaches the spawn verbatim", async () => {
+  // `composeEffectiveModelId` returns the catalogue row's BARE id, so substituting
+  // would rewrite pi's working `openrouter/<id>` into the form that 502s. The
+  // create path must hand the spawn exactly what the caller wrote; naming a better
+  // form is `availability.<agent>.modelId`'s job (brick c4da2ff2), and GUESSING one
+  // here is the picker's `source + "/" + id` trap.
+  const home = stateHome(); // seeds a cache holding moonshotai/kimi-k3
+  const previous = process.env.ACPX_STATE_HOME;
+  process.env.ACPX_STATE_HOME = home;
+  try {
+    for (const agentCommand of [...PI_COMMANDS, OPENCODE_COMMAND]) {
+      for (const model of ["moonshotai/kimi-k3", "openrouter/moonshotai/kimi-k3"]) {
+        assert.equal(
+          await validateSessionModelFlags({
+            agentName: agentCommand === OPENCODE_COMMAND ? "opencode" : "pi",
+            agentCommand,
+            hasRawAgentOverride: false,
+            model,
+            reasoningEffort: undefined,
+          }),
+          undefined,
+          `${agentCommand} / ${model} must be left verbatim`,
+        );
+      }
+      // POSITIVE CONTROL on the very same call shape: a bogus id DOES throw, so the
+      // `undefined`s above are a decision to leave the flag alone, not a no-op gate.
+      await assert.rejects(
+        validateSessionModelFlags({
+          agentName: agentCommand === OPENCODE_COMMAND ? "opencode" : "pi",
+          agentCommand,
+          hasRawAgentOverride: false,
+          model: "deepseek/zzq7-nope",
+          reasoningEffort: undefined,
+        }),
+        (error: unknown) =>
+          error instanceof ModelSlugError && error.detailCode === "MODEL_SLUG_UNKNOWN",
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACPX_STATE_HOME;
+    } else {
+      process.env.ACPX_STATE_HOME = previous;
+    }
+  }
+});
+
+test("`--reasoning-effort` is NOT judged for a provisioning harness", async () => {
+  // The OpenRouter row's ladder comes from its `supported_parameters`; whether that
+  // describes pi's and opencode's depth MECHANISM is UNMEASURED, so judging it there
+  // could only produce a false refusal on a create that works today. Named limitation
+  // (brick a5eddb8d §7.3), pinned so it cannot be silently "tidied" into a refusal.
+  const home = stateHome();
+  const previous = process.env.ACPX_STATE_HOME;
+  process.env.ACPX_STATE_HOME = home;
+  try {
+    assert.equal(
+      await validateSessionModelFlags({
+        agentName: "pi",
+        agentCommand: PI_COMMAND,
+        hasRawAgentOverride: false,
+        model: "moonshotai/kimi-k3",
+        // `medium` is NOT on kimi-k3's ladder (low, high, max) — a native-row harness
+        // would refuse this, and the CONTROL below shows the ladder check is live.
+        reasoningEffort: "medium",
+      }),
+      undefined,
+    );
+    // CONTROL — the same effort against the same row IS refused when the harness is
+    // not a provisioning one, so the pass above is the gate standing down on purpose
+    // rather than the ladder check being absent.
+    const error = caught(() =>
+      validateModelSelection(catalogueWith(), {
+        model: "moonshotai/kimi-k3",
+        reasoningEffort: "medium",
+      }),
+    );
+    assert.equal(error.detailCode, "MODEL_EFFORT_OUT_OF_LADDER");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACPX_STATE_HOME;
+    } else {
+      process.env.ACPX_STATE_HOME = previous;
+    }
+  }
+});
+
+test("a cold cache still stands aside for a provisioning harness — a create is never blocked on a fetch", async () => {
+  // C4 §7.1 option 3, unchanged: with no OpenRouter rows acpx cannot tell an unknown
+  // slug from one it has not fetched. Extending the gate must not turn a cold cache
+  // into a refused create.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acpx-preflight-cold-"));
+  const previous = process.env.ACPX_STATE_HOME;
+  process.env.ACPX_STATE_HOME = dir;
+  try {
+    assert.equal(
+      await validateSessionModelFlags({
+        agentName: "pi",
+        agentCommand: PI_COMMAND,
+        hasRawAgentOverride: false,
+        model: "deepseek/zzq7-nope",
+        reasoningEffort: undefined,
+      }),
+      undefined,
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACPX_STATE_HOME;
+    } else {
+      process.env.ACPX_STATE_HOME = previous;
+    }
+  }
+});
+
+test("the validated set is PINNED against the capability table — a new harness forces a decision here", () => {
+  // Two arms, two reasons, deliberately not one list (brick a5eddb8d):
+  //   native-row harnesses  — judged against acpx's TRANSCRIBED rows, which the
+  //                           per-seat measurement shows are NOT authoritative;
+  //   provisioning harnesses — judged against the catalogue, which for them IS the
+  //                           only authority, asked of the DESCRIPTOR not the name.
+  // Adding a harness must therefore come with the measurement saying which arm it
+  // belongs to. This assertion is what makes that a decision instead of a default.
+  const known = listHarnessCapabilities().map((harness) => harness.id);
+  assert.deepEqual(
+    known.filter((id) => !isModelValidatedAgent(id)).toSorted(),
+    ["opencode", "pi"],
+    "a harness acpx classifies is either native-row-validated by NAME or provisioning-validated by COMMAND",
+  );
+  // …and the two that are not validated by name ARE validated once their command is
+  // given, so no harness in the table is left ungated.
+  for (const agentCommand of [...PI_COMMANDS, OPENCODE_COMMAND]) {
+    assert.equal(isModelValidatedAgent(undefined, agentCommand), true, agentCommand);
+  }
+  // NEGATIVE CONTROL: a command the descriptor does not classify stays ungated.
+  assert.equal(isModelValidatedAgent(undefined, "gemini --acp"), false);
 });
 
 // ── The CLI itself, against the built artifact ───────────────────────────────
