@@ -515,30 +515,55 @@ export type HarnessAdapterIdentity =
  * The nativai `pi-acp` FORK's build record — the identity of the adapter five of
  * pi's cells were actually proven on (brick ef5999ca / B5).
  *
- * ⚠️ **THE FORK IS DEPLOYED, AND THIS RECORD DELIBERATELY DOES NOT NAME THE
- * DEPLOYED BUILD.** The `e50f051` bootstrap built it onto the fleet on 2026-09-06
- * (brick 82a18653 records the five-box read); measured on devbox
- * 2026-09-06T23:00Z, `/opt/pi-acp/dist/index.js` exists and `info.json` resolves
- * `pi-acp` to **`af431c6e`** — which is the CHILD of the `eb17203` cited below.
+ * ## ⚠️ ADVANCED `eb17203` → `af431c6` ONLY AFTER RE-MEASURING (brick 71ec9e54)
  *
- * ⇒ The five cells are still cited by BUILD RECORD, and deliberately: they were
- * proven on `eb17203`, and **nobody has re-run them on `af431c6e`.** Advancing
- * this constant to the deployed commit would convert a measurement into an
- * assumption — the exact move this field exists to prevent — so it names what was
- * measured and this note names the gap. Commit plus the entry file's sha256 is
- * what ruling v3 prescribes, and it is what a version string cannot do here:
- * **the fork's `package.json` says `0.0.33`, identical to upstream's.**
+ * The `e50f051` bootstrap built the fork onto the fleet on 2026-09-06 and the
+ * deployed commit moved one ahead of the cited one, so this constant went stale
+ * **by an act of ours, with nothing reporting it.** It was NOT simply bumped:
+ * advancing a citation to a commit nobody measured produces a stale claim wearing
+ * a fresh SHA, which is strictly worse than an honestly out-of-date one — the
+ * exact move this field exists to prevent.
  *
- * That the fork needs its own citation at all is unchanged and now structural:
- * pi has TWO reachable launch forms, so **the block names the npx fallback and
- * these cells name the build the claims were proven on** — different builds, both
- * cited (brick 82a18653).
+ * **What was measured, on devbox 2026-09-06T23:2xZ, against the DEPLOYED
+ * artifact** (`/opt/pi-acp` → `/workspace/.runtime/pi-acp`, `info.json` `pi-acp`
+ * = `af431c6e`, repo `HEAD` agreeing, worktree clean, entry sha256
+ * `711536aac8a9939e…`):
+ *
+ * 1. **The delta is ONE commit** (`af431c6`, "surface pi's turn error instead of
+ *    reporting a silent empty end_turn"), touching `src/acp/agent.ts` and
+ *    `src/acp/session.ts` only. Of its **72 changed source lines, ZERO** mention
+ *    `session/set_model`, `session/fork`, `forkAtMessageIndex`, `usage_update` or
+ *    `servedEffort` — with `turnError` firing on 14 of them as the control that
+ *    the check can find a term at all. The single overlap is cosmetic:
+ *    `piUsageToAcp(session.takeTurnUsage())` is spread **identically**, the return
+ *    statement merely reformatted to append an optional `_meta.piAcp.turnError`.
+ * 2. **At the WIRE**, against the deployed binary in an isolated `HOME`:
+ *    `session/set_model` → `-32602` (dispatched, "Unknown sessionId"),
+ *    `session/fork` → `-32602` (dispatched, zod on `cwd`), and the **control**
+ *    `session/definitely_not_a_method` → **`-32601` Method not found** on the same
+ *    connection. `-32601` is precisely upstream's answer to the first two, so the
+ *    discriminator is shown able to fire.
+ *
+ * ⇒ **No cell's answer differs at `af431c6`.** `model.mechanism` and
+ * `fork.supported` are re-measured at the wire; `fork.atIndex` and
+ * `usageReporting` rest on (1) — exhaustive over the delta, but **source tier, not
+ * wire**: re-proving them needs real turns and a credential, which was not minted.
+ * That limit is the honest scope of this bump.
+ *
+ * Commit plus the entry file's sha256 is what ruling v3 prescribes, and it is what
+ * a version string cannot do here: **the fork's `package.json` says `0.0.33`,
+ * identical to upstream's.**
+ *
+ * That the fork needs its own citation at all is structural: pi has TWO reachable
+ * launch forms, so **the block names the npx fallback and these cells name the
+ * build the claims were proven on** — different builds, both cited (brick
+ * 82a18653).
  */
 const PI_FORK_BUILD: HarnessAdapterIdentity = {
   kind: "resolved-commit",
   spec: "nativai/pi-acp fork (publishes 0.0.33, indistinguishable from upstream by version)",
-  commit: "eb17203",
-  entrySha256: "e296b0705630ffe1",
+  commit: "af431c6",
+  entrySha256: "711536aac8a9939e",
 };
 
 /** Where a harness block's claims come from, and how to re-derive it. */
@@ -1352,8 +1377,9 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       // wording gave a different reason ("no box installs the fork today"), and
       // that reason expired on 2026-09-06 when the bootstrap put `/opt/pi-acp` on
       // all five boxes; the citation did not, because a deployment does not
-      // re-prove anything. See PI_FORK_BUILD for the one-commit gap between what
-      // was measured and what is deployed (brick 82a18653).
+      // re-prove anything. It was re-measured against the deployed `af431c6` and
+      // advanced there — see PI_FORK_BUILD for what was measured at the wire and
+      // what rests on the delta alone (bricks 82a18653, 71ec9e54).
       cellOverrides: {
         "model.mechanism": PI_FORK_BUILD,
         "fork.supported": PI_FORK_BUILD,
