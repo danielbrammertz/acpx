@@ -237,24 +237,45 @@ test("SHAPE 4 — and the same in the other direction, which is what the deleted
 test("SHAPE 5 — an OpenRouter row is refused for an agent that cannot take an arbitrary id", () => {
   // MEASURED P1: `--model z-ai/glm-5.3` on claude reached the adapter and came
   // back as `-32603 Internal error`, "not a recognized model id. Run /model…".
+  //
+  // ⚠️ THE EXEMPLAR MOVED FROM `claude` TO `codex`, AND THE SHAPE IS UNCHANGED
+  // (brick 007eaac8). claude was the specimen this refusal was measured on, but
+  // its `via-shim` support is now ROUTED, so an OpenRouter row is genuinely
+  // available to it — see the row below, which is this test's other half. codex
+  // is `none`: its backend is fixed by design and permanently unroutable, so it
+  // is the exemplar that cannot go stale the next time a harness is wired.
   const error = caught(() =>
     validateModelSelection(catalogueWith(), {
       model: "moonshotai/kimi-k3",
-      agentName: "claude",
+      agentName: "codex",
     }),
   );
   assert.equal(error.outputCode, "USAGE");
   assert.equal(error.detailCode, "MODEL_NOT_AVAILABLE_FOR_AGENT");
-  // ⚠️ THE WORDING CHANGED ON PURPOSE (2026-09-06, brick c4da2ff2). It used to
-  // read "claude sessions cannot be created with an arbitrary model id" — which
-  // was FALSE about claude: its `arbitraryModelSupport` is `via-shim`, the shim
-  // and the `openrouter-deepseek [claude/openrouter]` profile both exist, and
-  // what is missing is acpx's own picker→shim wiring. The refusal now names OUR
-  // gap instead of asserting a property of claude's backend. Asserted on the
-  // stable half of the sentence — that the user is told acpx is what is missing,
-  // and where to look — rather than on prose that should be free to improve.
-  assert.match(error.message, /acpx does not yet/);
-  assert.match(error.message, /acpx models --agent claude/);
+  // ⚠️ COMBINE RESOLUTION (batch W2): L1 (brick c4da2ff2) re-pointed this row's
+  // assertions because the old wording — "claude sessions cannot be created with
+  // an arbitrary model id" — was FALSE about claude; L7 (brick 007eaac8) moved
+  // the EXEMPLAR to codex for the same underlying reason and routed claude. Both
+  // intents survive here: the refusal is asserted on `codex`, which is
+  // `arbitraryModelSupport: "none"` and permanently unroutable, so the phrase is
+  // TRUE of its subject; and claude's side is asserted in the accepting row
+  // below rather than as a refusal. Nothing here asserts the claude wording L1
+  // removed.
+  assert.match(error.message, /arbitrary model id/);
+  assert.match(error.message, /acpx models --agent codex/);
+});
+
+test("SHAPE 5's other half — claude now ACCEPTS an OpenRouter row, because via-shim is routed", () => {
+  // Daniel's founding item 6, asserted where its refusal used to live: the same
+  // call that threw `MODEL_NOT_AVAILABLE_FOR_AGENT` above now returns the row.
+  // Keeping the two rows adjacent is deliberate — a reader who finds only the
+  // refusal would conclude the band is still locked for every harness.
+  const resolved = validateModelSelection(catalogueWith(), {
+    model: "moonshotai/kimi-k3",
+    agentName: "claude",
+  });
+  assert.equal(resolved?.source, "openrouter");
+  assert.equal(resolved?.id, "moonshotai/kimi-k3");
 });
 
 test("SHAPE 5 — a row the CATALOGUE blocks is refused with the catalogue's own reason", () => {

@@ -102,6 +102,7 @@ import {
   effectiveAccountMetadataFromEnv,
   readEnvCredential,
   resolveConfiguredAuthCredential,
+  startOpenRouterShimForSession,
   type EffectiveAccountMetadata,
 } from "./auth-env.js";
 import { resolveBrickContext } from "./brick-context.js";
@@ -139,6 +140,11 @@ import {
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
 import { RequestedModelUnsupportedError } from "./model-support.js";
+import {
+  openRouterBoxCredentialMissing,
+  resolveOpenRouterBoxCredential,
+  resolveOpenRouterRoute,
+} from "./openrouter-routing.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import {
   formatSessionControlAcpSummary,
@@ -607,6 +613,12 @@ export class AcpClient {
   private readonly permissionAbortControllers = new Map<string, AbortController>();
   private closing = false;
   private shimHandle?: ShimHandle;
+  /**
+   * The OpenRouter slug the PICKER route's shim is serving, or undefined. Paired
+   * with `shimHandle`'s lifetime: set when that shim starts, cleared when it
+   * stops, so `outOfBandModelId` can never outlive the process that makes it true.
+   */
+  private openRouterRouteModelId?: string;
   private agentStartedAt?: string;
   private lastAgentExit?: AgentExitInfo;
   private lastKnownPid?: number;
@@ -1077,22 +1089,102 @@ export class AcpClient {
   }
 
   /**
-   * Apply the async portion of profile-based auth to the spawn env in place.
-   * For authMode=openrouter: starts the shim (first spawn) or reinjects the
-   * running shim's port (reconnect). For subscription / no profile: no-op.
+   * Apply the async portion of OpenRouter auth to the spawn env in place.
+   *
+   * TWO ROUTES, AND THE MODEL CHOOSES (brick 007eaac8 — Daniel's founding item 6):
+   *
+   *   - a session carrying an openrouter PROFILE takes the LEGACY route: the
+   *     profile's model on the profile's own account, byte for byte as before;
+   *   - a session whose picked MODEL is an OpenRouter slug takes the PICKER route:
+   *     that slug, on the BOX key in `~/.acpx/providers.json`, with no profile
+   *     involved at all — which is what makes "any OpenRouter model" true for
+   *     claude without pre-registering one profile per model;
+   *   - naming BOTH is refused loudly, because they are two accounts with two
+   *     budgets and there is no defensible silent winner.
+   *
+   * For subscription / neither: no-op. On a RECONNECT (`shimHandle` already set)
+   * both routes reinject the running shim's port identically — the shim process,
+   * and therefore the served model, survives the reconnect.
    */
   private async applyProfileEnv(env: NodeJS.ProcessEnv): Promise<void> {
-    const profileId = this.options.sessionContext?.profileId?.trim();
-    if (!profileId) {
+    if (this.shimHandle) {
+      this.reinjectRunningShim(env);
       return;
     }
-    if (!this.shimHandle) {
-      await this.startProfileShim(env, profileId);
-    } else {
-      env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
-      env.ANTHROPIC_AUTH_TOKEN = " ";
-      delete env.ANTHROPIC_CUSTOM_HEADERS;
+    // ⚠️ THE DECISION IS `resolveOpenRouterRoute`'s, NOT THIS METHOD'S — it is a
+    // pure function precisely so the ORDER the three questions are asked in can
+    // be tested without spawning an adapter. This method only EXECUTES the answer.
+    const route = await resolveOpenRouterRoute({
+      agentCommand: this.options.agentCommand,
+      model: this.options.sessionOptions?.model,
+      profileId: this.options.sessionContext?.profileId,
+    });
+    if (route.kind === "profile") {
+      await this.startProfileShim(env, route.profileId);
+      return;
     }
+    if (route.kind === "picker") {
+      await this.startPickerShim(env, route.model);
+    }
+  }
+
+  /** Reconnect: point the adapter back at the shim process that is still running. */
+  private reinjectRunningShim(env: NodeJS.ProcessEnv): void {
+    if (!this.shimHandle) {
+      return;
+    }
+    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
+    env.ANTHROPIC_AUTH_TOKEN = " ";
+    delete env.ANTHROPIC_CUSTOM_HEADERS;
+  }
+
+  /**
+   * The PICKER route: the shim serves the picked OpenRouter slug on the BOX key.
+   *
+   * ⚠️ THE MODEL IS RECORDED AS SERVED OUT OF BAND (`openRouterRouteModelId`), and
+   * that is half the routing, not bookkeeping. `session_options.model` now holds
+   * an OpenRouter slug that claude-agent-acp does not advertise; without the
+   * suppression that flag drives, `applyRequestedModelIfAdvertised` would push
+   * the slug through `session/set_model` and `assertRequestedModelSupported`
+   * would throw — so wiring the shim alone would make EVERY picker-route create
+   * fail. Declaration, shim and suppression are one change for that reason.
+   */
+  private async startPickerShim(env: NodeJS.ProcessEnv, routeModel: string): Promise<void> {
+    const credential = resolveOpenRouterBoxCredential();
+    if (!credential) {
+      throw openRouterBoxCredentialMissing(routeModel);
+    }
+    const ctx = this.options.sessionContext;
+    const sessionId = ctx?.acpxRecordId?.trim() || randomUUID();
+    const effort = ctx?.reasoningEffort?.trim();
+    this.shimHandle = await startOpenRouterShimForSession(
+      env,
+      sessionId,
+      credential.key,
+      routeModel,
+      effort ? effort : undefined,
+    );
+    this.openRouterRouteModelId = routeModel;
+    // The ORIGIN, never the value — `credential.key` must not reach a log line.
+    this.log(
+      `openrouter picker route: serving "${routeModel}" through the shim on the box credential ` +
+        `(${credential.envName} from ${credential.origin})`,
+    );
+  }
+
+  /**
+   * The model this session is served by OUT OF BAND — the OpenRouter slug the
+   * shim rewrites every outbound request to — or `undefined` when acpx is not
+   * serving this session's model that way.
+   *
+   * ⚠️ SET ONLY FOR THE PICKER ROUTE, DELIBERATELY. The legacy profile route also
+   * serves its model out of band, and today a `--model` on such a session is
+   * silently ignored by the shim — a real wart, filed separately (2026-09-06).
+   * Widening this flag to cover it would change behaviour on a path this brick is
+   * required to leave byte-identical, so it is reported rather than fixed here.
+   */
+  get outOfBandModelId(): string | undefined {
+    return this.openRouterRouteModelId;
   }
 
   /** First-spawn path: create the OR shim and inject its port into the env. */
@@ -2268,6 +2360,7 @@ export class AcpClient {
     this.agent = undefined;
     this.shimHandle?.stop();
     this.shimHandle = undefined;
+    this.openRouterRouteModelId = undefined;
   }
 
   private async terminateAgentProcess(

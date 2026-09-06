@@ -29,6 +29,17 @@ export interface ModelApplyClient {
     configId: string,
     value: string,
   ): Promise<{ configOptions?: SessionConfigOption[] }>;
+  /**
+   * The model this session is served by OUT OF BAND — set only when acpx itself
+   * delivers the model outside the ACP wire. Today that is exactly one route:
+   * claude's OpenRouter picker route, where the slug reaches the model through
+   * the shim's `OR_MODEL` and the adapter never sees it (brick 007eaac8).
+   *
+   * Optional so every existing stub and every non-`AcpClient` caller keeps
+   * compiling and keeps today's behaviour: `undefined` means "nothing is served
+   * out of band", which is the pre-brick world.
+   */
+  readonly outOfBandModelId?: string | undefined;
 }
 
 /**
@@ -113,6 +124,30 @@ export async function applyRequestedModelIfAdvertised(
     typeof params.requestedModel === "string" ? params.requestedModel.trim() : "";
   if (!rawRequested) {
     return { applied: false };
+  }
+  // ⚠️ SERVED OUT OF BAND — THE APPLY IS A NO-OP AND `applied: true` IS THE
+  // TRUTHFUL ANSWER, NOT A CONVENIENT ONE (brick 007eaac8). On claude's OpenRouter
+  // picker route the shim rewrites every outbound request to this slug, so the
+  // model IS applied — through `OR_MODEL` rather than through `session/set_model`.
+  // Reporting `false` would leave `current_model_id` unset on a session that is
+  // demonstrably being served by that model, and would make the reconnect replay
+  // report a failure it did not have.
+  //
+  // ⚠️ IT IS DELIBERATELY THE FIRST TEST, AHEAD OF `guardServedModel`. The Fable
+  // belt exists for a model that arrives by INHERITANCE or DEFAULT; a slug on this
+  // route can only ever arrive from an explicit pick. Letting the belt rewrite it
+  // first would produce a `requestedModel` that no longer matches the shim's model,
+  // fall through to `assertRequestedModelSupported`, and throw on a session that is
+  // running correctly.
+  //
+  // Without this branch, wiring the shim ALONE would break every picker-route
+  // create: claude-agent-acp advertises only its own aliases, so the slug would
+  // reach `assertRequestedModelSupported` and be refused.
+  if (
+    params.client.outOfBandModelId !== undefined &&
+    params.client.outOfBandModelId === rawRequested
+  ) {
+    return { applied: true };
   }
   const guarded = guardServedModel({
     requestedModel: rawRequested,
