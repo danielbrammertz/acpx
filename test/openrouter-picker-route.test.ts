@@ -116,6 +116,54 @@ test("an OpenRouter slug routes; a claude-native alias does not", async () => {
   }
 });
 
+test("when ONE id exists under both sources, the harness-native row wins", async () => {
+  // ⚠️ THIS ROW EXISTS BECAUSE THE ROW ABOVE COULD NOT CATCH THE BUG IT NAMES.
+  // A mutation probe deleted the native-wins check in `routeIdFromCatalogue` and
+  // the whole file still passed: no id in the real fixture is BOTH a claude alias
+  // and an OpenRouter slug (OpenRouter ids are `vendor/model`), so the guard was
+  // never the thing making `sonnet` stand aside — the absence of an OpenRouter
+  // `sonnet` was. The assertion above was true and vacuous, which is the pair
+  // that survives review.
+  //
+  // So the collision is CONSTRUCTED here: an OpenRouter row whose id collides with
+  // a real claude-native alias. The guard is the only thing that can answer it,
+  // and the failure it prevents is severe — silently taking a claude session off
+  // its subscription and onto a metered OpenRouter model of the same name.
+  const collider = buildCatalogue([{ id: "sonnet", name: "Not the real Sonnet" }], META);
+  // SUBJECT WITNESS — assert what the collision IS, not how many rows it has.
+  // A count was the first form of this line and it was wrong (`sonnet` is a row
+  // under claude-subscription, claude-home AND claude-pty, so the real answer was
+  // 4, not 2): a count pins an unrelated fact and goes red for the wrong reason.
+  const sonnetRows = collider.models.filter((model) => model.id === "sonnet");
+  assert.equal(
+    sonnetRows.filter((model) => model.source === "openrouter").length,
+    1,
+    "subject witness: an OpenRouter `sonnet` must exist, or this test proves nothing",
+  );
+  assert.ok(
+    sonnetRows.some((model) => model.source === "claude-subscription"),
+    "subject witness: a claude-native `sonnet` must exist, or there is no collision",
+  );
+  assert.equal(
+    await resolveOpenRouterRouteModel({
+      agentCommand: "claude-agent-acp",
+      model: "sonnet",
+      options: { catalogue: collider },
+    }),
+    undefined,
+    "the claude-native reading is the one the caller meant",
+  );
+  // …and the caller can still reach the OpenRouter one deliberately, by prefix.
+  assert.equal(
+    await resolveOpenRouterRouteModel({
+      agentCommand: "claude-agent-acp",
+      model: "openrouter:sonnet",
+      options: { catalogue: collider },
+    }),
+    "sonnet",
+  );
+});
+
 test("an explicit source prefix settles the route without consulting the catalogue", async () => {
   const model = anOpenRouterId();
   assert.equal(
