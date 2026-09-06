@@ -589,10 +589,26 @@ export const DEPTH_MECHANISMS_ROUTED_BY_ACPX: readonly DepthMechanism[] = [
 ];
 
 export const ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX: readonly ArbitraryModelSupport[] = [
-  // Empty on purpose, and it must stay a KIND list rather than absorb the
-  // provisioning answer. `via-shim` needs the OpenRouter shim to take a model
-  // from the picker rather than from the profile (CONCEPTION §7.4, §11 Q1), which
-  // has not shipped.
+  // ⚠️ THIS ENTRY AND ITS ROUTING LANDED IN ONE COMMIT — brick 007eaac8 (Daniel's
+  // founding item 6). It is the reason this array is no longer empty, and the
+  // reason it must not be edited on its own: the ROUTE that serves the band is
+  // `resolveOpenRouterRouteModel` (src/acp/openrouter-routing.ts), which asks
+  // `deriveAcceptsArbitraryModelIds` — THIS array — before it will route
+  // anything. Declaration and routing are therefore literally the same
+  // predicate, not two lists that have to be kept in step (the failure mode the
+  // `provisioned` warning below is about). Remove `via-shim` here and claude
+  // stops both offering the band AND taking the route, in one edit, with no
+  // window where it offers a band acpx does not serve.
+  //
+  // What "routed" means for `via-shim`, precisely (CONCEPTION §7.4, §11 Q1 —
+  // answered in brick 007eaac8 `conception/CONCEPTION-L7-via-shim-routing.md`):
+  // a picker-chosen OpenRouter slug is served OUT OF BAND by the per-session
+  // OpenRouter shim (`OR_MODEL`), paid for by the BOX key in
+  // `~/.acpx/providers.json` — not by a profile's account — and the ACP-side
+  // model apply is suppressed, because claude-agent-acp advertises only its own
+  // aliases and would refuse the slug. The legacy `--profile` route (the
+  // profile's own model on the profile's own account) is untouched.
+  "via-shim",
   //
   // ⚠️ `provisioned` IS NOT LISTED HERE EVEN THOUGH acpx NOW PROVISIONS FOR BOTH
   // HARNESSES THAT DECLARE IT — and that is the correction, not an omission.
@@ -819,7 +835,12 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
     },
     supportsProfiles: true,
     supportsOutputStyles: true, // MAP §3.1 — harness-sourced list, create/resume only
-    arbitraryModelSupport: "via-shim", // CONCEPTION §7.4 — the shim's model is fixed by the profile today
+    // CONCEPTION §7.4. The shim's model came from the PROFILE until brick
+    // 007eaac8; it now also takes a picker-chosen slug on the box key
+    // (src/acp/openrouter-routing.ts). `via-shim` is in
+    // ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX as of that commit, so this cell now
+    // derives `acceptsArbitraryModelIds: true`.
+    arbitraryModelSupport: "via-shim",
     model: {
       // `query.setModel(...)` on the SDK object, claude-agent-acp src/acp-agent.ts:1990-2019 (MAP §3.1)
       mechanism: "set-model",

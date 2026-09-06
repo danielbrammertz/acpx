@@ -531,9 +531,17 @@ test("the routed lists are the ones the shipped code has branches for", () => {
     ["set-model", "compose-into-id", "config-option"],
   );
   assert.deepEqual([...DEPTH_MECHANISMS_ROUTED_BY_ACPX], ["config-option", "mode"]);
-  // ⚠️ EMPTY IS THE MECHANISM HERE, NOT A LEFTOVER — and nothing superseded this
-  // list. It must STAY empty, which is why the assertion below is a guard rather
-  // than a snapshot.
+  // ⚠️ THIS LIST IS A GUARD, NOT A SNAPSHOT — pinned literally so an entry can
+  // only arrive with the branch that serves it, reviewed in the same commit.
+  //
+  // It held `[]` until brick 007eaac8 (Daniel's founding item 6) added
+  // `via-shim` TOGETHER WITH ITS ROUTE (`src/acp/openrouter-routing.ts`): claude's
+  // OpenRouter shim now takes a picker-chosen slug on the BOX key instead of only
+  // the profile's model. What licenses the entry is not that the shim exists — it
+  // always did — but that a spawn now (a) starts the shim on the picked slug and
+  // (b) SUPPRESSES the ACP-side model apply, without which every picker-route
+  // create would fail in `assertRequestedModelSupported`. Adding the kind alone
+  // would not have been a false declaration; it would have been an outage.
   //
   // The reason it once gave for `provisioned` is now FALSE: it said the
   // per-session config dir had to GENERATE a catalogue fragment first, and B5
@@ -563,10 +571,13 @@ test("the routed lists are the ones the shipped code has branches for", () => {
   // switched on by a measurement taken against a config format it does not share.
   // Two agreeing data points do not retire the seam.
   //
-  // `via-shim` is still genuinely unshipped — the OpenRouter shim would have to
-  // take a model from the picker rather than from the profile (CONCEPTION §7.4,
-  // §11 Q1) — so that half of the old rationale still holds.
-  assert.deepEqual([...ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX], []);
+  // ⚠️ `via-shim` IS LISTED AND `provisioned` IS STILL NOT — and that asymmetry
+  // is the whole point of the split, not an inconsistency. `via-shim` is a KIND
+  // whose route is genuinely per-kind: one shim, one `OR_MODEL`, identical for
+  // any harness that ever declares it. `provisioned` is answered PER HARNESS
+  // because each config format has its own merge semantics. Listing `via-shim`
+  // here is therefore not a precedent for listing `provisioned`.
+  assert.deepEqual([...ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX], ["via-shim"]);
 });
 
 test("the SHIPPED per-harness provisioning list is what the derivation defaults to", () => {

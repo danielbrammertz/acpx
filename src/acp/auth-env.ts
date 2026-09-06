@@ -1411,13 +1411,39 @@ async function applyOpenRouterProfileAuth(
   const trimmedEffort = normalizedReasoningEffortOverride(reasoningEffortOverride);
   const resolvedEffort = trimmedEffort ?? profile.reasoningEffort;
 
+  return await startOpenRouterShimForSession(env, sessionId, apiKey, model, resolvedEffort);
+}
+
+/**
+ * Start the OpenRouter shim for a session and shape the spawn env around it.
+ *
+ * ⚠️ EXTRACTED SO THE TWO ROUTES CANNOT DRIFT (brick 007eaac8). The legacy
+ * PROFILE route and the picker route differ in exactly two inputs — which
+ * credential, and which model — and in nothing else: both need the same isolated
+ * `CLAUDE_CONFIG_DIR`, the same `ANTHROPIC_BASE_URL`, the same `ANTHROPIC_AUTH_TOKEN`
+ * placeholder and the same `ANTHROPIC_CUSTOM_HEADERS` removal. Duplicating this
+ * body would have made a future fix to one route silently miss the other; the
+ * `CLAUDE_CONFIG_DIR` isolation especially, whose absence would let the adapter
+ * inherit the box's real Claude OAuth while talking to OpenRouter.
+ *
+ * ⚠️ `apiKey` IS A SECRET AND STAYS A PARAMETER. It goes into the SHIM CHILD's
+ * environment (`spawnOpenRouterShim`) and nowhere else — never the agent env,
+ * never a log line, never the session record.
+ */
+export async function startOpenRouterShimForSession(
+  env: NodeJS.ProcessEnv,
+  sessionId: string,
+  apiKey: string,
+  model: string,
+  reasoningEffort: string | undefined,
+): Promise<ShimHandle> {
   // Isolate Claude config in a per-session temp dir (no OAuth inheritance).
   const configDir = join(tmpdir(), `or-${sessionId}`);
   mkdirSync(configDir, { recursive: true });
   env.CLAUDE_CONFIG_DIR = configDir;
 
   // Start the model-rewrite shim; apiKey never appears in logs.
-  const shim = await spawnOpenRouterShim(apiKey, model, resolvedEffort);
+  const shim = await spawnOpenRouterShim(apiKey, model, reasoningEffort);
 
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${shim.port}`;
   // Bypass the Bun availability / key check in claude-agent-acp.
