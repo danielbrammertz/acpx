@@ -44,6 +44,17 @@ function renderProvidersText(statuses: BoxProviderStatus[]): string {
       status.hasCredential ? "credential: present" : "credential: MISSING",
       expiryPhrase(status),
     ];
+    if (status.inheritedEnvDiffers) {
+      // ⚠️ THIS LINE ANSWERS A DIFFERENT QUESTION FROM THE REST OF THE ROW. Every
+      // other field describes the FILE; this one describes the ENVIRONMENT this
+      // process is running in — the value its children will actually inherit,
+      // because `applyBoxProviderEnv` is a strict fallback. Without it, "credential:
+      // present" reads as "my sessions use this key" when they may not.
+      parts.push(
+        `⚠ ENV DIFFERS — children inherit sha256:${status.inheritedFingerprint} ` +
+          `(file sha256:${status.fileFingerprint}); unset ${status.env} or restart to use the file`,
+      );
+    }
     if (status.budgetUsd !== undefined) {
       parts.push(`budget $${status.budgetUsd}${status.limitReset ? `/${status.limitReset}` : ""}`);
     }
