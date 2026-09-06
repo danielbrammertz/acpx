@@ -40,7 +40,7 @@ import {
 import { resolveBuiltInAgentLaunch } from "../agent-registry.js";
 import { TimeoutError, withTimeout } from "../async-control.js";
 import type { ProvisioningWarningBreadcrumb } from "../config/os-harness-provisioning.js";
-import { applyBoxProviderEnv } from "../config/providers.js";
+import { applyBoxProviderEnv, formatBoxProviderEnvConflict } from "../config/providers.js";
 import {
   AgentDisconnectedError,
   AgentSpawnError,
@@ -905,7 +905,16 @@ export class AcpClient {
     // and a strict fallback: it never overwrites a variable that is already set.
     // Deliberately BEFORE applyProfileEnv for predictable ordering; the two do not
     // collide (see applyBoxProviderEnv's contract — on Claude the key is inert).
-    applyBoxProviderEnv(spawnOptions.env);
+    //
+    // ⚠️ THE WARNING IS NOT DEDUPED, ON PURPOSE. It fires per spawn, per diverging
+    // variable. A once-per-process warning is indistinguishable from a check that
+    // stopped running — and the reader who needs it is looking at THIS spawn's
+    // stderr, not at the first spawn of a long-lived queue owner (brick c788eca0).
+    applyBoxProviderEnv(spawnOptions.env, {
+      onConflict: (conflict) => {
+        process.stderr.write(`[acpx] warning: ${formatBoxProviderEnvConflict(conflict)}\n`);
+      },
+    });
     await this.applyProfileEnv(spawnOptions.env);
     // B3: the per-session harness config dir — primer + model pin + catalogue
     // fragment, one directory (CONCEPTION §5.3). GATED PER HARNESS off the

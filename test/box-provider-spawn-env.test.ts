@@ -69,6 +69,25 @@ async function withScratch(providers: unknown, run: (scratch: Scratch) => Promis
   }
 }
 
+/**
+ * ⚠️ CAPTURED AROUND THE WHOLE SPAWN, NOT AROUND THE FUNCTION UNDER TEST. The
+ * warning is written by `resolveAgentLaunchPlan` on the real launch path; a unit
+ * test of the formatter cannot tell whether that path ever calls it.
+ */
+async function captureStderr<T>(run: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+  const original = process.stderr.write;
+  let captured = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    captured += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { result: await run(), stderr: captured };
+  } finally {
+    process.stderr.write = original;
+  }
+}
+
 async function spawnAndDumpEnv(scratch: Scratch): Promise<Record<string, string>> {
   const client = new AcpClient({
     agentCommand:
@@ -112,6 +131,64 @@ test("a declared provider variable REACHES the spawned child's environment", asy
 
       assert.equal(dump.HP_B1_PROBE_API_KEY, SYNTHETIC_KEY);
       assert.equal(dump.HP_B1_PROBE_AUTH, SYNTHETIC_KEY_2);
+    },
+  );
+});
+
+// ── The divergence warning, on the REAL launch path (brick c788eca0) ────────
+//
+// The unit tests in `box-providers.test.ts` pin the detection and the wording.
+// What these two pin is that `resolveAgentLaunchPlan` actually reports it — the
+// same reason this file spawns a child rather than asserting on source text.
+// Both directions run through ONE instrument, so a silence here is a
+// measurement: the divergent case proves the capture can see the line.
+
+test("a DIVERGENT inherited value warns on the spawn path — and an identical one does not", async () => {
+  await withScratch(
+    {
+      version: 1,
+      providers: { probe: { env: "HP_B1_PROBE_API_KEY", apiKey: SYNTHETIC_KEY } },
+    },
+    async (scratch) => {
+      // 1. The measured production case: the acpx process captured a different
+      //    value at its own spawn, so providers.json is inert for its children.
+      process.env.HP_B1_PROBE_API_KEY = "stale-inherited-value";
+      let diverged: string;
+      try {
+        const captured = await captureStderr(() => spawnAndDumpEnv(scratch));
+        diverged = captured.stderr;
+        assert.equal(
+          captured.result.HP_B1_PROBE_API_KEY,
+          "stale-inherited-value",
+          "the child must still inherit the stale value — this is a warning, not a takeover",
+        );
+      } finally {
+        delete process.env.HP_B1_PROBE_API_KEY;
+      }
+      assert.match(diverged, /HP_B1_PROBE_API_KEY in the environment differs/);
+      assert.match(diverged, /may be stale/);
+      assert.ok(!diverged.includes(SYNTHETIC_KEY), "the warning leaked the file's credential");
+      assert.ok(
+        !diverged.includes("stale-inherited-value"),
+        "the warning leaked the inherited credential",
+      );
+
+      // 2. Same instrument, same fixture: the variable pre-set to EXACTLY the
+      //    file's value. It has just been shown able to capture the line, so this
+      //    silence is a measurement and not a check that never ran.
+      process.env.HP_B1_PROBE_API_KEY = SYNTHETIC_KEY;
+      let identical: string;
+      try {
+        identical = (await captureStderr(() => spawnAndDumpEnv(scratch))).stderr;
+      } finally {
+        delete process.env.HP_B1_PROBE_API_KEY;
+      }
+      assert.doesNotMatch(identical, /HP_B1_PROBE_API_KEY in the environment differs/);
+
+      // 3. And nothing inherited at all — the delivery path stays quiet too.
+      const delivered = await captureStderr(() => spawnAndDumpEnv(scratch));
+      assert.equal(delivered.result.HP_B1_PROBE_API_KEY, SYNTHETIC_KEY);
+      assert.doesNotMatch(delivered.stderr, /in the environment differs/);
     },
   );
 });
