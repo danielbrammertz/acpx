@@ -2605,7 +2605,25 @@ test("F1: the drain backstop deadline is shared across loop passes, not re-armed
       const record = makeF1SessionRecord(homeDir);
       await writeSessionRecordFile(homeDir, record);
 
-      const drainBudgetMs = 200;
+      // dfa1e3df. This test's non-vacuity assertion (`injections > 1`) is a
+      // WALL-CLOCK claim: the drain loop pays one prompt latency per pass out of
+      // ONE shared budget, so the passes the budget can afford is
+      // `drainBudgetMs / promptLatencyMs` — and a red means the FIRST pass alone
+      // consumed the whole budget. That ratio is the load margin, and at its
+      // original 200/20 = 10 a loaded box erased it: an injected prompt's 20 ms
+      // timer firing ~200 ms late leaves `injections === 1` and reds an
+      // otherwise-correct product. Measured dose-response on this file (probe/
+      // f1-budget-sweep.sh, latency fixed at 20 ms): ratio 10, 6, 3, 2 green;
+      // ratio 1 and 0 red, with exactly the reported message. So the margin is
+      // real and it is the only thing standing between this test and load.
+      //
+      // ⇒ The ratio is 50, not 10. Do not shrink it back by lowering the budget
+      // or raising the latency: a red then means one 20 ms timer overshot by
+      // 50×, which is a box in trouble rather than this test being delicate.
+      // Both knobs are env-overridable ONLY so the mechanism stays reproducible
+      // on demand (that sweep); they are never set in a normal run.
+      const drainBudgetMs = Number(process.env.ACPX_PROBE_F1_BUDGET_MS ?? 1_000);
+      const promptLatencyMs = Number(process.env.ACPX_PROBE_F1_LATENCY_MS ?? 20);
       const mainMessageId = "f1b00000-0000-4000-8000-00000000000a";
       let injections = 0;
       let stopped = false;
@@ -2616,7 +2634,7 @@ test("F1: the drain backstop deadline is shared across loop passes, not re-armed
         // prompt, is what would keep a re-armed deadline alive forever.
         onInjectedPrompt: () =>
           new Promise<PromptResponse>((resolve) => {
-            setTimeout(() => resolve({ stopReason: "end_turn" }), 20);
+            setTimeout(() => resolve({ stopReason: "end_turn" }), promptLatencyMs);
           }),
       });
 
@@ -2670,7 +2688,11 @@ test("F1: the drain backstop deadline is shared across loop passes, not re-armed
       try {
         await withRaceTimeout(
           run,
-          5_000,
+          // A re-armed deadline never finalizes AT ALL, so any bound above the
+          // shared budget detects it — this one only has to sit far enough
+          // above `drainBudgetMs` that load cannot turn the detector into the
+          // false red it is meant to catch.
+          8_000,
           "the drain never finalized — the deadline was re-armed per pass",
         );
       } finally {
