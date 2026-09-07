@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { OPENROUTER_SHIM_AUTH_PLACEHOLDER, pointAdapterAtShim } from "../src/acp/auth-env.js";
-import type { AcpClient } from "../src/acp/client.js";
+import { trimmedOrUndefined, type AcpClient } from "../src/acp/client.js";
 import { applyPromptModelIfAdvertised } from "../src/cli/session/runtime.js";
 import { createSessionConversation } from "../src/session/conversation-model.js";
 import { defaultSessionEventLog } from "../src/session/event-log.js";
@@ -219,4 +219,29 @@ test("the subscription path's custom headers are cleared, so the shim's own Auth
   const env: NodeJS.ProcessEnv = { ANTHROPIC_CUSTOM_HEADERS: "X-Leftover: 1" };
   pointAdapterAtShim(env, 41234);
   assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, undefined);
+});
+
+test("a blank record id never yields the SHARED /tmp/or- config dir — on either route", () => {
+  // ⚠️ `??` DOES NOT CATCH `""`, AND `""` IS THE NORMAL CASE AT CREATE.
+  // `creationSessionContext` sets `acpxRecordId: ""` on the real `sessions new`
+  // path, so the legacy route's `ctx?.acpxRecordId ?? profileId` produced
+  // `join(tmpdir(), "or-" + "")` = `/tmp/or-`: one CLAUDE_CONFIG_DIR shared by
+  // every blank-id session, defeating the per-session isolation that directory
+  // exists for. The picker route already guarded it; the legacy route did not.
+  //
+  // Asserted on the guard rather than on either call site, because the guard is
+  // the thing both routes now share — a call-site test would pass again the next
+  // time someone writes `??` at a third site.
+  for (const blank of ["", " ", "\t", "\n", "   "]) {
+    assert.equal(trimmedOrUndefined(blank), undefined, `${JSON.stringify(blank)} must not survive`);
+  }
+  // The positive control: a real id must survive untouched, or the guard would
+  // "pass" by rejecting everything.
+  assert.equal(
+    trimmedOrUndefined("cd93c99f-cd1a-4df4-81a4-5bf78597ec10"),
+    "cd93c99f-cd1a-4df4-81a4-5bf78597ec10",
+  );
+  assert.equal(trimmedOrUndefined("  padded-id  "), "padded-id");
+  assert.equal(trimmedOrUndefined(undefined), undefined);
+  assert.equal(trimmedOrUndefined(null), undefined);
 });
