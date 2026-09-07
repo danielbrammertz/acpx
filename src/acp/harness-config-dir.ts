@@ -1344,8 +1344,26 @@ function writeOpenCodeConfigDir(dir: string, input: HarnessConfigDirInput): Harn
   // fallback this is replacing (`st_dev` 1048684 for both on devbox) — pointing the
   // data dir at the per-session config dir would read as a fix and change nothing.
   // `resolveHarnessDataDirRoot` documents why the root is durable and shared.
+  // ⚠️ DO NOT `mkdirSync` THIS — OpenCode CREATES IT, AND CREATING IT HERE WRITES
+  // INTO THE REAL `~/.acpx` FROM EVERY TEST THAT CALLS THIS FUNCTION.
+  //
+  // The eager mkdir was in the first version of this fix and it was wrong. Ten
+  // test files call `applyHarnessConfigDir`; exactly one isolates the data root,
+  // so the other nine created `~/.acpx/harness-data` on whatever box ran the
+  // suite. That is the same contamination class that cost this programme an hour
+  // when a probe left a pi models-store in the real HOME — a test reaching
+  // outside its fixture — and here it was reaching into the production acpx tree.
+  //
+  // MEASURED that it is unnecessary (opencode-ai 1.18.28, rig, isolated HOME):
+  // pointed at a path that did NOT exist, with acpx creating nothing, OpenCode
+  // created `<root>/opencode/opencode.db` itself, `session rows = 1`, and resume
+  // still succeeded after the overlay path was destroyed. Identical result to the
+  // arm that pre-created the root.
+  //
+  // So the directory is named here and created by its owner. Anything that needs
+  // it to exist earlier should create it where that need arises — not as a side
+  // effect of computing an environment.
   const dataDir = resolveHarnessDataDirRoot();
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
   input.env.XDG_CONFIG_HOME = dir;
   input.env.OPENCODE_CONFIG_DIR = configDir;
