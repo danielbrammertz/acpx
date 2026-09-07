@@ -518,6 +518,33 @@ export type DecideIdleOwnerReleaseInput = {
 //     has ALREADY passed the gate is released. It can NEVER release an active owner
 //     — a clock bug can at worst over-release a genuinely-idle owner (benign:
 //     cold-respawn recovers WITH context).
+/** How often an idle owner ASKS its gate. NOT the quiescence window — see below. */
+export const IDLE_CHECK_CADENCE_MS = 5_000;
+
+/**
+ * The two timings of an idle check, kept apart ON PURPOSE.
+ *
+ * `quiescenceWindowMs` is the span the shared gate requires to have been free of
+ * idle-drain relay activity. `pollTimeoutMs` is merely how long we wait before
+ * ASKING. They were one variable until 2026-09-07, which meant the only way to
+ * check more often was to shorten the window — and a shorter window RELAXES the
+ * gate (`now - lastIdleDrainActivityAt >= quiescenceWindowMs` is easier to
+ * satisfy). Polling faster would then have released owners still relaying
+ * background work, and the diff would have looked like a performance tweak.
+ *
+ * Exported so that invariant is assertable in a unit test rather than trusted to
+ * a comment: the window must NOT shrink when the cadence does.
+ */
+export function idleCheckTimings(
+  idleWindowMs: number | undefined,
+): { pollTimeoutMs: number | undefined; quiescenceWindowMs: number } {
+  return {
+    pollTimeoutMs:
+      idleWindowMs == null ? undefined : Math.min(idleWindowMs, IDLE_CHECK_CADENCE_MS),
+    quiescenceWindowMs: idleWindowMs ?? 0,
+  };
+}
+
 export async function decideIdleOwnerRelease(
   input: DecideIdleOwnerReleaseInput,
 ): Promise<IdleOwnerReleaseDecision> {
@@ -640,9 +667,15 @@ export async function runSessionQueueOwner(options: QueueOwnerRuntimeOptions): P
     parseEnvMs(process.env.ACPX_OWNER_IDLE_RELEASE_MS),
   );
   const maxQueueDepth = Math.max(1, Math.round(options.maxQueueDepth ?? 16));
+  // These two remain the QUIESCENCE WINDOW — the span the shared gate requires to
+  // have been free of idle-drain relay activity. TTL-derived, and UNCHANGED by the
+  // idle-check cadence fix below.
   const defaultTaskPollTimeoutMs: number | undefined = ttlMs === 0 ? undefined : ttlMs;
   const initialTaskPollTimeoutMs =
     defaultTaskPollTimeoutMs == null ? undefined : Math.max(defaultTaskPollTimeoutMs, 1_000);
+  // How often an idle owner ASKS its gate. Deliberately NOT the quiescence window:
+  // before this, the two were one variable, so the only way to check more often was
+  // to shorten the window — which relaxes the gate. See the call site.
   const turnController = createQueueOwnerTurnController(options);
 
   // Deploy-staleness signal (Path 1, W13-24-10). Capture the owner's build token
@@ -990,7 +1023,27 @@ export async function runSessionQueueOwner(options: QueueOwnerRuntimeOptions): P
 
     let isFirstTask = true;
     while (true) {
-      const pollTimeoutMs = isFirstTask ? initialTaskPollTimeoutMs : defaultTaskPollTimeoutMs;
+      // The QUIESCENCE WINDOW handed to the shared gate. TTL-derived, unchanged.
+      const idleWindowMs = isFirstTask ? initialTaskPollTimeoutMs : defaultTaskPollTimeoutMs;
+      // ⚠️ THE CADENCE AND THE WINDOW ARE NOT THE SAME THING, AND THEY USED TO BE.
+      //
+      // This line used to read `const pollTimeoutMs = isFirstTask ? … : …` and the
+      // gate below was then given `quiescenceWindowMs = pollTimeoutMs`. That made
+      // the check cadence and the quiescence window ONE value, so the owner could
+      // only ask its gate as often as the TTL — which is how the suite accumulated
+      // 43 live detached owners (~6.6-12.3 GB) in a single run and helped evict the
+      // pod (2026-09-07).
+      //
+      // The tempting fix — "just poll more often" — SHRINKS `quiescenceWindowMs`,
+      // and the gate reads `now - lastIdleDrainActivityAt >= quiescenceWindowMs`.
+      // A smaller window is EASIER to satisfy, so polling faster would silently
+      // RELAX the gate and could release an owner still relaying background work.
+      // That is the one thing this gate exists to prevent, and the diff for it
+      // looks like a performance tweak.
+      //
+      // So: poll on a short cadence, hand the gate the ORIGINAL window. Never
+      // collapse these back into one variable.
+      const { pollTimeoutMs, quiescenceWindowMs: gateWindowMs } = idleCheckTimings(idleWindowMs);
       let task = await owner.nextTask(pollTimeoutMs);
       if (!task) {
         // A full idle window elapsed; subsequent waits use the steady cadence.
@@ -1007,7 +1060,9 @@ export async function runSessionQueueOwner(options: QueueOwnerRuntimeOptions): P
         // only WHEN an already-idle owner is released — it can never release an
         // active owner. When ttl 0, `nextTask` never times out, so this branch is
         // structurally unreachable (the ttl!==0 term is belt-and-suspenders).
-        const quiescenceWindowMs = pollTimeoutMs ?? 0;
+        // ORIGINAL TTL-derived window — NOT `pollTimeoutMs`. See the comment above
+        // the poll: substituting the (shorter) cadence here relaxes the gate.
+        const quiescenceWindowMs = gateWindowMs;
         const decision = await decideIdleOwnerRelease({
           ttlMs,
           hasActiveTurn: turnController.hasActiveTurn(),

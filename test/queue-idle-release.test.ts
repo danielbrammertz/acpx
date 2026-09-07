@@ -18,7 +18,9 @@ import {
 } from "../src/cli/session/contracts.js";
 import {
   type DecideIdleOwnerReleaseInput,
+  IDLE_CHECK_CADENCE_MS,
   decideIdleOwnerRelease,
+  idleCheckTimings,
 } from "../src/cli/session/queue-owner-runtime.js";
 
 // Fixed epoch ms — pure tests must not read the wall clock.
@@ -296,4 +298,91 @@ test("output-style: ttl 0 gates path (B) off (documented limit — path (A) stil
     input({ ttlMs: 0, outputStyleDiffers: () => true }),
   );
   assert.equal(decision.release, false);
+});
+
+// ---------------------------------------------------------------------------
+// IDLE-CHECK CADENCE (2026-09-07). The suite accumulated 43 live detached owners
+// in one run and helped evict the pod. Cause: the check cadence and the
+// quiescence window were ONE variable, so an owner could only ask its gate as
+// often as its TTL. The fix polls faster while handing the gate the ORIGINAL
+// window — these tests pin that they stayed apart.
+// ---------------------------------------------------------------------------
+
+// #14 — the poll shortens; the WINDOW DOES NOT. This is the whole fix in one
+// assertion, and the one a future "simplify: just reuse pollTimeoutMs" breaks.
+test("P2 #14 cadence: the poll is capped at the cadence while the quiescence window is UNCHANGED", () => {
+  const ttl = 60 * 60_000; // a --ttl 3600 owner: one hour between checks, before
+  const { pollTimeoutMs, quiescenceWindowMs } = idleCheckTimings(ttl);
+  assert.equal(pollTimeoutMs, IDLE_CHECK_CADENCE_MS, "asks its gate on the cadence, not the TTL");
+  assert.equal(quiescenceWindowMs, ttl, "the gate still gets the FULL TTL-derived window");
+  assert.ok(pollTimeoutMs < quiescenceWindowMs, "cadence must be shorter than the window");
+});
+
+// #15 — THE DISCRIMINATOR. An owner that relayed background work 30s ago must NOT
+// be released. With the correct (full) window it is protected. Substituting the
+// SHORT poll as the window — the naive "just poll more often" fix — RELEASES it.
+// This test fails on the bug and passes on the fix, which is the only way to know
+// the fix addresses the thing it claims to.
+test("P2 #15 DISCRIMINATOR: a recently-relaying owner survives the short cadence, and would NOT have under the naive fix", async () => {
+  const ttl = 60 * 60_000;
+  const { pollTimeoutMs, quiescenceWindowMs } = idleCheckTimings(ttl);
+  const relayedRecentlyAt = BASE_NOW - 30_000; // 30s ago: inside the real window
+
+  const correct = await decideIdleOwnerRelease(
+    input({
+      ttlMs: ttl,
+      now: BASE_NOW,
+      lastIdleDrainActivityAt: relayedRecentlyAt,
+      lastTaskCompletedAt: BASE_NOW - 10 * 60_000,
+      quiescenceWindowMs, // the FULL window — what the call site passes
+      // MUST be SHORTER than the relay age (30s), or the accumulated-idle CLOCK
+      // refuses release in BOTH arms and the test proves nothing about the window.
+      // The first version of this test used 60_000 and its control caught that.
+      idleReleaseMs: 10_000,
+    }),
+  );
+  assert.equal(correct.release, false, "an owner relaying background work is never torn down");
+
+  const naive = await decideIdleOwnerRelease(
+    input({
+      ttlMs: ttl,
+      now: BASE_NOW,
+      lastIdleDrainActivityAt: relayedRecentlyAt,
+      lastTaskCompletedAt: BASE_NOW - 10 * 60_000,
+      quiescenceWindowMs: pollTimeoutMs ?? 0, // the BUG: window collapsed onto the cadence
+      idleReleaseMs: 10_000, // IDENTICAL to the arm above — the window is the ONLY variable
+    }),
+  );
+  assert.equal(
+    naive.release,
+    true,
+    "control: collapsing the window onto the cadence DOES release it — the trap is real, not hypothetical",
+  );
+});
+
+// #16 — ttl 0 is the master never-recycle opt-out. The cadence must not resurrect
+// the idle branch: nextTask(undefined) never times out, so it stays unreachable.
+test("P2 #16 cadence: --ttl 0 still yields no poll timeout (idle branch stays structurally unreachable)", () => {
+  const { pollTimeoutMs, quiescenceWindowMs } = idleCheckTimings(undefined);
+  assert.equal(pollTimeoutMs, undefined, "no timeout ⇒ nextTask never returns empty ⇒ never released");
+  assert.equal(quiescenceWindowMs, 0);
+});
+
+// #17 — the other direction: a genuinely idle owner IS released once the clock
+// passes idleReleaseMs, now noticed within the cadence instead of within the TTL.
+test("P2 #17 cadence: a provably-idle owner IS released, and the clock is unchanged by the cadence", async () => {
+  const ttl = 60 * 60_000;
+  const { quiescenceWindowMs } = idleCheckTimings(ttl);
+  const decision = await decideIdleOwnerRelease(
+    input({
+      ttlMs: ttl,
+      now: BASE_NOW + 61_000, // just past a 60s idle timeout
+      lastIdleDrainActivityAt: 0, // no relay since spawn ⇒ quiescent
+      lastTaskCompletedAt: BASE_NOW,
+      quiescenceWindowMs,
+      idleReleaseMs: 60_000,
+    }),
+  );
+  assert.equal(decision.release, true);
+  assert.equal(decision.reason, "idle-memory");
 });
