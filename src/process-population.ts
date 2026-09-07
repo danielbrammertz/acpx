@@ -55,6 +55,68 @@ export const CONFIG_DIR_ENV_NAMES = [
   "PI_CODING_AGENT_DIR",
 ] as const;
 
+/**
+ * Variables the config-dir writer sets that are DELIBERATELY NOT ownership
+ * markers — and must therefore never be added to {@link CONFIG_DIR_ENV_NAMES}
+ * (brick 6c94af4a).
+ *
+ * ## ⚠️ THE TEST THAT SENDS YOU HERE IS ASKING YOU TO CLASSIFY, NOT TO APPEND
+ *
+ * `prune-positive-ownership.test.ts` requires every name the writer sets to be in
+ * EXACTLY ONE of these two lists. When it reds because you added a variable, the
+ * fix is to decide which list it belongs in — **not** to add it to the scan list
+ * because that is the one the message names.
+ *
+ * ## The criterion, stated mechanically so it does not turn on a judgement call
+ *
+ * The scan asks *"does any live process still point at THIS directory?"* and
+ * answers by EXACT-MATCH set membership (`referencedDirs.has(dir)`) against a
+ * **per-session** candidate. So a variable earns a place in `CONFIG_DIR_ENV_NAMES`
+ * only if **its value differs per session**. A variable whose value is the same
+ * for every session cannot answer that question at all: it can never produce a
+ * true "in use" for a particular directory, only a false one.
+ *
+ * ## Why `XDG_DATA_HOME` fails that criterion
+ *
+ * It points at ONE box-wide root (`~/.acpx/harness-data`) shared by every OpenCode
+ * session — that is its whole design, chosen so the 63 MB-per-session cost that
+ * `seedOpenCodePluginInstall` already avoids is not re-introduced for data. It is
+ * a **constant**, and a constant discriminates nothing.
+ *
+ * ⚠️ **AND ADDING IT WOULD WIDEN OWNERSHIP ATTRIBUTION, WHICH IS THE DANGEROUS
+ * DIRECTION.** The clause it feeds is `retain: true, reason: "liveProcess"`.
+ * Today the shared root is never a candidate, so the entry would be inert — but
+ * "inert today" is not "safe": the moment anything sweeps the data root, or the
+ * roots are ever collapsed, EVERY live process would claim it and the sweep would
+ * attribute every session's directory to all of them at once. A scan that claims
+ * more processes than it should is how a sweep destroys another lane's work; a
+ * scan that claims fewer only leaves a directory behind.
+ *
+ * **So the asymmetry is the reason, and it does not depend on today's layout:**
+ * a missing ownership marker costs disk, a spurious one costs someone else's
+ * session.
+ *
+ * ## ⚠️ AND A SECOND, INDEPENDENT REASON — WHY GETTING THIS WRONG IS EXPENSIVE
+ *
+ * The two arguments above say why `XDG_DATA_HOME` is not an ownership marker.
+ * This one says what it would cost to pretend otherwise, and it is the reason to
+ * be conservative here specifically rather than as a general preference.
+ *
+ * **A path is not a principal**: a directory says where data LIVES, never who
+ * OWNS a process. On top of that, the fleet has just made this exact mechanism
+ * load-bearing. The heavy-gate lock's holder-RECORD was retired as evidence
+ * after it failed in BOTH directions — populated but stale, written by a process
+ * from a dead pod; and empty but held, because a raw `flock -x` writes no record
+ * at all — and **`/proc` scanning is now the fleet's only correct answer to "who
+ * holds this"**. The rows in `prune-positive-ownership.test.ts` guard that
+ * mechanism.
+ *
+ * ⇒ Widening the ownership-marker set would degrade the one identity instrument
+ * the fleet now depends on. That is a concrete dependency, not a stylistic
+ * preference for narrow attribution.
+ */
+export const NON_OWNERSHIP_ENV_NAMES = ["XDG_DATA_HOME"] as const;
+
 /** Census of live processes and the config dirs they reference. */
 export function scanLiveProcesses(procRoot = "/proc"): LiveProcessScan {
   const pids = new Set<number>();

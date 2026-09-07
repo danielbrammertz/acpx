@@ -38,7 +38,19 @@ const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url
 
 /** The names the config dir sets. Every arm captures ALL of them, so a harness
  *  that gains one it should not is caught as loudly as one that misses one. */
-const CONFIG_DIR_NAMES = ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "PI_CODING_AGENT_DIR"];
+const CONFIG_DIR_NAMES = [
+  "XDG_CONFIG_HOME",
+  "OPENCODE_CONFIG_DIR",
+  "PI_CODING_AGENT_DIR",
+  // ⚠️ `XDG_DATA_HOME` is in this list even though it is not a CONFIG variable
+  // (brick 6c94af4a). It is applied by the same code at the same boundary, and
+  // this file is the only place that reads these names out of the CHILD's own
+  // environment rather than out of the plan acpx returned. Leaving it out would
+  // mean the variable that decides where the CONVERSATION is stored is the one
+  // name never verified to actually reach the adapter — and the list would be
+  // silently narrower than the mechanism it claims to cover.
+  "XDG_DATA_HOME",
+];
 
 /**
  * The directory name that makes a command CLASSIFY as each harness.
@@ -68,7 +80,7 @@ const EXPECTED: Record<string, string[]> = {
   claude: [],
   "claude-pty": [],
   codex: [],
-  opencode: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR"],
+  opencode: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"],
   pi: ["PI_CODING_AGENT_DIR"],
 };
 

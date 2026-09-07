@@ -429,7 +429,11 @@ test("PROBE 1 — a SUBSCRIPTION profile plus an OpenRouter model MUST PASS (the
         profileId,
         options,
       }),
-      { kind: "picker", model },
+      // `not-an-openrouter-account` is the MEASURED reason (brick 069fdebe): the
+      // registry was read, it names profiles, and this one is a subscription. It
+      // is the reason the two unevaluable ones below have to be distinguishable
+      // from — this is what the healthy case looks like.
+      { kind: "picker", model, profileBypass: { profileId, reason: "not-an-openrouter-account" } },
       `${profileId} is a subscription — it must not be read as a second OpenRouter account`,
     );
   }
@@ -492,7 +496,14 @@ test("the KIND decides, not the NAME — both decoys, in both directions", async
       profileId: "openrouter-that-is-a-subscription",
       options,
     }),
-    { kind: "picker", model },
+    {
+      kind: "picker",
+      model,
+      profileBypass: {
+        profileId: "openrouter-that-is-a-subscription",
+        reason: "not-an-openrouter-account",
+      },
+    },
   );
 });
 
@@ -509,8 +520,77 @@ test("an UNRESOLVABLE profile does not refuse on a guess — it takes the picker
       profileId: "no-such-profile",
       options: { catalogue: catalogue(), profileRegistry: profileFixture() },
     }),
-    { kind: "picker", model },
+    {
+      kind: "picker",
+      model,
+      profileBypass: { profileId: "no-such-profile", reason: "not-an-openrouter-account" },
+    },
   );
+});
+
+test("an EMPTY registry is reported as unevaluable, not as 'not an OpenRouter account'", async () => {
+  // Brick 069fdebe. The two answers below are the SAME behaviour — both take the
+  // picker route, which is the ruling and must not change — and the whole point
+  // is that they are no longer the same WORD. Without this, an operator reading
+  // the log afterwards cannot tell "we evaluated the profile and it is a
+  // subscription" from "we evaluated nothing, so the second-account guard was
+  // not applied on this box at all".
+  //
+  // ⚠️ THE EMPTY REGISTRY IS THE REACHABLE CASE, AND IT IS NOT THE OBVIOUS ONE.
+  // Measured 2026-09-07: `loadProfileRegistry` never throws and never returns
+  // nothing — an absent, a corrupt and a mode-000 unreadable registry file ALL
+  // come back as an empty registry. So this reason, not `registry-unreadable`,
+  // is what a box with a broken registry actually logs.
+  const model = anOpenRouterId();
+  const empty = { ...profileFixture(), profiles: [] };
+
+  const unevaluable = await resolveOpenRouterRoute({
+    agentCommand: "claude-agent-acp",
+    model,
+    profileId: "sub5",
+    options: { catalogue: catalogue(), profileRegistry: empty },
+  });
+  assert.deepEqual(unevaluable, {
+    kind: "picker",
+    model,
+    profileBypass: { profileId: "sub5", reason: "registry-holds-no-profiles" },
+  });
+
+  // The DISCRIMINATOR, on the same id and the same route: with a populated
+  // registry the identical spawn reports the measured reason. Without this arm
+  // the assertion above would also pass on an implementation that answered
+  // "unevaluable" for everything.
+  const measured = await resolveOpenRouterRoute({
+    agentCommand: "claude-agent-acp",
+    model,
+    profileId: "sub5",
+    options: { catalogue: catalogue(), profileRegistry: profileFixture() },
+  });
+  assert.deepEqual(measured, {
+    kind: "picker",
+    model,
+    profileBypass: { profileId: "sub5", reason: "not-an-openrouter-account" },
+  });
+  assert.notDeepEqual(
+    unevaluable,
+    measured,
+    "the unevaluable and the measured case must not be the same answer — that IS the brick",
+  );
+});
+
+test("a bypass reason is attached ONLY when a profile was supplied", async () => {
+  // The no-profile picker route must stay exactly what it was before the field
+  // existed: no key, not a key set to undefined. This is what keeps every other
+  // `{ kind: "picker", model }` assertion in this file an honest comparison.
+  const model = anOpenRouterId();
+  const route = await resolveOpenRouterRoute({
+    agentCommand: "claude-agent-acp",
+    model,
+    profileId: undefined,
+    options: { catalogue: catalogue(), profileRegistry: profileFixture() },
+  });
+  assert.deepEqual(route, { kind: "picker", model });
+  assert.equal(Object.hasOwn(route, "profileBypass"), false);
 });
 
 // ── The other half of the routing: the ACP apply is suppressed ───────────────

@@ -22,7 +22,10 @@ import {
   HARNESS_IDS,
   type HarnessId,
 } from "./harness-capabilities.js";
-import { resolveHarnessConfigDirRoot } from "./harness-config-dir-root.js";
+import {
+  resolveHarnessConfigDirRoot,
+  resolveHarnessDataDirRoot,
+} from "./harness-config-dir-root.js";
 import {
   isOpenCodePluginCacheEntry,
   type PluginCacheResult,
@@ -1253,6 +1256,15 @@ function warnDiscardedBoxConfigKeys(env: NodeJS.ProcessEnv, sessionKeys: string[
  * session — I1's first negative control failed for exactly this reason, and the
  * lane then twice re-created state in `/home/node` by invoking OpenCode without
  * them. Whatever spawns the adapter must set them unconditionally, together.
+ *
+ * ⚠️ **AND A THIRD, `XDG_DATA_HOME`, WHICH ANSWERS A DIFFERENT QUESTION** (brick
+ * 6c94af4a). The two above decide what OpenCode READS; that one decides where it
+ * KEEPS THE CONVERSATION. Getting the config pair right and leaving the data
+ * variable unset is a complete, working, fully isolated session whose transcript
+ * sits on storage nothing guarantees — which is why this was found in production
+ * and not by any of the config work: **nothing fails until the process restarts,
+ * and then it fails permanently.** The three are set together at the foot of this
+ * function; `resolveHarnessDataDirRoot` carries the reasoning for the root.
  */
 function writeOpenCodeConfigDir(dir: string, input: HarnessConfigDirInput): HarnessConfigDirPlan {
   const configDir = join(dir, "opencode");
@@ -1311,12 +1323,55 @@ function writeOpenCodeConfigDir(dir: string, input: HarnessConfigDirInput): Harn
   // exactly today's behaviour.
   const pluginCache = seedOpenCodePluginInstall({ configDir, rootDir: input.rootDir });
 
+  // ⚠️ PIN THE DATA DIR TOO, OR THE SESSION DIES WITH THE CONTAINER (brick 6c94af4a).
+  // Setting only the two config variables leaves `XDG_DATA_HOME` unset, and OpenCode
+  // then keeps `opencode.db` — the `session` and `message` tables, i.e. the
+  // conversation — under `$HOME/.local/share/opencode`, which is NOT on the storage
+  // the platform guarantees. When that path goes, `session/resume` returns
+  // `-32603 "Internal error: OpenCode service failure"` and acpx retries it forever:
+  // `SESSION_RESUME_REQUIRED` is retryable, but a session whose rows no longer exist
+  // can never come back, so the retry is unbounded by construction and the user sees
+  // only an enqueue timeout.
+  //
+  // MEASURED on a rig (isolated HOME, OpenCode 1.18.28), three arms:
+  //   A  store intact,                  no XDG_DATA_HOME -> resume OK
+  //   B  store deleted,                 no XDG_DATA_HOME -> resume -32603, session rows 1 -> 0
+  //   C  store on durable storage, XDG_DATA_HOME set     -> the overlay path is NEVER
+  //      created, and resume still OK after that path is destroyed
+  // B is the reproduction of the production failure; C is this fix.
+  //
+  // ⚠️ NOT `dir`. The config root is `tmpdir()`, which is the SAME filesystem as the
+  // fallback this is replacing (`st_dev` 1048684 for both on devbox) — pointing the
+  // data dir at the per-session config dir would read as a fix and change nothing.
+  // `resolveHarnessDataDirRoot` documents why the root is durable and shared.
+  // ⚠️ DO NOT `mkdirSync` THIS — OpenCode CREATES IT, AND CREATING IT HERE WRITES
+  // INTO THE REAL `~/.acpx` FROM EVERY TEST THAT CALLS THIS FUNCTION.
+  //
+  // The eager mkdir was in the first version of this fix and it was wrong. Ten
+  // test files call `applyHarnessConfigDir`; exactly one isolates the data root,
+  // so the other nine created `~/.acpx/harness-data` on whatever box ran the
+  // suite. That is the same contamination class that cost this programme an hour
+  // when a probe left a pi models-store in the real HOME — a test reaching
+  // outside its fixture — and here it was reaching into the production acpx tree.
+  //
+  // MEASURED that it is unnecessary (opencode-ai 1.18.28, rig, isolated HOME):
+  // pointed at a path that did NOT exist, with acpx creating nothing, OpenCode
+  // created `<root>/opencode/opencode.db` itself, `session rows = 1`, and resume
+  // still succeeded after the overlay path was destroyed. Identical result to the
+  // arm that pre-created the root.
+  //
+  // So the directory is named here and created by its owner. Anything that needs
+  // it to exist earlier should create it where that need arises — not as a side
+  // effect of computing an environment.
+  const dataDir = resolveHarnessDataDirRoot();
+
   input.env.XDG_CONFIG_HOME = dir;
   input.env.OPENCODE_CONFIG_DIR = configDir;
+  input.env.XDG_DATA_HOME = dataDir;
   return {
     harness: "opencode",
     dir,
-    envNames: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR"],
+    envNames: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"],
     files,
     pluginCache,
   };

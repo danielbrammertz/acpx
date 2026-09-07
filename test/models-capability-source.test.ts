@@ -107,13 +107,22 @@ test("with NO capabilities option, every row now carries a per-agent availabilit
   }
 });
 
-test("OpenRouter is locked for EVERY agent while no harness routes an arbitrary id", () => {
-  // The PREDICTED state, not a regression (program TEST-PLAN §4.0, G3-BAND-01):
-  // ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX is deliberately empty, so every
-  // harness derives acceptsArbitraryModelIds:false and the whole OpenRouter
-  // band renders locked. This test is written to FOLLOW that derivation rather
-  // than to pin the current answer: when a harness starts routing `provisioned`
-  // or `via-shim`, the expectation moves with it instead of going red.
+test("the OpenRouter band is locked per harness, exactly as the derivation says", () => {
+  // Written to FOLLOW the derivation rather than to pin an answer (program
+  // TEST-PLAN §4.0, G3-BAND-01), which is why it survived the premise underneath
+  // it changing: a harness that starts routing `provisioned` or `via-shim` moves
+  // the expectation instead of going red. That intent is unchanged.
+  //
+  // ⚠️ THE TITLE AND COMMENT HERE USED TO REST ON THE ROUTED-SUPPORT LIST BEING
+  // EMPTY, AND ON THE BAND THEREFORE BEING LOCKED FOR EVERY HARNESS. Both were
+  // true when written and stopped being true on 2026-09-06 (brick dfc823dd):
+  // brick 007eaac8 added `via-shim` to that list in the same commit as claude's
+  // picker→shim route, so claude derives acceptsArbitraryModelIds:true and its
+  // OpenRouter band is no longer locked. Nothing failed to announce it, because
+  // only the prose was wrong — which is precisely why it is repaired rather than
+  // left for the next reader to reason from. The lock is, and always was,
+  // derived per harness: today `none` harnesses (codex, claude-pty) are locked
+  // and claude is not.
   const catalogue = buildCatalogue(fixture().models, META);
   const capabilities = new Map(readHarnessCapabilities().map((row) => [row.id, row]));
 

@@ -211,11 +211,34 @@ function routeIdFromCatalogue(
   return rows.some((row) => row.source === OPENROUTER_SOURCE) ? id : undefined;
 }
 
+/**
+ * WHY a picker-route spawn did not use the profile it was handed — the answers
+ * the old boolean folded into a single `false` (brick 069fdebe).
+ *
+ * ⚠️ THE SPLIT THAT MATTERS IS *MEASURED* vs *UNEVALUABLE*, NOT WHICH PROFILE.
+ * `not-an-openrouter-account` means the registry was read, names profiles, and
+ * this one is not an OpenRouter account — the second-account guard EVALUATED and
+ * passed. The other two mean the guard evaluated nothing, so a spawn that really
+ * did name two OpenRouter accounts would NOT have been refused on this box. Both
+ * take the picker route regardless; the difference survives nowhere but the log
+ * line, which is the whole point of naming it.
+ */
+export type ProfileBypassReason =
+  | "not-an-openrouter-account"
+  | "registry-holds-no-profiles"
+  | "registry-unreadable";
+
+/** A profile that was supplied and NOT used, with the reason it was not. */
+export type ProfileBypass = {
+  profileId: string;
+  reason: ProfileBypassReason;
+};
+
 /** Which of the three routes a spawn takes, decided in ONE place. */
 export type OpenRouterRoute =
   | { kind: "none" }
   | { kind: "profile"; profileId: string }
-  | { kind: "picker"; model: string };
+  | { kind: "picker"; model: string; profileBypass?: ProfileBypass };
 
 /**
  * THE ROUTE DECISION, as a pure function.
@@ -280,33 +303,67 @@ export async function resolveOpenRouterRoute(params: {
   if (routeModel === undefined) {
     return { kind: "profile", profileId }; // the legacy path, untouched
   }
-  if (profileIsOpenRouterAccount(profileId, params.options)) {
+  const profileBypass = classifyProfileBypass(profileId, params.options);
+  if (!profileBypass) {
     assertNoOpenRouterProfileConflict({ profileId, routeModel });
   }
-  return { kind: "picker", model: routeModel };
+  // The key is OMITTED rather than set to `undefined`: a no-profile picker route
+  // must stay deep-equal to what it was before this field existed.
+  return { kind: "picker", model: routeModel, ...(profileBypass ? { profileBypass } : {}) };
 }
 
 /**
- * Whether this profile id names an OpenRouter ACCOUNT — i.e. a second payer.
+ * Why this profile is NOT used on the picker route — or `undefined` when it IS an
+ * OpenRouter account, i.e. the second payer {@link assertNoOpenRouterProfileConflict}
+ * then refuses.
  *
- * ⚠️ AN UNRESOLVABLE PROFILE ANSWERS `false`, WHICH SENDS THE SPAWN DOWN THE
- * PICKER ROUTE. That is the conservative answer for THIS question — it refuses
- * nothing on a guess — but it does move where a bad profile id is reported: with
- * an OpenRouter model picked, `applyProfileAuth`'s *"profile not found in
- * registry"* no longer fires, because the profile is genuinely not used. A
- * missing profile stops being an error and becomes a profile that does not apply.
- * Stated here because the alternative (refusing) would reinstate the dead end for
- * every box whose registry is unreadable.
+ * ⚠️ NO BEHAVIOUR CHANGES HERE, DELIBERATELY (brick 069fdebe). Every answer below
+ * still takes the picker route. Refusing on anything short of a real second
+ * account would reinstate the dead end this module exists to remove, on every box
+ * whose registry cannot be read — and the UI always sends a profile, so that dead
+ * end would be total. This function only records WHICH question got answered.
+ *
+ * ⚠️ AN UNRESOLVABLE PROFILE STILL ANSWERS "not an account", WHICH SENDS THE SPAWN
+ * DOWN THE PICKER ROUTE. That is the conservative answer for THIS question — it
+ * refuses nothing on a guess — but it does move where a bad profile id is
+ * reported: with an OpenRouter model picked, `applyProfileAuth`'s *"profile not
+ * found in registry"* no longer fires, because the profile is genuinely not used.
+ * A missing profile stops being an error and becomes a profile that does not apply.
+ *
+ * ⚠️ `registry-holds-no-profiles` IS THE REASON A BROKEN REGISTRY ACTUALLY
+ * PRODUCES — NOT `registry-unreadable`, WHICH IS THE OBVIOUS-LOOKING BRANCH AND
+ * IS VIRTUALLY UNREACHABLE. Measured 2026-09-07: `loadProfileRegistry` never
+ * throws and never returns nothing — an ABSENT, a CORRUPT and a mode-000
+ * UNREADABLE registry file all come back as an EMPTY registry (`profiles = 0`),
+ * against a control registry that returned 1. So the box the brick is about —
+ * the one whose second-account guard is not really being applied — arrives HERE,
+ * not below, and until this split it was reported in exactly the same words as a
+ * profile that was read and found to be a Claude subscription.
+ *
+ * ⚠️ AN EMPTY REGISTRY IS ALSO WHAT A BOX WITH NO PROFILES CONFIGURED LOOKS LIKE,
+ * and this reason does not pretend to tell those apart. It states what was
+ * established — there was nothing to evaluate against — and not a cause nobody
+ * measured. Naming an unmeasured cause is the defect this brick is about, one
+ * level up.
  */
-function profileIsOpenRouterAccount(
+function classifyProfileBypass(
   profileId: string,
   options: OpenRouterRouteOptions | undefined,
-): boolean {
+): ProfileBypass | undefined {
   const registry = options?.profileRegistry ?? loadProfileRegistrySafely(options);
   if (!registry) {
-    return false;
+    // Reachable only if `loadProfileRegistry` breaks its own never-throw
+    // contract. Named anyway: the cost is one word, and an unevaluable state
+    // that is silent is exactly what this brick exists to remove.
+    return { profileId, reason: "registry-unreadable" };
   }
-  return findProfile(profileId, registry)?.authMode === "openrouter";
+  if (registry.profiles.length === 0) {
+    return { profileId, reason: "registry-holds-no-profiles" };
+  }
+  if (findProfile(profileId, registry)?.authMode === "openrouter") {
+    return undefined;
+  }
+  return { profileId, reason: "not-an-openrouter-account" };
 }
 
 /** Same never-throw-into-session-creation rule the catalogue read follows. */
