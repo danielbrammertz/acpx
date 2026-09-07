@@ -7,7 +7,11 @@ import {
   type KnownSessionRecord,
   pruneOrphanHarnessConfigDirs,
 } from "../src/acp/harness-config-dir.js";
-import { CONFIG_DIR_ENV_NAMES, type LiveProcessScan } from "../src/process-population.js";
+import {
+  CONFIG_DIR_ENV_NAMES,
+  type LiveProcessScan,
+  NON_OWNERSHIP_ENV_NAMES,
+} from "../src/process-population.js";
 
 // cc9a5f25 — the config-dir sweep removes only on POSITIVE OWNERSHIP.
 //
@@ -243,12 +247,53 @@ test("cc9a5f25: the scanned env names match what the writer actually SETS", asyn
       }
     }
     assert.ok(observed.size > 0, "population: no env names were captured at all");
-    for (const name of observed) {
-      assert.ok(
-        (CONFIG_DIR_ENV_NAMES as readonly string[]).includes(name),
-        `the writer sets ${name}, which the /proc scan does not look for`,
+
+    // ⚠️ EXACTLY ONE LIST, NOT "IS IT IN THE SCAN LIST" (brick 6c94af4a). The
+    // original form asserted membership of `CONFIG_DIR_ENV_NAMES` alone, which
+    // made the only way to green a new variable ADDING IT TO THE SCAN — and for
+    // `XDG_DATA_HOME` that would have been the wrong repair, because widening
+    // ownership attribution is the failure direction that costs someone else's
+    // session (see `NON_OWNERSHIP_ENV_NAMES`).
+    //
+    // The guard keeps its teeth: a newly-set variable is in NEITHER list and
+    // still reds here. What changed is that the message now asks for a decision
+    // instead of naming one list, so the next person classifies rather than
+    // appends.
+    const ownership = new Set<string>(CONFIG_DIR_ENV_NAMES);
+    const nonOwnership = new Set<string>(NON_OWNERSHIP_ENV_NAMES);
+
+    // The two lists must not overlap, independently of what the writer happens to
+    // set today — otherwise "exactly one" below could be satisfied by a name that
+    // is quietly in both.
+    for (const name of ownership) {
+      assert.equal(
+        nonOwnership.has(name),
+        false,
+        `${name} is in BOTH lists — it cannot be an ownership marker and not one`,
       );
     }
+
+    for (const name of observed) {
+      const inOwnership = ownership.has(name);
+      const inNonOwnership = nonOwnership.has(name);
+      assert.ok(
+        inOwnership !== inNonOwnership,
+        `the writer sets ${name}, which is in ${inOwnership ? "both lists" : "neither list"}. ` +
+          "Classify it: does its value differ PER SESSION (then CONFIG_DIR_ENV_NAMES, so the " +
+          "/proc scan can see a live process holding that dir), or is it the same for every " +
+          "session (then NON_OWNERSHIP_ENV_NAMES — adding a constant to the scan can only ever " +
+          "manufacture a false 'in use', never a true one).",
+      );
+    }
+
+    // POPULATION CONTROL on the split itself: this row would pass vacuously if the
+    // writer only ever set non-ownership names, since nothing would then exercise
+    // the scan list. At least one observed name must be a real ownership marker.
+    const observedOwnership = [...observed].filter((n) => ownership.has(n));
+    assert.ok(
+      observedOwnership.length > 0,
+      `no observed name is an ownership marker — the /proc scan would see nothing: ${[...observed].join(", ")}`,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
