@@ -1481,6 +1481,33 @@ export async function startOpenRouterShimForSession(
  * measured arms and the discard above are what license this value — *"past the
  * local login check"* is also **not** *"the route serves"*: only a real turn
  * against the real shim can show that.
+ *
+ * ## 🛑 THE REASON, WRITTEN SO IT CANNOT EXPIRE THE WAY THE LAST ONE DID
+ *
+ * The comment this replaces named a **mechanism** — *"bypass the Bun availability
+ * / key check"* — and a mechanism is exactly the kind of claim a vendor bump
+ * silently falsifies. It did, on 2026-09-01, and the line kept executing while its
+ * justification had quietly become fiction. So the reason below is written as a
+ * REQUIREMENT and a CONSEQUENCE, neither of which depends on how any SDK version
+ * happens to implement its check:
+ *
+ *   **REQUIREMENT.** Claude Code will not talk to a custom `ANTHROPIC_BASE_URL`
+ *   until it considers itself authenticated. Something must satisfy that local
+ *   precondition. The real credential MUST NOT be that something, because the
+ *   shim — not the adapter — is what authenticates to the provider.
+ *   ⇒ a synthetic value belongs here, in every SDK version, whatever the check is.
+ *
+ *   **CONSEQUENCE, and this is the part that shortens the next diagnosis.** If a
+ *   future SDK stops accepting this value, the failure is a LOCAL REFUSAL WITH NO
+ *   HTTP AT ALL: an `authentication_failed` turn, `input_tokens: 0`, a
+ *   `<synthetic>` model, and **nothing in the shim's or the provider's logs**. That
+ *   signature means *"the local login precondition rejected our placeholder"* — it
+ *   does **not** mean a bad key, a broken shim, or an OpenRouter outage. Re-measure
+ *   what the SDK accepts and change ONLY this constant.
+ *
+ * ⇒ **If you are reading this because OpenRouter sessions stopped working: check
+ * whether any request left the box before you touch anything downstream.** That
+ * one question is what took a day to ask last time.
  */
 export const OPENROUTER_SHIM_AUTH_PLACEHOLDER = "acpx-openrouter-shim-placeholder";
 
