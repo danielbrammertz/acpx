@@ -1375,6 +1375,7 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   if (input.provisionModelId) {
     writePiModelsStore(dir, input.env, stripProviderPrefix(input.provisionModelId), files);
   }
+  writePiStallPolicy(dir, files);
   // ⚠️ KEEP pi's SESSION STORE WHERE IT WAS — read BEFORE the re-point below,
   // which is the last moment the box's own agent dir is still reachable through
   // the variable we are about to overwrite (brick ac86eb34; same ordering as the
@@ -1387,6 +1388,111 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     envNames.push("PI_CODING_AGENT_SESSION_DIR");
   }
   return { harness: "pi", dir, envNames, files };
+}
+
+/** pi's HTTP idle bound for acpx-PROVISIONED sessions, in ms. See {@link writePiStallPolicy}. */
+const PI_HTTP_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * pi retries a failed turn `maxRetries` times, so ATTEMPTS = 1 + this.
+ *
+ * 🛑 **`1` IS A COMPENSATION FOR A MISSING DEADLINE, NOT A CONSIDERED PERMANENT
+ * VALUE — do not read it as tuning.** `maxRetries` governs **every** transient
+ * failure (rate limits, 5xx, network blips), not just idle stalls, so dropping
+ * pi's default of 3 to 1 buys the wall-clock target by **spending resilience
+ * against a different failure class**. That trade is acceptable only because pi
+ * has no total-turn deadline (see {@link writePiStallPolicy}), which makes the
+ * `idle × attempts` product the only lever available.
+ *
+ * ⇒ **When a turn deadline lands in acpx's own code, this should go back up.**
+ */
+const PI_TURN_MAX_RETRIES = 1;
+
+/**
+ * Bound how long an acpx-provisioned pi session sits in dead air when the
+ * provider stalls (brick 3437c6b5, from Daniel's *"the second message was not
+ * answered"*).
+ *
+ * ## What actually happened, and why this is a policy choice and not a fix
+ *
+ * The request was ACCEPTED and delivered **zero bytes**. Nothing here makes it
+ * return. What we choose is how long the user waits for the error: pi's defaults
+ * are `httpIdleTimeoutMs` 300 000 × 4 attempts with 2/4/8 s backoff —
+ * **20 m 14 s**, against the **20 m 15 s** actually observed.
+ *
+ * ## The arithmetic, so a future change to either number stays honest
+ *
+ * `agent-session.js:2279-2291` (`_prepareRetry`): `_retryAttempt++`, stop once it
+ * exceeds `retry.maxRetries`, `delayMs = baseDelayMs · 2^(n-1)`. So:
+ *
+ * ```
+ * worst case ≈ idleMs × (1 + maxRetries) + baseDelayMs × (2^maxRetries − 1)
+ * ```
+ *
+ * At 120 000 / 1 that is **4 m 02 s**, inside the ≤ ~5 min target.
+ * ⚠️ **The ruling's own wording — "idle ~120 s × 2 retries" — is 3 attempts and
+ * 6 m 06 s, i.e. OVER the target it sets.** One retry is chosen over two so the
+ * per-attempt window can stay at the generous 120 s: against a *provider* stall a
+ * second retry mostly buys another full window of silence rather than a different
+ * outcome, whereas a shorter window is what starts cutting healthy requests.
+ *
+ * ## 🛑 WHAT THIS DOES NOT BUY — and it is half the failure space
+ *
+ * **`httpIdleTimeoutMs` is undici's `bodyTimeout`/`headersTimeout`, a per-byte
+ * INACTIVITY timer — and an SSE comment keepalive is bytes.** Measured twice
+ * against pi 0.84.4's own `configureHttpDispatcher` at a 10 s bound
+ * (evidence: brick 3437c6b5 `verification/evidence/keepalive-idle-bound-run2.log`):
+ *
+ *   - headers then **zero bytes** → fires at **10 506 ms**. ← the incident's shape
+ *   - `: OPENROUTER PROCESSING` every 5 s → **NEVER FIRES** (45 s cap, 8 chunks)
+ *   - keepalives for 20 s **then silence** → fires at **25 537 ms** = last byte + the bound
+ *
+ * ⇒ against a stall that keeps emitting keepalives **this bound is inert, at any
+ * value**: above the keepalive interval it never fires, and below it the bound
+ * also cuts genuinely slow-first-token requests, which is exactly what those
+ * keepalives exist to prevent. **A shape mismatch, not a wrong number.**
+ *
+ * ⚠️ **And there is no second line of defence to fall back on.** pi's other
+ * timeout (`sdk.js:187-196` → `openai-completions.js:210` → the OpenAI SDK's
+ * `requestOptions.timeout`) is cleared in a `finally` the moment `fetch()`
+ * resolves — **which for a stream is when HEADERS arrive, before one body byte is
+ * read** (`openai` 6.40.0 `client.js:489-513`). It bounds response
+ * ESTABLISHMENT only. **pi 0.84.4 has no total-turn deadline of any kind.**
+ *
+ * ⇒ **Bounding the keepalive-emitting mode needs a turn deadline in OUR code, and
+ * is deliberately NOT attempted here.** Anyone reading this as "pi stalls now
+ * surface in five minutes" is wrong for the half of the space that keeps talking.
+ *
+ * ## Why a partial settings object is the correct shape
+ *
+ * This dir IS the session's agent dir (`PI_CODING_AGENT_DIR` is re-pointed
+ * below), so `<dir>/settings.json` is the only global settings file the session
+ * ever reads — the box's own `~/.pi/agent/settings.json` is already out of scope
+ * for the same reason, with or without this file. Every key pi does not find here
+ * falls back to its own default (`retry.enabled ?? true`,
+ * `retry.baseDelayMs ?? 2000`), so naming only what we are changing is right.
+ * **pi's defaults for direct users are untouched: this file exists only inside a
+ * per-session dir acpx creates and removes.**
+ *
+ * ⚠️ `parseTimeoutSetting` THROWS on a value it cannot parse rather than falling
+ * back — a malformed number here is a hard startup error, not a silent default.
+ * Keep these plain integers.
+ */
+function writePiStallPolicy(dir: string, files: string[]): void {
+  const settingsPath = join(dir, "settings.json");
+  writeFileSync(
+    settingsPath,
+    `${JSON.stringify(
+      {
+        httpIdleTimeoutMs: PI_HTTP_IDLE_TIMEOUT_MS,
+        retry: { maxRetries: PI_TURN_MAX_RETRIES },
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  files.push(settingsPath);
 }
 
 /**

@@ -302,7 +302,15 @@ test("pi DOES get a generated models-store.json now that the merge semantics are
     // Same split as the row this replaces: acpx's own bookkeeping is judged apart
     // from what the harness consumes, so a NEW entry in either still fails here.
     const harnessVisible = written.filter((entry) => !entry.startsWith("."));
-    assert.deepEqual(harnessVisible.toSorted(), ["APPEND_SYSTEM.md", "models-store.json"]);
+    // `settings.json` joined this list with the pi stall policy (brick 3437c6b5).
+    // The row failing on a new entry is the contract working, not a nuisance: it
+    // is the only thing that notices acpx quietly adding a file to a directory a
+    // harness reads, so it is UPDATED here rather than loosened.
+    assert.deepEqual(harnessVisible.toSorted(), [
+      "APPEND_SYSTEM.md",
+      "models-store.json",
+      "settings.json",
+    ]);
     assert.deepEqual(
       written.filter((entry) => entry.startsWith(".")),
       [".acpx-holders"],
@@ -327,6 +335,79 @@ test("pi DOES get a generated models-store.json now that the merge semantics are
       ["zzz/not-in-any-catalogue"],
     );
     assert.equal(store.openrouter.models[0].baseUrl, "https://openrouter.ai/api/v1");
+  });
+});
+
+test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR inside the 5-minute target", () => {
+  // 🛑 WHAT THIS ROW DOES NOT PROVE, SAID FIRST SO NOBODY READS MORE INTO IT.
+  // It does NOT prove the bound fires. A config carrying a number and a timeout
+  // that actually triggers are different claims, and only one of them is
+  // checkable without a provider. The BEHAVIOURAL proof is a rig that drives pi
+  // 0.84.4's own `configureHttpDispatcher` against a stalling SSE server —
+  // brick 3437c6b5, `verification/evidence/keepalive-idle-bound-run2.log`:
+  // zero-byte stall fires at 10 506 ms against a 10 000 ms bound; a
+  // keepalive-emitting stall NEVER fires; keepalives-then-silence fires at
+  // last-byte + the bound.
+  //
+  // What it DOES pin is the thing a future edit is most likely to break silently:
+  // the two settings are not independent, and the number that matters is neither
+  // of them alone but the WORST-CASE TOTAL they imply. Raising the idle bound back
+  // toward pi's 300 000 default, or adding a retry "for resilience", blows the
+  // budget while every individual value still looks reasonable in review.
+  withTempRoot((root) => {
+    const env = piIsolatedEnv(root, { piKnows: [] });
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_pi_stall",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(env.PI_CODING_AGENT_DIR, "PI_CODING_AGENT_DIR unset — the read below would be of nothing");
+
+    const settings = JSON.parse(
+      readFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"),
+    ) as { httpIdleTimeoutMs: number; retry: { maxRetries: number; baseDelayMs?: number } };
+
+    // pi's own default, relied on by the budget below. Asserting its ABSENCE is
+    // deliberate: if a later change starts setting it, this arithmetic is no
+    // longer reading the value pi will actually use, and the row must be updated
+    // rather than quietly becoming wrong.
+    assert.equal(
+      settings.retry.baseDelayMs,
+      undefined,
+      "baseDelayMs is now set explicitly — the worst-case budget below no longer uses pi's default",
+    );
+    const PI_DEFAULT_BASE_DELAY_MS = 2_000;
+
+    // `agent-session.js:2279-2291`: attempts = 1 + maxRetries, backoff = base·2^(n-1).
+    // Calibration: pi's OWN defaults (300 000, 3) give 1 214 000 ms — and the
+    // incident that prompted this was measured at 20 m 15 s. The formula
+    // reproduces the bug it is protecting against, which is what makes it a
+    // budget and not an arbitrary inequality.
+    const worstCaseMs = (idleMs: number, maxRetries: number): number =>
+      idleMs * (1 + maxRetries) + PI_DEFAULT_BASE_DELAY_MS * (2 ** maxRetries - 1);
+
+    assert.equal(
+      worstCaseMs(300_000, 3),
+      1_214_000,
+      "the budget formula no longer reproduces the 20m14s default it was derived from",
+    );
+
+    const budgetMs = worstCaseMs(settings.httpIdleTimeoutMs, settings.retry.maxRetries);
+    assert.ok(
+      budgetMs <= 300_000,
+      `worst-case dead air is ${budgetMs} ms (idle ${settings.httpIdleTimeoutMs} ms x ${
+        1 + settings.retry.maxRetries
+      } attempts) — over the 300 000 ms target this policy exists to hold`,
+    );
+    // The lower bound is the other half of the trade: an idle bound is what cuts a
+    // model that is genuinely slow to first token, so driving these numbers down
+    // to buy a tighter budget is a REGRESSION, not an improvement.
+    assert.ok(
+      settings.httpIdleTimeoutMs >= 60_000,
+      `idle bound ${settings.httpIdleTimeoutMs} ms is below 60 s — that cuts slow-first-token models`,
+    );
   });
 });
 
