@@ -79,6 +79,21 @@ export type ModelBilling = {
   inPerM: number | null;
   /** USD per 1M completion tokens. `null` unless kind === "metered". */
   outPerM: number | null;
+  /**
+   * USD per 1M cached-prompt-READ tokens. `null` when the upstream row does not
+   * quote one — which is NOT the same as zero, and must not be rendered or
+   * summed as zero.
+   *
+   * ⚠️ **Added for brick 6253611b, and the reason is a measurement, not
+   * symmetry:** cached tokens are not a rounding error on the harnesses that
+   * report them. One production pi session shows `cacheRead: 18,884` against
+   * `input: 2,928` — a 6:1 ratio. Pricing a session on prompt+completion alone
+   * therefore understates it badly, and an understated figure presented without
+   * qualification is the same defect class this brick exists to remove.
+   */
+  cacheReadPerM: number | null;
+  /** USD per 1M cache-WRITE tokens. `null` when not quoted; see `cacheReadPerM`. */
+  cacheWritePerM: number | null;
   /** Which credential pays. */
   account: string;
 };

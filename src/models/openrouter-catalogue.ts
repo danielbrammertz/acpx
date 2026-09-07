@@ -26,6 +26,10 @@ export type OpenRouterRawModel = {
   context_length?: number;
   alias_target?: string;
   pricing?: Record<string, string>;
+  /** The serving provider's own bounds. `max_completion_tokens` is the OUTPUT
+   *  cap and is NOT `context_length`; conflating them hands a harness a
+   *  nonsensical `maxTokens`. Present on 424 of 430 rows (measured 2026-09-07). */
+  top_provider?: { context_length?: number; max_completion_tokens?: number };
   supported_parameters?: string[];
   reasoning?: {
     mandatory?: boolean;
@@ -92,6 +96,22 @@ function readCache(cachePath: string): OpenRouterSnapshot | null {
     // session create must not fail because this file is unreadable.
     return null;
   }
+}
+
+/**
+ * The cached snapshot, SYNCHRONOUSLY and without any network access.
+ *
+ * `loadOpenRouterCatalogue` is async because it may refresh. Some callers cannot
+ * await and must not fetch — the harness config-dir writer runs on the session
+ * spawn path (brick 6253611b) and needs the price of the model it is
+ * provisioning without adding a network hop to every session create. `null` is a
+ * cold cache, which such a caller must handle as "no price known", never as
+ * "free".
+ */
+export function readOpenRouterCacheSync(
+  cachePath = defaultCatalogueCachePath(),
+): OpenRouterSnapshot | null {
+  return readCache(cachePath);
 }
 
 /** Atomic tmp + rename — a reader never sees a half-written catalogue. */

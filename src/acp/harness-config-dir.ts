@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { deriveBilling } from "../models/catalogue.js";
+import { readOpenRouterCacheSync } from "../models/openrouter-catalogue.js";
+import type { ModelBilling } from "../models/types.js";
 import {
   type LivePidScan,
   type LiveProcessScan,
@@ -17,6 +20,7 @@ import {
   type HarnessId,
 } from "./harness-capabilities.js";
 import { resolveHarnessConfigDirRoot } from "./harness-config-dir-root.js";
+import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
 import {
   isOpenCodePluginCacheEntry,
   type PluginCacheResult,
@@ -1444,21 +1448,29 @@ function writePiModelsStore(
     }
   }
 
+  // ⚠️ THE GUARD ASKS ABOUT **PI'S** KNOWLEDGE, NOT THE OVERLAY'S (brick 6253611b).
+  // The overlay alone was the wrong question: 333 of the 374 models pi advertises
+  // are BUNDLED, and on every dev box the overlay file does not exist at all — so
+  // the "a slug the catalogue already carries needs nothing" protection below was
+  // unreachable for EVERY model, and each session replaced pi's real entry with a
+  // fabricated one. `readPiAdvertisedModelIds` returns `null` when pi could not be
+  // asked, which must NOT be read as "pi knows nothing".
+  const piKnown = readPiAdvertisedModelIds(env);
+  const alreadyKnown = models.some((model) => model.id === modelId) || (piKnown?.has(modelId) ?? false);
+
+  // Nothing to add AND nothing to repair ⇒ write no file at all. This is the
+  // point of the fix: a store we do not write cannot replace pi's block, so the
+  // model keeps its real price, its real context window and its
+  // `thinkingLevelMap`, and the session keeps the models the overlay would have
+  // displaced.
+  if (alreadyKnown && models.length === 0) {
+    return;
+  }
+
   // A slug the catalogue already carries needs nothing: it keeps every field pi
   // has for it, including the `thinkingLevelMap` the depth ladder is derived from.
-  if (!models.some((model) => model.id === modelId)) {
-    models.push({
-      id: modelId,
-      name: modelId,
-      api: "openai-completions",
-      baseUrl: OPENROUTER_API_BASE,
-      provider: "openrouter",
-      reasoning: true,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128000,
-      maxTokens: 16384,
-    });
+  if (!alreadyKnown) {
+    models.push(buildPiCatalogueEntry(modelId));
   }
 
   const now = Date.now();
@@ -1473,6 +1485,84 @@ function writePiModelsStore(
 
 const OPENROUTER_API_BASE = "https://openrouter.ai/api/v1";
 const OPENROUTER_API_BASE_NO_V1 = "https://openrouter.ai/api";
+
+/** pi's fallbacks for a model whose real values acpx does not know. Named so the
+ *  two "we are guessing" sites are visible instead of buried in a literal. */
+const PI_FALLBACK_CONTEXT_WINDOW = 128_000;
+const PI_FALLBACK_MAX_TOKENS = 16_384;
+
+/**
+ * The catalogue entry for a model pi genuinely does not know — built from
+ * **acpx's own OpenRouter cache**, keyed by the determining id, never composed
+ * (brick 6253611b).
+ *
+ * ## 🛑 WHY A ZERO `cost` BLOCK IS WRITTEN FOR AN UNPRICEABLE MODEL
+ *
+ * The honest-looking move — omit `cost` when no price is known — **crashes pi on
+ * the first turn.** Measured 2026-09-07 by calling pi's own exported
+ * `calculateCost` (pi 0.84.4): with a priced model it returns `0.00123861`; with
+ * `cost` absent it throws **`TypeError: Cannot read properties of undefined
+ * (reading 'tiers')`**, because the `?? []` there guards a missing `tiers`, not a
+ * missing `cost`. pi's schema marks `cost` OPTIONAL, so such an entry **validates
+ * in and is then dereferenced** — it would pass every schema-shaped check and
+ * fail at runtime, on the rarest path.
+ *
+ * **pi has no representation for "unknown", so the zero is an internal necessity
+ * of pi's data model — NOT a claim.** The fact that the price is unknown is
+ * carried in acpx's own provenance field (`src/models/cost-provenance.ts`) and is
+ * what any human-facing surface renders. **A zero must never be PRESENTED as a
+ * cost; that is the defect this brick removes, and re-introducing it one level up
+ * by suppressing the block would trade a wrong number for a broken session.**
+ */
+function buildPiCatalogueEntry(modelId: string): PiCatalogueModel {
+  const priced = lookupOpenRouterPricing(modelId);
+  return {
+    id: modelId,
+    name: modelId,
+    api: "openai-completions",
+    baseUrl: OPENROUTER_API_BASE,
+    provider: "openrouter",
+    reasoning: true,
+    input: ["text"],
+    // pi's rates are USD per 1M tokens, the same unit `ModelBilling` uses.
+    cost: {
+      input: priced?.billing.inPerM ?? 0,
+      output: priced?.billing.outPerM ?? 0,
+      cacheRead: priced?.billing.cacheReadPerM ?? 0,
+      cacheWrite: priced?.billing.cacheWritePerM ?? 0,
+    },
+    contextWindow: priced?.contextLength ?? PI_FALLBACK_CONTEXT_WINDOW,
+    maxTokens: priced?.maxTokens ?? PI_FALLBACK_MAX_TOKENS,
+  };
+}
+
+/**
+ * The model's row in acpx's OpenRouter cache. Synchronous and network-free by
+ * construction: this runs on the session-spawn path, where a fetch would put a
+ * network hop in front of every session create.
+ */
+function lookupOpenRouterPricing(
+  modelId: string,
+): { billing: ModelBilling; contextLength: number | null; maxTokens: number | null } | null {
+  const snapshot = readOpenRouterCacheSync();
+  const row = snapshot?.models.find((model) => model.id === modelId);
+  if (!row) {
+    return null;
+  }
+  const billing = deriveBilling(row);
+  return {
+    billing,
+    contextLength: typeof row.context_length === "number" ? row.context_length : null,
+    // The OUTPUT cap, which is a different number from the context window — for
+    // `qwen/qwen3.8-flash` they are 131,072 and 1,000,000, and pi's own bundled
+    // entry agrees exactly. Using `context_length` for both would hand pi a
+    // nonsensical completion bound.
+    maxTokens:
+      typeof row.top_provider?.max_completion_tokens === "number"
+        ? row.top_provider.max_completion_tokens
+        : null,
+  };
+}
 
 type PiCatalogueModel = {
   id?: string;
