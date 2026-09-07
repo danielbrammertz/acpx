@@ -2907,10 +2907,37 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
           deliveryPhaseForStopReason(terminalStopReason),
           terminalStopReason === "cancelled" ? { stopReason: "cancelled" } : { stopReason: null },
         );
+        // brick 4ec33f59 — a turn that FAILED HARD still terminates `done`,
+        // because the ACP wire StopReason union has no `"error"` member. The
+        // adapter reports the failure out of band (`_meta.piAcp.turnError`) and
+        // `runPromptTurn` reads it. Carry it here, or the failure reaches nobody:
+        // the terminal falls back to EMPTY_DELIVERY_ERROR and acpx-ui renders a
+        // clean success for a turn that failed. It stays a `done` — the message
+        // WAS delivered and the model DID take the turn, so nothing here may
+        // become a failure phase or acquire a resend verdict; it reports, it does
+        // not instruct.
+        //
+        // ⚠️ DO NOT "SIMPLIFY" THIS TO ALWAYS PASS AN `error`, and do not drop the
+        // emptiness check in `turnErrorFromMeta`. `buildDeliveryEvent` substitutes
+        // EMPTY_DELIVERY_ERROR (`{code:0, message:""}`) whenever `error` is
+        // absent, so acpx sends an error object on EVERY done, successful or not.
+        // acpx-ui treats a NON-EMPTY `message` as the failure note — so passing an
+        // empty-message error unconditionally would stamp "the turn reported an
+        // error" onto EVERY SUCCESSFUL TURN IN THE APP. From inside this file that
+        // guard looks like defensive clutter; the reason lives in acpx-ui, whose
+        // control `4ec33f59 CONTROL: a clean 'done' invents no note` goes red the
+        // moment this widens. The acpx-side control below pins the same property.
+        const turnErrorForTerminal =
+          terminalStopReason === "cancelled" ? undefined : response.turnError;
         await appendDeliveryTerminal(
           mainDeliveryContext,
           deliveryPhaseForStopReason(terminalStopReason),
-          { stopReason: toDeliveryStopReason(terminalStopReason) },
+          {
+            stopReason: toDeliveryStopReason(terminalStopReason),
+            ...(turnErrorForTerminal
+              ? { error: { code: 0, message: turnErrorForTerminal, detailCode: "" } }
+              : {}),
+          },
         );
         promptTurnActive = false;
 
