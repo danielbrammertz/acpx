@@ -173,6 +173,11 @@ test("billing: prices are USD per 1M, and the variable routers are marked as suc
       kind: "metered",
       inPerM: 3,
       outPerM: 15,
+      // A row that quotes no cache rate yields `null`, not `0` (brick 6253611b):
+      // "no rate is stated" and "the rate is zero" are different facts, and
+      // collapsing them is the defect that made a Pi session read as free.
+      cacheReadPerM: null,
+      cacheWritePerM: null,
       account: "openrouter",
     },
   );

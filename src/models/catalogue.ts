@@ -74,15 +74,36 @@ function perMillion(price: string | undefined): number | null {
 
 export function deriveBilling(model: OpenRouterRawModel): ModelBilling {
   const prompt = model.pricing?.prompt;
+  // The cache rates ride along on every branch (brick 6253611b). They are read
+  // from the SAME upstream row as the prompt/completion rates, so they can never
+  // disagree with them about which model they describe.
+  const cacheReadPerM = perMillion(model.pricing?.input_cache_read);
+  const cacheWritePerM = perMillion(model.pricing?.input_cache_write);
   if (prompt === "-1") {
-    return { kind: "variable", inPerM: null, outPerM: null, account: OPENROUTER_ACCOUNT };
+    return {
+      kind: "variable",
+      inPerM: null,
+      outPerM: null,
+      cacheReadPerM: null,
+      cacheWritePerM: null,
+      account: OPENROUTER_ACCOUNT,
+    };
   }
   const inPerM = perMillion(prompt);
   const outPerM = perMillion(model.pricing?.completion);
   if (inPerM === 0 && (outPerM ?? 0) === 0) {
-    return { kind: "free", inPerM: 0, outPerM: 0, account: OPENROUTER_ACCOUNT };
+    // A MEASURED zero: the upstream row quotes zero. Distinct from "no price is
+    // known", which is `variable`/absent — see `ModelBilling`.
+    return {
+      kind: "free",
+      inPerM: 0,
+      outPerM: 0,
+      cacheReadPerM: cacheReadPerM ?? 0,
+      cacheWritePerM: cacheWritePerM ?? 0,
+      account: OPENROUTER_ACCOUNT,
+    };
   }
-  return { kind: "metered", inPerM, outPerM, account: OPENROUTER_ACCOUNT };
+  return { kind: "metered", inPerM, outPerM, cacheReadPerM, cacheWritePerM, account: OPENROUTER_ACCOUNT };
 }
 
 /** The band grouping. Derived server-side so the UI and the CLI band identically (C5 §8.1). */

@@ -192,7 +192,17 @@ function nativeRow(params: {
     description: params.description,
     contextLength: null,
     tools: true,
-    billing: { kind: "plan", inPerM: null, outPerM: null, account: params.account },
+    // A plan-billed seat quotes no per-token rate of any kind — including the
+    // cache rates (brick 6253611b). `null` here is "no rate is stated", which is
+    // deliberately NOT zero: a zero would be a price we are asserting.
+    billing: {
+      kind: "plan",
+      inPerM: null,
+      outPerM: null,
+      cacheReadPerM: null,
+      cacheWritePerM: null,
+      account: params.account,
+    },
     depth: params.depth,
     badges: [],
     aliasTarget: null,

@@ -26,6 +26,10 @@ export type OpenRouterRawModel = {
   context_length?: number;
   alias_target?: string;
   pricing?: Record<string, string>;
+  /** The serving provider's own bounds. `max_completion_tokens` is the OUTPUT
+   *  cap and is NOT `context_length`; conflating them hands a harness a
+   *  nonsensical `maxTokens`. Present on 424 of 430 rows (measured 2026-09-07). */
+  top_provider?: { context_length?: number; max_completion_tokens?: number };
   supported_parameters?: string[];
   reasoning?: {
     mandatory?: boolean;
@@ -56,12 +60,32 @@ export type OpenRouterLoadResult = {
  * is the override every other acpx path resolver already honours
  * (`src/cli/config.ts:81`, `src/session/event-log.ts:9`).
  */
-export function defaultCatalogueCachePath(): string {
-  const explicit = process.env.ACPX_MODELS_CACHE?.trim();
+/**
+ * ⚠️ TAKES THE `env` IT IS ASKED ABOUT, NOT THE PROCESS'S (brick ff298f02).
+ *
+ * This read no-argument form resolved `process.env` and `os.homedir()`, so a
+ * caller threading a SCOPED env — `applyHarnessConfigDir` does, and so does every
+ * test built on it — silently got the machine's catalogue instead of its own.
+ * Measured: `test/pi-models-store.test.ts` set `ACPX_MODELS_CACHE` in its fixture
+ * env and that variable was **inert**; CASE 1 passed only because
+ * `/home/node/.acpx/models-cache.json` happened to contain the model it asserts
+ * on. Run under any other HOME — which is to say, on any other box — it RED.
+ *
+ * The default parameter keeps every existing caller byte-identical: on POSIX
+ * `os.homedir()` is `$HOME` when it is set, so the added `env.HOME` leg changes
+ * nothing for a caller that passes no env. Same resolution order as
+ * `piKnowledgeCachePath` and `readBoxPiOpenRouterModels`, deliberately.
+ */
+export function defaultCatalogueCachePath(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.ACPX_MODELS_CACHE?.trim();
   if (explicit) {
     return path.resolve(explicit);
   }
-  return path.join(process.env.ACPX_STATE_HOME || os.homedir(), ".acpx", "models-cache.json");
+  return path.join(
+    env.ACPX_STATE_HOME?.trim() || env.HOME?.trim() || os.homedir(),
+    ".acpx",
+    "models-cache.json",
+  );
 }
 
 function readCache(cachePath: string): OpenRouterSnapshot | null {
@@ -92,6 +116,22 @@ function readCache(cachePath: string): OpenRouterSnapshot | null {
     // session create must not fail because this file is unreadable.
     return null;
   }
+}
+
+/**
+ * The cached snapshot, SYNCHRONOUSLY and without any network access.
+ *
+ * `loadOpenRouterCatalogue` is async because it may refresh. Some callers cannot
+ * await and must not fetch — the harness config-dir writer runs on the session
+ * spawn path (brick 6253611b) and needs the price of the model it is
+ * provisioning without adding a network hop to every session create. `null` is a
+ * cold cache, which such a caller must handle as "no price known", never as
+ * "free".
+ */
+export function readOpenRouterCacheSync(
+  cachePath = defaultCatalogueCachePath(),
+): OpenRouterSnapshot | null {
+  return readCache(cachePath);
 }
 
 /** Atomic tmp + rename — a reader never sees a half-written catalogue. */
