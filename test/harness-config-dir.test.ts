@@ -182,10 +182,17 @@ test("an agent command the descriptor cannot classify gets nothing", () => {
 
 // ── OpenCode ─────────────────────────────────────────────────────────────────
 
-test("opencode gets BOTH XDG_CONFIG_HOME and OPENCODE_CONFIG_DIR", () => {
-  // ⚠️ BOTH, together. OpenCode MERGES config from both, so setting only
+test("opencode gets XDG_CONFIG_HOME, OPENCODE_CONFIG_DIR and XDG_DATA_HOME", () => {
+  // ⚠️ The first two, together. OpenCode MERGES config from both, so setting only
   // OPENCODE_CONFIG_DIR does not isolate the session — I1's first negative
   // control failed for exactly this reason.
+  //
+  // ⚠️ AND THE THIRD, WHICH ANSWERS A DIFFERENT QUESTION (brick 6c94af4a). The
+  // config pair decides what OpenCode READS; `XDG_DATA_HOME` decides where it
+  // keeps the CONVERSATION. This row pins that all three are applied; that the
+  // data dir actually SURVIVES losing the fallback path is a separate row, in
+  // `opencode-data-dir-durability.test.ts` — presence here, survival there,
+  // because asserting the variable exists would not have caught this defect.
   withTempRoot((root) => {
     const env: NodeJS.ProcessEnv = {};
     const plan = applyHarnessConfigDir({
@@ -198,9 +205,17 @@ test("opencode gets BOTH XDG_CONFIG_HOME and OPENCODE_CONFIG_DIR", () => {
       rootDir: root,
     });
     assert.ok(plan);
-    assert.deepEqual(plan.envNames.toSorted(), ["OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"]);
+    assert.deepEqual(plan.envNames.toSorted(), [
+      "OPENCODE_CONFIG_DIR",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+    ]);
     assert.ok(env.XDG_CONFIG_HOME, "XDG_CONFIG_HOME unset — the session is NOT isolated");
     assert.ok(env.OPENCODE_CONFIG_DIR, "OPENCODE_CONFIG_DIR unset");
+    assert.ok(
+      env.XDG_DATA_HOME,
+      "XDG_DATA_HOME unset — OpenCode would keep the conversation under $HOME/.local/share",
+    );
     assert.equal(env.OPENCODE_CONFIG_DIR, join(env.XDG_CONFIG_HOME, "opencode"));
 
     const config = JSON.parse(
