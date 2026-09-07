@@ -50,7 +50,11 @@ const KNOWN_ROW = {
 
 type Fixture = { root: string; env: NodeJS.ProcessEnv; home: string };
 
-function fixture(options: { piKnows?: string[]; catalogue?: unknown[]; boxOverlay?: unknown[] }): Fixture {
+function fixture(options: {
+  piKnows?: string[];
+  catalogue?: unknown[];
+  boxOverlay?: unknown[];
+}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "acpx-pi-store-test-"));
   const home = join(root, "home");
   mkdirSync(home, { recursive: true });
@@ -118,10 +122,25 @@ test("CASE 1 — a model acpx CAN price gets pi's REAL rates, window and output 
     const entry = store.json.openrouter.models.find((m: any) => m.id === KNOWN_ID);
     assert.ok(entry, "the provisioned slug must be present");
 
-    // The defect, pinned by its exact values rather than by "not zero": a
+    // The defect, pinned by its real values rather than by "not zero": a
     // regression that reintroduced ANY of these three literals would be caught.
-    assert.deepEqual(entry.cost, { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0.2 });
-    assert.equal(entry.contextWindow, 1_000_000, "the real window — 128000 caused ~8x early compaction");
+    //
+    // ⚠️ Compared with a tolerance, NOT `deepEqual`. `0.0000002 * 1e6` is
+    // `0.19999999999999998` in IEEE-754, and an exact assertion here would be a
+    // test that fails on arithmetic rather than on behaviour — the classic way a
+    // correct change gets reverted.
+    assert.equal(entry.cost.input, 0.15);
+    assert.equal(entry.cost.output, 0.47);
+    assert.equal(entry.cost.cacheRead, 0.016);
+    assert.ok(
+      Math.abs(entry.cost.cacheWrite - 0.2) < 1e-12,
+      `cacheWrite should be ~0.2, got ${entry.cost.cacheWrite}`,
+    );
+    assert.equal(
+      entry.contextWindow,
+      1_000_000,
+      "the real window — 128000 caused ~8x early compaction",
+    );
     assert.equal(entry.maxTokens, 131_072, "the real output cap — 16384 was an 8x cap for nothing");
   } finally {
     rmSync(fx.root, { recursive: true, force: true });
@@ -133,7 +152,9 @@ test("CASE 2 — a model acpx CANNOT price gets a ZERO cost block (pi crashes wi
   try {
     const store = storeFor(fx, "openrouter/vendor/never-heard-of-it");
     assert.ok(store, "an unknown model still needs an entry to be selectable at all");
-    const entry = store.json.openrouter.models.find((m: any) => m.id === "vendor/never-heard-of-it");
+    const entry = store.json.openrouter.models.find(
+      (m: any) => m.id === "vendor/never-heard-of-it",
+    );
     assert.ok(entry, "the provisioned slug must be present");
 
     // MEASURED against pi 0.84.4's own exported `calculateCost`: with `cost`
@@ -208,7 +229,10 @@ test("pi knowledge: a failure to ASK is null, and is not the same as an empty se
     assert.equal(empty.size, 0);
 
     // A stale cache beats nothing when pi cannot be asked.
-    writeFileSync(cachePath, JSON.stringify({ fetchedAt: new Date(0).toISOString(), ids: ["a/b"] }));
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ fetchedAt: new Date(0).toISOString(), ids: ["a/b"] }),
+    );
     const stale = readPiAdvertisedModelIds({}, { cachePath, readAdvertised: () => null });
     assert.deepEqual([...(stale ?? [])], ["a/b"]);
   } finally {
@@ -220,7 +244,10 @@ test("billing carries the CACHE rates, and an unquoted rate is null — not zero
   const priced = deriveBilling(KNOWN_ROW as never);
   assert.equal(priced.kind, "metered");
   assert.equal(priced.cacheReadPerM, 0.016);
-  assert.equal(priced.cacheWritePerM, 0.2);
+  assert.ok(
+    Math.abs((priced.cacheWritePerM ?? 0) - 0.2) < 1e-12,
+    "IEEE-754: 0.0000002*1e6 ≠ 0.2 exactly",
+  );
 
   const noCacheRates = deriveBilling({
     id: "x/y",
