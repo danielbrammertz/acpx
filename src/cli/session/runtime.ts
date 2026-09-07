@@ -89,6 +89,7 @@ import {
 import {
   advertisedAfterModelApply,
   applyRequestedModelIfAdvertised,
+  modelServedOutOfBand,
 } from "../../session/model-application.js";
 import { enforceModelFloorPostServe } from "../../session/model-floor-enforce.js";
 import { captureServedState } from "../../session/model-floor.js";
@@ -809,7 +810,15 @@ async function applyPromptModelAsConfigOption(
   await persistChangedModelPin(params.record, before);
 }
 
-async function applyPromptModelIfAdvertised(params: {
+/**
+ * ⚠️ EXPORTED FOR THE TURN-PATH REGRESSION TEST (brick 007eaac8), and the reason
+ * is worth the export. This function is THE prompt path — it runs on every turn,
+ * right after `connectForPrompt()` — and it is where a picker-route session broke
+ * on its FIRST prompt while create-time tests were green. A create-time green plus
+ * a four-route accept/refuse table was 4/4 correct while this was failing, so the
+ * only test that could have caught it is one that drives THIS function.
+ */
+export async function applyPromptModelIfAdvertised(params: {
   client: AcpClient;
   sessionId: string;
   requestedModel: string | undefined;
@@ -840,6 +849,32 @@ async function applyPromptModelIfAdvertised(params: {
   // model IS settable — the prompt-time twin of the replay defect.
   if (modelMechanismForAgentCommand(params.record.agentCommand) === "config-option") {
     await applyPromptModelAsConfigOption(params, requestedModel, before);
+    return;
+  }
+
+  // 🛑 SERVED OUT OF BAND — SUPPRESS THE WHOLE ACP-SIDE APPLY (brick 007eaac8).
+  //
+  // ⚠️ THIS IS THE F-9 FAMILY'S FOURTH MEMBER, AND OMITTING IT WAS A LIVE
+  // USER-VISIBLE OUTAGE, not a missing nicety. On claude's OpenRouter picker route
+  // the shim serves the slug and the adapter advertises only its own aliases. The
+  // CREATE path suppresses the apply (it goes through
+  // `applyRequestedModelIfAdvertised`); this path does not go through that
+  // dispatcher, so without this branch a picker-route session CREATED cleanly, took
+  // the user's first prompt, and failed the turn with "the ACP agent did not
+  // advertise that model" — while the picker advertised those rows as selectable.
+  // Measured on session cd93c99f (2026-09-07): the shim WAS engaged (its isolated
+  // `or-<id>` config dir exists and `current_model_id` carries the slug) and the
+  // turn still threw, three lines below.
+  //
+  // The model is genuinely applied, so the pin is persisted exactly as the
+  // `shouldSkipModelApply` arm does — what is skipped is only the wire call and
+  // the advertised-models check, both of which are meaningless for a model acpx
+  // serves itself.
+  if (modelServedOutOfBand(params.client, requestedModel)) {
+    setDesiredModelId(params.record, requestedModel);
+    setCurrentModelId(params.record, requestedModel);
+    persistExplicitPromptModelSource(params.record, params.requestedModelSource);
+    await persistChangedModelPin(params.record, before);
     return;
   }
 

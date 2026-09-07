@@ -1445,14 +1445,90 @@ export async function startOpenRouterShimForSession(
   // Start the model-rewrite shim; apiKey never appears in logs.
   const shim = await spawnOpenRouterShim(apiKey, model, reasoningEffort);
 
-  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${shim.port}`;
-  // Bypass the Bun availability / key check in claude-agent-acp.
-  env.ANTHROPIC_AUTH_TOKEN = " ";
+  pointAdapterAtShim(env, shim.port);
+
+  return shim;
+}
+
+/**
+ * The token handed to Claude Code so it considers itself authenticated against a
+ * custom `ANTHROPIC_BASE_URL`. **It is a PLACEHOLDER, never a credential.**
+ *
+ * ⚠️ IT IS NON-BLANK, AND THAT IS THE WHOLE FIX. This was `" "` — a single space —
+ * with the comment *"bypass the Bun availability / key check"*. That was TRUE when
+ * written and became FALSE when `claude-agent-acp 0d5ab3ab` (2026-09-01) bumped
+ * the SDK to Claude Code 2.1.257: **the code kept doing something that no longer
+ * worked while the comment still explained why it should.**
+ *
+ * MEASURED (hp-pi-secondturn, two-arm probe, one variable, dummy loopback server,
+ * no real credential): arm A `" "` → `Not logged in · Please run /login` and
+ * **ZERO `POST /v1/messages` ever reaches the server**; arm B any non-blank
+ * literal → proceeds and calls the API. Confirmed on disk across five sessions on
+ * today's build — every one `authentication_failed`, `input_tokens: 0`, model
+ * `<synthetic>`: **Claude Code generated the refusal itself and sent nothing.**
+ *
+ * ⚠️ WHY A PLACEHOLDER IS THE RIGHT VALUE AND NOT A COMPROMISE — SOURCE, not
+ * inference: the shim **overwrites** the header unconditionally
+ * (`fwdHeaders['authorization'] = 'Bearer ' + API_KEY`, `openrouter-shim-code.ts`),
+ * so whatever the adapter sends is **discarded before anything leaves the box**.
+ * The real OpenRouter key lives only in the shim child's own environment. A value
+ * here therefore has exactly one job — be non-blank — and must be **obviously
+ * synthetic**, so it can never be mistaken for, or mistakenly replaced by, a
+ * credential.
+ *
+ * ⚠️ WHAT IS *NOT* ESTABLISHED, so nobody builds on it: the SDK's exact predicate
+ * (trim-then-empty? a format check?) was **not** read out of the binary. The two
+ * measured arms and the discard above are what license this value — *"past the
+ * local login check"* is also **not** *"the route serves"*: only a real turn
+ * against the real shim can show that.
+ *
+ * ## 🛑 THE REASON, WRITTEN SO IT CANNOT EXPIRE THE WAY THE LAST ONE DID
+ *
+ * The comment this replaces named a **mechanism** — *"bypass the Bun availability
+ * / key check"* — and a mechanism is exactly the kind of claim a vendor bump
+ * silently falsifies. It did, on 2026-09-01, and the line kept executing while its
+ * justification had quietly become fiction. So the reason below is written as a
+ * REQUIREMENT and a CONSEQUENCE, neither of which depends on how any SDK version
+ * happens to implement its check:
+ *
+ *   **REQUIREMENT.** Claude Code will not talk to a custom `ANTHROPIC_BASE_URL`
+ *   until it considers itself authenticated. Something must satisfy that local
+ *   precondition. The real credential MUST NOT be that something, because the
+ *   shim — not the adapter — is what authenticates to the provider.
+ *   ⇒ a synthetic value belongs here, in every SDK version, whatever the check is.
+ *
+ *   **CONSEQUENCE, and this is the part that shortens the next diagnosis.** If a
+ *   future SDK stops accepting this value, the failure is a LOCAL REFUSAL WITH NO
+ *   HTTP AT ALL: an `authentication_failed` turn, `input_tokens: 0`, a
+ *   `<synthetic>` model, and **nothing in the shim's or the provider's logs**. That
+ *   signature means *"the local login precondition rejected our placeholder"* — it
+ *   does **not** mean a bad key, a broken shim, or an OpenRouter outage. Re-measure
+ *   what the SDK accepts and change ONLY this constant.
+ *
+ * ⇒ **If you are reading this because OpenRouter sessions stopped working: check
+ * whether any request left the box before you touch anything downstream.** That
+ * one question is what took a day to ask last time.
+ */
+export const OPENROUTER_SHIM_AUTH_PLACEHOLDER = "acpx-openrouter-shim-placeholder";
+
+/**
+ * Point a claude adapter's spawn env at an already-running shim.
+ *
+ * ⚠️ ONE FUNCTION BECAUSE THERE ARE TWO CALLERS AND FIXING ONE IS THE BUG. This
+ * shaping was duplicated: here for the FIRST spawn, and in
+ * `AcpClient.reinjectRunningShim` for the RECONNECT. Both carried their own
+ * `" "`, so repairing only the spawn copy would have left **every resumed
+ * OpenRouter session** — legacy profile and picker route alike — still refusing
+ * locally, with the create path looking fixed. That is the same
+ * shipped-in-one-of-two-places failure that produced the turn-path outage this
+ * branch also fixes; it is not repeated a third time.
+ */
+export function pointAdapterAtShim(env: NodeJS.ProcessEnv, port: number): void {
+  env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`;
+  env.ANTHROPIC_AUTH_TOKEN = OPENROUTER_SHIM_AUTH_PLACEHOLDER;
   // Remove any custom headers set by the subscription path —
   // the shim injects Authorization itself.
   delete env.ANTHROPIC_CUSTOM_HEADERS;
-
-  return shim;
 }
 
 export async function applyProfileAuth(

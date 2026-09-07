@@ -19,6 +19,34 @@ import { guardServedModel } from "./model-guard.js";
 export const MODEL_CONFIG_OPTION_ID = "model";
 
 /**
+ * Whether acpx itself is serving this exact model OUTSIDE the ACP wire — today
+ * that is one route: claude's OpenRouter picker route, where the slug reaches the
+ * model through the shim's `OR_MODEL` and the adapter never sees it (007eaac8).
+ *
+ * ⚠️ THIS IS A SHARED PREDICATE BECAUSE THE APPLY QUESTION IS ASKED IN MORE THAN
+ * ONE PLACE, AND SHIPPING IT IN ONLY ONE WAS A LIVE OUTAGE. The first cut put the
+ * check inside {@link applyRequestedModelIfAdvertised} alone. The PROMPT path
+ * (`applyPromptModelIfAdvertised`, src/cli/session/runtime.ts) does not go through
+ * that dispatcher — it calls `assertRequestedModelSupported` itself — so a
+ * picker-route session CREATED cleanly, took the user's first prompt, and then
+ * failed the turn with *"the ACP agent did not advertise that model"*, while the
+ * picker advertised claude's OpenRouter rows as selectable. **An honest refusal at
+ * create had been converted into an invitation that broke on use.**
+ *
+ * That is the F-9 family again — "apply and replay diverged once and it cost a
+ * silent brick" — with a FOURTH member the F-9 comment does not name. The
+ * population of direct `assertRequestedModelSupported` callers is exactly three
+ * (here, `assertRecordModelSupported` below, and the prompt path); every one of
+ * them that can reach a client must ask THIS function, not re-derive the test.
+ */
+export function modelServedOutOfBand(
+  client: Pick<ModelApplyClient, "outOfBandModelId">,
+  requestedModel: string,
+): boolean {
+  return client.outOfBandModelId !== undefined && client.outOfBandModelId === requestedModel;
+}
+
+/**
  * Minimal client surface, so the dispatcher is unit-testable with a stub and so
  * each arm's dependency is visible. `AcpClient` satisfies it structurally.
  */
@@ -143,10 +171,7 @@ export async function applyRequestedModelIfAdvertised(
   // Without this branch, wiring the shim ALONE would break every picker-route
   // create: claude-agent-acp advertises only its own aliases, so the slug would
   // reach `assertRequestedModelSupported` and be refused.
-  if (
-    params.client.outOfBandModelId !== undefined &&
-    params.client.outOfBandModelId === rawRequested
-  ) {
+  if (modelServedOutOfBand(params.client, rawRequested)) {
     return { applied: true };
   }
   const guarded = guardServedModel({

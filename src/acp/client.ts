@@ -102,6 +102,7 @@ import {
   effectiveAccountMetadataFromEnv,
   readEnvCredential,
   resolveConfiguredAuthCredential,
+  pointAdapterAtShim,
   startOpenRouterShimForSession,
   type AgentSessionContext,
   type EffectiveAccountMetadata,
@@ -593,9 +594,39 @@ function createNdJsonMessageStream(
  */
 /** The picker route's three inputs off the session context. Split out only to keep
  *  `startPickerShim` under the complexity budget. */
-function trimmedOrUndefined(value: string | null | undefined): string | undefined {
+/**
+ * Blank-safe trim. **Exported because it is the guard BOTH shim routes now share**
+ * — `??` does not catch `""`, and an empty `acpxRecordId` is the normal case at
+ * create, which is how `/tmp/or-` (an unnamespaced, shared `CLAUDE_CONFIG_DIR`)
+ * came to exist on this box.
+ */
+export function trimmedOrUndefined(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/**
+ * The id that namespaces a shim's `CLAUDE_CONFIG_DIR` (`/tmp/or-<id>`), for BOTH
+ * routes — the legacy profile route passes the profile id as its fallback, the
+ * picker route a fresh uuid.
+ *
+ * ⚠️ IT IS A NAMED FUNCTION, NOT AN INLINE EXPRESSION, SO A TEST CAN BIND THE
+ * THING THE CALL SITE ACTUALLY USES. The first version of this fix asserted the
+ * generic `trimmedOrUndefined` helper instead, and a mutation probe proved that
+ * vacuous: reverting the legacy call site to `?? profileId` — the original defect
+ * — left the whole test file GREEN, because the helper was still correct and the
+ * test never touched the call site. True and unattached.
+ *
+ * ⚠️ STATED RESIDUAL: a mutation that stops CALLING this function altogether is
+ * still not caught by a unit test — that needs a spawn. What is caught is every
+ * mutation of the rule itself, which is where the `??`-does-not-catch-`""` defect
+ * actually lived.
+ */
+export function shimConfigDirSessionId(
+  ctx: AgentSessionContext | undefined,
+  fallback: string,
+): string {
+  return trimmedOrUndefined(ctx?.acpxRecordId) ?? fallback;
 }
 
 function pickerShimContext(ctx: AgentSessionContext | undefined): {
@@ -604,7 +635,7 @@ function pickerShimContext(ctx: AgentSessionContext | undefined): {
   bypassedProfileId: string | undefined;
 } {
   return {
-    sessionId: trimmedOrUndefined(ctx?.acpxRecordId) ?? randomUUID(),
+    sessionId: shimConfigDirSessionId(ctx, randomUUID()),
     effort: trimmedOrUndefined(ctx?.reasoningEffort),
     bypassedProfileId: trimmedOrUndefined(ctx?.profileId),
   };
@@ -1177,14 +1208,20 @@ export class AcpClient {
     }
   }
 
-  /** Reconnect: point the adapter back at the shim process that is still running. */
+  /**
+   * Reconnect: point the adapter back at the shim process that is still running.
+   *
+   * ⚠️ THROUGH `pointAdapterAtShim`, NOT A SECOND COPY OF THE THREE LINES. This
+   * method used to carry its own `ANTHROPIC_AUTH_TOKEN = " "`, so the blank-token
+   * defect had TWO homes and repairing the spawn one alone would have left every
+   * RESUMED OpenRouter session — legacy profile and picker route alike — still
+   * refusing locally with `Not logged in`, while a fresh create looked fixed.
+   */
   private reinjectRunningShim(env: NodeJS.ProcessEnv): void {
     if (!this.shimHandle) {
       return;
     }
-    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
-    env.ANTHROPIC_AUTH_TOKEN = " ";
-    delete env.ANTHROPIC_CUSTOM_HEADERS;
+    pointAdapterAtShim(env, this.shimHandle.port);
   }
 
   /**
@@ -1233,7 +1270,31 @@ export class AcpClient {
   /** First-spawn path: create the OR shim and inject its port into the env. */
   private async startProfileShim(env: NodeJS.ProcessEnv, profileId: string): Promise<void> {
     const ctx = this.options.sessionContext;
-    const sessionId = ctx?.acpxRecordId ?? profileId;
+    // ⚠️ `trimmedOrUndefined`, NOT `??` — AN EMPTY RECORD ID IS THE NORMAL CASE
+    // HERE, AND `??` DOES NOT CATCH IT. `creationSessionContext` sets
+    // `acpxRecordId: ""` on the real `sessions new` path (the CLI record id IS the
+    // adapter's own `session/new` id, so it cannot exist before the spawn that
+    // produces it). `??` falls back only on null/undefined, so `""` flowed
+    // through to `join(tmpdir(), "or-" + "")` = **`/tmp/or-`** — one
+    // `CLAUDE_CONFIG_DIR` shared by every blank-id session, which is exactly the
+    // per-session isolation this directory exists to provide.
+    //
+    // Reachable on today's build, not an old artefact: `/tmp/or-` exists on this
+    // box carrying `firstStartVersion: "2.1.257"` and a `firstStartTime` 340 ms
+    // BEFORE the record it belongs to, with a `sessions/` mtime hours later —
+    // consistent with reuse by a second blank-id invocation (found by
+    // hp-pi-secondturn, brick b9d9d48b).
+    //
+    // The picker route already guarded this (`pickerShimContext`); the legacy
+    // route did not. Same guard, both routes — the third instance today of one
+    // route being fixed and its twin left behind.
+    //
+    // ⚠️ RESIDUAL, deliberately not changed here: the fallback is still
+    // `profileId`, so two sessions on the SAME profile still share a directory.
+    // That is pre-existing legacy-route behaviour and changing it would alter a
+    // path this branch is required to leave otherwise untouched; the picker route
+    // uses `randomUUID()` for genuine per-spawn uniqueness.
+    const sessionId = shimConfigDirSessionId(ctx, profileId);
     const reasoningEffort = ctx?.reasoningEffort ?? null;
     this.shimHandle =
       (await applyProfileAuth(
