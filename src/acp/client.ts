@@ -147,6 +147,7 @@ import {
   resolveOpenRouterBoxCredential,
   resolveOpenRouterRoute,
   type OpenRouterBoxCredential,
+  type ProfileBypass,
 } from "./openrouter-routing.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import {
@@ -632,29 +633,61 @@ export function shimConfigDirSessionId(
 function pickerShimContext(ctx: AgentSessionContext | undefined): {
   sessionId: string;
   effort: string | undefined;
-  bypassedProfileId: string | undefined;
 } {
   return {
     sessionId: shimConfigDirSessionId(ctx, randomUUID()),
     effort: trimmedOrUndefined(ctx?.reasoningEffort),
-    bypassedProfileId: trimmedOrUndefined(ctx?.profileId),
   };
 }
 
+/**
+ * The picker route's log line — and, when a profile was bypassed, WHY.
+ *
+ * ⚠️ THE REASON COMES FROM THE ROUTE, NEVER FROM A SECOND LOOK AT THE REGISTRY
+ * (brick 069fdebe). `resolveOpenRouterRoute` is where the profile question is
+ * actually answered; re-deriving it here would stand a second reading of the same
+ * fact beside the decision, free to disagree with it — and the line would then
+ * describe a check that did not happen, which is the failure it is meant to make
+ * visible. This renders what the decision recorded, and nothing else. That is
+ * also why the bypassed profile id no longer comes off the session context: one
+ * fact, one origin.
+ */
 function describePickerRoute(
   routeModel: string,
   credential: OpenRouterBoxCredential,
-  bypassedProfileId: string | undefined,
+  profileBypass: ProfileBypass | undefined,
 ): string {
   const base =
     `openrouter picker route: serving "${routeModel}" through the shim on the box credential ` +
     `(${credential.envName} from ${credential.origin})`;
-  if (!bypassedProfileId) {
+  if (!profileBypass) {
     return base;
   }
+  return `${base}; ${describeProfileBypass(profileBypass)}`;
+}
+
+/**
+ * ⚠️ THE TWO UNEVALUABLE REASONS SAY "was NOT evaluated" IN WORDS. What an
+ * operator needs afterwards is not *"the profile was not used"* — the line
+ * already said that, identically, in all three cases — but whether the
+ * second-OpenRouter-account guard actually RAN. These are the states where it
+ * did not, and nothing downstream can recover the difference later.
+ */
+function describeProfileBypass(profileBypass: ProfileBypass): string {
+  const unused = "its credential is NOT used for this session";
+  if (profileBypass.reason === "not-an-openrouter-account") {
+    return `profile "${profileBypass.profileId}" is not an OpenRouter account, so ${unused}`;
+  }
+  // The two unevaluable reasons share their wording on purpose: what an operator
+  // must be able to tell apart is EVALUATED from NOT EVALUATED, and the cause
+  // clause then says which of the two it was.
+  const cause =
+    profileBypass.reason === "registry-holds-no-profiles"
+      ? "the profile registry holds no profiles at all (absent, empty or unreadable)"
+      : "the profile registry could not be read";
   return (
-    `${base}; profile "${bypassedProfileId}" is not an OpenRouter account, ` +
-    `so its credential is NOT used for this session`
+    `profile "${profileBypass.profileId}" was NOT evaluated — ${cause}, so the ` +
+    `second-OpenRouter-account guard did not run; ${unused}`
   );
 }
 
@@ -1204,7 +1237,7 @@ export class AcpClient {
       return;
     }
     if (route.kind === "picker") {
-      await this.startPickerShim(env, route.model);
+      await this.startPickerShim(env, route.model, route.profileBypass);
     }
   }
 
@@ -1235,7 +1268,11 @@ export class AcpClient {
    * would throw — so wiring the shim alone would make EVERY picker-route create
    * fail. Declaration, shim and suppression are one change for that reason.
    */
-  private async startPickerShim(env: NodeJS.ProcessEnv, routeModel: string): Promise<void> {
+  private async startPickerShim(
+    env: NodeJS.ProcessEnv,
+    routeModel: string,
+    profileBypass: ProfileBypass | undefined,
+  ): Promise<void> {
     const credential = resolveOpenRouterBoxCredential();
     if (!credential) {
       throw openRouterBoxCredentialMissing(routeModel);
@@ -1249,7 +1286,7 @@ export class AcpClient {
       ctx.effort,
     );
     this.openRouterRouteModelId = routeModel;
-    this.log(describePickerRoute(routeModel, credential, ctx.bypassedProfileId));
+    this.log(describePickerRoute(routeModel, credential, profileBypass));
   }
 
   /**

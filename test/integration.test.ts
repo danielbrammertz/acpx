@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
 import {
@@ -1865,6 +1866,7 @@ test("integration: perf report tolerates malformed lines and keeps role and gaug
 
 test("integration: perf metrics capture preserves SIGTERM termination semantics", async () => {
   const metricsPath = path.join(os.tmpdir(), `acpx-perf-signal-${Date.now()}.ndjson`);
+  let waitError: string | undefined;
 
   try {
     const result = await new Promise<CliRunResult>((resolve, reject) => {
@@ -1900,9 +1902,34 @@ test("integration: perf metrics capture preserves SIGTERM termination semantics"
       });
 
       child.once("error", reject);
-      setTimeout(() => {
-        child.kill("SIGTERM");
-      }, 500);
+      // ⚠️ THE SIGTERM WAITS FOR THE ARTIFACT, NOT FOR A CLOCK (brick 1fa67c7f).
+      // This was a hard-coded 500 ms, inside which the child had to start node,
+      // import two modules, record a duration AND flush it to disk — while its
+      // neighbours in this same file take 15–20 s concurrently. The 500 ms WAS
+      // the synchronisation, and the assertion it fed (`records.length >= 1`,
+      // below) is the one that failed under load.
+      //
+      // A larger constant is deliberately NOT the fix: it re-tunes the same race
+      // to the load of the day and comes back the next time the suite grows. A
+      // timing constant that has to be "large enough" is a synchronisation
+      // nobody wrote.
+      //
+      // The wait NEVER skips the kill — on timeout it terminates the child
+      // anyway (it holds an unref'd-forever `setInterval`, so a missed kill
+      // leaks a node process onto a shared box) and lets the assertion below
+      // fail with the reason attached.
+      void waitForPerfRecord(metricsPath)
+        .then(
+          (reason) => {
+            waitError = reason;
+          },
+          () => {
+            waitError = "the perf-record wait itself failed";
+          },
+        )
+        .finally(() => {
+          child.kill("SIGTERM");
+        });
       child.once("close", (code, signal) => {
         resolve({
           code,
@@ -1915,7 +1942,11 @@ test("integration: perf metrics capture preserves SIGTERM termination semantics"
 
     assert.equal(result.code === 143 || result.signal === "SIGTERM", true);
     const records = await readPerfRecords(metricsPath);
-    assert.equal(records.length >= 1, true);
+    assert.equal(
+      records.length >= 1,
+      true,
+      `no perf record survived SIGTERM${waitError === undefined ? "" : ` (${waitError})`}`,
+    );
   } finally {
     await fs.rm(metricsPath, { force: true });
   }
@@ -5133,6 +5164,48 @@ async function readPerfRecords(metricsPath: string): Promise<
       return [];
     }
     throw error;
+  }
+}
+
+/**
+ * A FAILURE bound, not a budget (brick 1fa67c7f). On a healthy box the wait ends
+ * the moment the record lands, so a generous ceiling costs nothing when the code
+ * works and only buys patience when the box is loaded — which is the opposite of
+ * a fixed delay, where every millisecond is both spent and possibly too few.
+ */
+const PERF_RECORD_WAIT_MS = 30_000;
+const PERF_RECORD_POLL_MS = 25;
+
+/**
+ * Block until at least one perf record is READABLE at `metricsPath`. Resolves
+ * `undefined` on success, or the reason it gave up — a value rather than a throw,
+ * so the caller's kill path stays unconditional and the reason can be attached to
+ * the assertion message that actually fails.
+ *
+ * ⚠️ THIS IS THE SYNCHRONISATION THAT REPLACES A 500 ms GUESS. It asserts the
+ * property the test actually means — *the capture flushes, and the record then
+ * survives SIGTERM* — instead of *the capture flushes within 500 ms on an
+ * unloaded box*.
+ *
+ * A half-written NDJSON line makes `readPerfRecords` throw; that is "not ready
+ * yet" HERE and nothing more. The caller re-reads afterwards with the real
+ * reader, so a genuinely malformed record still surfaces there rather than being
+ * swallowed by this loop.
+ */
+async function waitForPerfRecord(metricsPath: string): Promise<string | undefined> {
+  const deadline = Date.now() + PERF_RECORD_WAIT_MS;
+  for (;;) {
+    try {
+      if ((await readPerfRecords(metricsPath)).length >= 1) {
+        return undefined;
+      }
+    } catch {
+      // a partial line — keep waiting
+    }
+    if (Date.now() >= deadline) {
+      return `no perf record appeared at ${metricsPath} within ${PERF_RECORD_WAIT_MS} ms`;
+    }
+    await setTimeoutPromise(PERF_RECORD_POLL_MS);
   }
 }
 
