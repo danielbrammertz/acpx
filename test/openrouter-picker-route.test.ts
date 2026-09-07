@@ -12,6 +12,7 @@ import {
   resolveOpenRouterRoute,
   resolveOpenRouterRouteModel,
 } from "../src/acp/openrouter-routing.js";
+import type { ProfileRegistry } from "../src/config/profiles.js";
 import { buildCatalogue } from "../src/models/catalogue.js";
 import type { OpenRouterSnapshot } from "../src/models/openrouter-catalogue.js";
 import { applyRequestedModelIfAdvertised } from "../src/session/model-application.js";
@@ -298,13 +299,64 @@ test("a profile AND a picker-chosen OpenRouter model is refused, naming both acc
 
 // ── The DECISION — the composition, not the pieces ───────────────────────────
 
+/**
+ * te-live's three probes, plus the two name-shaped decoys.
+ *
+ * ⚠️ THE REGISTRY IS INJECTED, NEVER READ FROM THE BOX. The profile's KIND is
+ * what the two-accounts guard turns on, so a test that fell back to the real
+ * `~/.acpx/subscriptions/` registry would be asserting a fact about this box —
+ * and would go green or red as someone else edited their profiles.
+ *
+ * ⚠️ `sub-that-is-openrouter` AND `openrouter-that-is-a-subscription` ARE THE
+ * POINT. On this box `sub3`/`sub5` happen to look like subscriptions and
+ * `openrouter-deepseek` happens to look like OpenRouter, so a NAME-shaped
+ * implementation passes all three real probes and breaks on the first profile
+ * someone names differently. These two rows are the only ones that can tell a
+ * kind-shaped implementation from a name-shaped one.
+ */
+function profileFixture(): ProfileRegistry {
+  const common = { account: "acct", adapter: "claude" as const };
+  return {
+    version: 3,
+    default: "sub5",
+    profiles: [
+      { ...common, id: "sub3", label: "sub3", authMode: "subscription", credentialSource: "a" },
+      { ...common, id: "sub5", label: "sub5", authMode: "subscription", credentialSource: "b" },
+      {
+        ...common,
+        id: "openrouter-deepseek",
+        label: "OpenRouter — DeepSeek V4 Pro",
+        authMode: "openrouter",
+        model: "deepseek/deepseek-v4-pro",
+        credentialSource: null,
+      },
+      // The decoys: name says one kind, record says the other.
+      {
+        ...common,
+        id: "sub-that-is-openrouter",
+        label: "decoy",
+        authMode: "openrouter",
+        model: "deepseek/deepseek-v4-pro",
+        credentialSource: null,
+      },
+      {
+        ...common,
+        id: "openrouter-that-is-a-subscription",
+        label: "decoy",
+        authMode: "subscription",
+        credentialSource: "c",
+      },
+    ],
+  };
+}
+
 test("the route decision: profile, picker, none — and the ORDER that decides them", async () => {
   // ⚠️ THE COMPOSITION IS WHAT MATTERS HERE. Every piece above is individually
   // correct; what decides whether a picker-chosen model quietly bills the wrong
   // account is the order the three questions are asked in. That is why the
   // decision is a pure function rather than four lines inside the client, where
   // it could only be exercised by spawning an adapter.
-  const options = { catalogue: catalogue() };
+  const options = { catalogue: catalogue(), profileRegistry: profileFixture() };
   const model = anOpenRouterId();
 
   assert.deepEqual(
@@ -350,22 +402,114 @@ test("the route decision: profile, picker, none — and the ORDER that decides t
   );
 });
 
-test("the decision REFUSES a profile plus a picker-chosen OpenRouter model", async () => {
-  // The case the rejected one-route design could not even see: it would have
-  // returned the profile route here and billed the picked model to the profile's
-  // account, silently. This assertion is the whole reason the model is resolved
-  // BEFORE the profile is honoured.
+// ── te-live's three probes, one test each ────────────────────────────────────
+//
+// ⚠️ ALL THREE ROWS ARE HERE, NOT JUST THE ONE THAT WAS WRONG. A test that only
+// covered the fixed case could not tell "predicate narrowed" from "guard
+// deleted" — probe 3's refusal is what proves the guard still exists.
+
+test("PROBE 1 — a SUBSCRIPTION profile plus an OpenRouter model MUST PASS (the dead end)", async () => {
+  // THE DEFECT. Measured by te-live on the deployed build: `sub3`
+  // `[claude/subscription]` plus an OpenRouter model was REFUSED as "two
+  // OpenRouter accounts". A Claude subscription is not an OpenRouter account and
+  // cannot serve the model, so there was never a second payer.
+  //
+  // It was a DEAD END rather than an inconvenience: acpx-ui sends no `--profile`
+  // and normalises `profileId "" → undefined`, so "no profile" is inexpressible
+  // from the UI; acpx applies the box default (`sub5`, also a subscription) and
+  // the guard refused — with advice ("drop --profile sub5") that the UI cannot
+  // carry out. That closed off Daniel's founding item 6 from the frontend.
+  const options = { catalogue: catalogue(), profileRegistry: profileFixture() };
+  const model = anOpenRouterId();
+  for (const profileId of ["sub3", "sub5"]) {
+    assert.deepEqual(
+      await resolveOpenRouterRoute({
+        agentCommand: "claude-agent-acp",
+        model,
+        profileId,
+        options,
+      }),
+      { kind: "picker", model },
+      `${profileId} is a subscription — it must not be read as a second OpenRouter account`,
+    );
+  }
+});
+
+test("PROBE 2 — an OpenRouter profile with NO model keeps the legacy route", async () => {
+  // te-live measured 200 on the deployed build; this must stay true.
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model: undefined,
+      profileId: "openrouter-deepseek",
+      options: { catalogue: catalogue(), profileRegistry: profileFixture() },
+    }),
+    { kind: "profile", profileId: "openrouter-deepseek" },
+  );
+});
+
+test("PROBE 3 — an OpenRouter profile PLUS an OpenRouter model is still REFUSED", async () => {
+  // ⚠️ THE ROW THAT PROVES THE PREDICATE WAS NARROWED RATHER THAN DELETED. And it
+  // asserts the REASON, not merely that something threw: a refusal for an
+  // unrelated cause would otherwise read as a pass.
   await assert.rejects(
     resolveOpenRouterRoute({
       agentCommand: "claude-agent-acp",
       model: anOpenRouterId(),
       profileId: "openrouter-deepseek",
-      options: { catalogue: catalogue() },
+      options: { catalogue: catalogue(), profileRegistry: profileFixture() },
+    }),
+    (error: Error & { detailCode?: string; outputCode?: string }) => {
+      assert.equal(error.detailCode, "OPENROUTER_ROUTE_CONFLICT");
+      assert.equal(error.outputCode, "USAGE");
+      return true;
+    },
+  );
+});
+
+test("the KIND decides, not the NAME — both decoys, in both directions", async () => {
+  // The two rows a name-shaped implementation fails and the three real probes
+  // cannot catch. Without these, "does it read the record?" is untested.
+  const options = { catalogue: catalogue(), profileRegistry: profileFixture() };
+  const model = anOpenRouterId();
+
+  await assert.rejects(
+    resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model,
+      profileId: "sub-that-is-openrouter",
+      options,
     }),
     (error: Error & { detailCode?: string }) => {
       assert.equal(error.detailCode, "OPENROUTER_ROUTE_CONFLICT");
       return true;
     },
+  );
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model,
+      profileId: "openrouter-that-is-a-subscription",
+      options,
+    }),
+    { kind: "picker", model },
+  );
+});
+
+test("an UNRESOLVABLE profile does not refuse on a guess — it takes the picker route", async () => {
+  // Stated as behaviour rather than left implicit: with an OpenRouter model
+  // picked, a profile id that is in no registry is no longer an error, because
+  // the profile is genuinely not used. The alternative — refusing — would
+  // reinstate the dead end for every box whose registry is unreadable.
+  const model = anOpenRouterId();
+  assert.deepEqual(
+    await resolveOpenRouterRoute({
+      agentCommand: "claude-agent-acp",
+      model,
+      profileId: "no-such-profile",
+      options: { catalogue: catalogue(), profileRegistry: profileFixture() },
+    }),
+    { kind: "picker", model },
   );
 });
 

@@ -11,13 +11,20 @@
  *
  * ## The route is chosen by the MODEL, not by whether a profile is attached
  *
- *   openrouter model, no profile  → PICKER route (here): the picked slug, on the
- *                                   BOX key from `~/.acpx/providers.json`.
- *   openrouter PROFILE, no model  → LEGACY route (`applyOpenRouterProfileAuth`):
- *                                   the profile's model on the profile's own
- *                                   account. Untouched by this module.
- *   a claude-native alias         → no shim at all.
- *   BOTH                          → refused loudly ({@link assertNoOpenRouterProfileConflict}).
+ *   openrouter model                → PICKER route (here): the picked slug, on the
+ *                                     BOX key from `~/.acpx/providers.json`.
+ *   openrouter PROFILE, no model    → LEGACY route (`applyOpenRouterProfileAuth`):
+ *                                     the profile's model on the profile's own
+ *                                     account. Untouched by this module.
+ *   a claude-native alias           → no shim at all.
+ *   openrouter model + an
+ *     OPENROUTER-KIND profile       → refused loudly ({@link assertNoOpenRouterProfileConflict}).
+ *
+ * ⚠️ THE REFUSAL TURNS ON THE PROFILE'S KIND, NOT ON A PROFILE BEING PRESENT. A
+ * `[claude/subscription]` profile plus an OpenRouter model is NOT two accounts —
+ * a Claude subscription cannot serve an OpenRouter model at all — and it takes
+ * the picker route. Refusing it made the feature unreachable from the UI; the
+ * argument is on {@link resolveOpenRouterRoute}.
  *
  * ⚠️ THE ROUTE ASKS `deriveAcceptsArbitraryModelIds`, NOT A LITERAL. That is what
  * makes the DECLARATION (the band the picker offers) and the ROUTING (what a spawn
@@ -27,11 +34,13 @@
  * in the same edit, with no window where acpx offers a band it does not serve.
  */
 
+import { findProfile, loadProfileRegistry, type ProfileRegistry } from "../config/profiles.js";
 import {
   loadBoxProviders,
   resolveBoxProviderKey,
   type BoxProviderLookupOptions,
 } from "../config/providers.js";
+import type { SubscriptionLookupOptions } from "../config/subscriptions.js";
 import { AcpxOperationalError } from "../errors.js";
 import { findModelsById, loadCatalogue } from "../models/catalogue.js";
 import { nativeAgentTypesForSource } from "../models/harness-models.js";
@@ -92,6 +101,15 @@ export type OpenRouterRouteOptions = {
    * an environment-dependent test here would read as a routing bug.
    */
   catalogue?: ModelCatalogue;
+  /**
+   * Inject the profile registry instead of reading `~/.acpx/subscriptions/`. The
+   * profile's KIND is what the two-accounts guard turns on, so a test that could
+   * not supply one would have to be name-shaped — the exact mistake this option
+   * exists to keep out of the tests as well as out of the code.
+   */
+  profileRegistry?: ProfileRegistry;
+  /** Root the profile-registry read somewhere else (an isolated HOME). */
+  profileLookup?: SubscriptionLookupOptions;
 };
 
 /**
@@ -215,6 +233,34 @@ export type OpenRouterRoute =
  * picker-chosen model to the profile's account: the billing-decision-by-omission
  * this brick exists to prevent, and the case the rejected one-route design could
  * not even see.
+ *
+ * ⚠️ ONLY AN OPENROUTER-KIND PROFILE IS A SECOND ACCOUNT — AND THE FIRST CUT OF
+ * THIS FUNCTION GOT THAT WRONG, WHICH CLOSED THE FEATURE OFF ENTIRELY. It refused
+ * on `profileId` alone, without asking the profile's KIND, so a
+ * `[claude/subscription]` profile plus an OpenRouter model was refused as "two
+ * OpenRouter accounts" when a Claude subscription is not an OpenRouter account at
+ * all and cannot serve the model. That was not an inconvenience but a DEAD END:
+ * acpx-ui sends no `--profile` and normalises `profileId "" → undefined`
+ * (`CreateSessionPanel:1110`), so there is no way to express *"no profile"* from
+ * the UI; acpx applies the box default (a subscription profile), the guard
+ * refused, and the refusal's own advice — *"drop --profile sub5"* — was not
+ * executable from the UI. **A user following the error message exactly could not
+ * comply**, and Daniel's founding item 6 was unreachable from the frontend.
+ * Measured by te-live in three probes on the deployed build.
+ *
+ * ⚠️ THE KIND COMES FROM THE PROFILE RECORD, NEVER FROM THE PROFILE'S NAME. On
+ * this box `sub3`/`sub5` happen to look like subscriptions and
+ * `openrouter-deepseek` happens to look like OpenRouter — a name-shaped test
+ * would pass all three of te-live's probes tonight and break on the first profile
+ * someone names differently.
+ *
+ * ⚠️ ON THE PICKER ROUTE THE NON-OPENROUTER PROFILE'S AUTH IS NOT APPLIED, and
+ * that is deliberate rather than an omission. Its credential cannot serve an
+ * OpenRouter model, and the shim's own isolated `CLAUDE_CONFIG_DIR` (no OAuth
+ * inheritance) is what the adapter must run under; applying the subscription
+ * first would also run `verifyProfileEffectiveAccount` against a config dir the
+ * shim then discards — able to FAIL a create for a credential the session never
+ * uses. `startPickerShim` says so on the log line rather than leaving it silent.
  */
 export async function resolveOpenRouterRoute(params: {
   agentCommand: string | undefined;
@@ -228,13 +274,50 @@ export async function resolveOpenRouterRoute(params: {
     model: params.model,
     ...(params.options ? { options: params.options } : {}),
   });
-  if (profileId) {
-    if (routeModel !== undefined) {
-      assertNoOpenRouterProfileConflict({ profileId, routeModel });
-    }
-    return { kind: "profile", profileId };
+  if (!profileId) {
+    return routeModel === undefined ? { kind: "none" } : { kind: "picker", model: routeModel };
   }
-  return routeModel === undefined ? { kind: "none" } : { kind: "picker", model: routeModel };
+  if (routeModel === undefined) {
+    return { kind: "profile", profileId }; // the legacy path, untouched
+  }
+  if (profileIsOpenRouterAccount(profileId, params.options)) {
+    assertNoOpenRouterProfileConflict({ profileId, routeModel });
+  }
+  return { kind: "picker", model: routeModel };
+}
+
+/**
+ * Whether this profile id names an OpenRouter ACCOUNT — i.e. a second payer.
+ *
+ * ⚠️ AN UNRESOLVABLE PROFILE ANSWERS `false`, WHICH SENDS THE SPAWN DOWN THE
+ * PICKER ROUTE. That is the conservative answer for THIS question — it refuses
+ * nothing on a guess — but it does move where a bad profile id is reported: with
+ * an OpenRouter model picked, `applyProfileAuth`'s *"profile not found in
+ * registry"* no longer fires, because the profile is genuinely not used. A
+ * missing profile stops being an error and becomes a profile that does not apply.
+ * Stated here because the alternative (refusing) would reinstate the dead end for
+ * every box whose registry is unreadable.
+ */
+function profileIsOpenRouterAccount(
+  profileId: string,
+  options: OpenRouterRouteOptions | undefined,
+): boolean {
+  const registry = options?.profileRegistry ?? loadProfileRegistrySafely(options);
+  if (!registry) {
+    return false;
+  }
+  return findProfile(profileId, registry)?.authMode === "openrouter";
+}
+
+/** Same never-throw-into-session-creation rule the catalogue read follows. */
+function loadProfileRegistrySafely(
+  options: OpenRouterRouteOptions | undefined,
+): ProfileRegistry | undefined {
+  try {
+    return loadProfileRegistry(options?.profileLookup);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

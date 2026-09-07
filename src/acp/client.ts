@@ -103,6 +103,7 @@ import {
   readEnvCredential,
   resolveConfiguredAuthCredential,
   startOpenRouterShimForSession,
+  type AgentSessionContext,
   type EffectiveAccountMetadata,
 } from "./auth-env.js";
 import { resolveBrickContext } from "./brick-context.js";
@@ -144,6 +145,7 @@ import {
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
   resolveOpenRouterRoute,
+  type OpenRouterBoxCredential,
 } from "./openrouter-routing.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import {
@@ -576,6 +578,53 @@ function createNdJsonMessageStream(
   });
 
   return { readable, writable };
+}
+
+/**
+ * The picker route's log line: the credential's ORIGIN, never its value, and the
+ * profile whose credential is being bypassed.
+ *
+ * ⚠️ THE BYPASSED PROFILE IS NAMED ON PURPOSE. On the UI path a profile is ALWAYS
+ * present — acpx-ui sends none and acpx applies the box default — so this route
+ * routinely runs with a `[claude/subscription]` profile selected whose credential
+ * it does not use, because that credential cannot serve an OpenRouter model.
+ * Correct, but it must not be SILENT: an operator reading the log has to be able
+ * to see that the profile they picked is not the thing paying.
+ */
+/** The picker route's three inputs off the session context. Split out only to keep
+ *  `startPickerShim` under the complexity budget. */
+function trimmedOrUndefined(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function pickerShimContext(ctx: AgentSessionContext | undefined): {
+  sessionId: string;
+  effort: string | undefined;
+  bypassedProfileId: string | undefined;
+} {
+  return {
+    sessionId: trimmedOrUndefined(ctx?.acpxRecordId) ?? randomUUID(),
+    effort: trimmedOrUndefined(ctx?.reasoningEffort),
+    bypassedProfileId: trimmedOrUndefined(ctx?.profileId),
+  };
+}
+
+function describePickerRoute(
+  routeModel: string,
+  credential: OpenRouterBoxCredential,
+  bypassedProfileId: string | undefined,
+): string {
+  const base =
+    `openrouter picker route: serving "${routeModel}" through the shim on the box credential ` +
+    `(${credential.envName} from ${credential.origin})`;
+  if (!bypassedProfileId) {
+    return base;
+  }
+  return (
+    `${base}; profile "${bypassedProfileId}" is not an OpenRouter account, ` +
+    `so its credential is NOT used for this session`
+  );
 }
 
 export class AcpClient {
@@ -1154,22 +1203,16 @@ export class AcpClient {
     if (!credential) {
       throw openRouterBoxCredentialMissing(routeModel);
     }
-    const ctx = this.options.sessionContext;
-    const sessionId = ctx?.acpxRecordId?.trim() || randomUUID();
-    const effort = ctx?.reasoningEffort?.trim();
+    const ctx = pickerShimContext(this.options.sessionContext);
     this.shimHandle = await startOpenRouterShimForSession(
       env,
-      sessionId,
+      ctx.sessionId,
       credential.key,
       routeModel,
-      effort ? effort : undefined,
+      ctx.effort,
     );
     this.openRouterRouteModelId = routeModel;
-    // The ORIGIN, never the value — `credential.key` must not reach a log line.
-    this.log(
-      `openrouter picker route: serving "${routeModel}" through the shim on the box credential ` +
-        `(${credential.envName} from ${credential.origin})`,
-    );
+    this.log(describePickerRoute(routeModel, credential, ctx.bypassedProfileId));
   }
 
   /**
