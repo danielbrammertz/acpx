@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { OPENROUTER_SHIM_AUTH_PLACEHOLDER, pointAdapterAtShim } from "../src/acp/auth-env.js";
 import type { AcpClient } from "../src/acp/client.js";
 import { applyPromptModelIfAdvertised } from "../src/cli/session/runtime.js";
 import { createSessionConversation } from "../src/session/conversation-model.js";
@@ -179,4 +180,43 @@ test("THE SUPPRESSION IS EXACT — a claude alias on the same session still goes
   });
 
   assert.deepEqual(wireCalls, ["haiku"], "an ordinary claude alias must still be applied");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SECOND DEFECT ON THIS ROUTE — the adapter could not make a request at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("the adapter's shim auth token is NON-BLANK — a blank one refuses locally and sends nothing", () => {
+  // 🛑 THIS WAS `" "` — A SINGLE SPACE — with a comment that had become false.
+  // `claude-agent-acp 0d5ab3ab` (2026-09-01) bumped the SDK to Claude Code
+  // 2.1.257, after which a blank token makes Claude Code answer
+  // `Not logged in · Please run /login` LOCALLY: measured over five sessions on
+  // disk (authentication_failed, input_tokens: 0, model <synthetic>) and by a
+  // two-arm probe in which arm A produced ZERO POST /v1/messages.
+  //
+  // The assertion is on BLANKNESS, not on the literal, because blankness is the
+  // property that was measured. Pinning the exact string would go red on a
+  // harmless rename and still pass on `"\t"`.
+  const env: NodeJS.ProcessEnv = {};
+  pointAdapterAtShim(env, 41234);
+
+  assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:41234");
+  assert.ok(
+    (env.ANTHROPIC_AUTH_TOKEN ?? "").trim().length > 0,
+    "a blank ANTHROPIC_AUTH_TOKEN makes Claude Code refuse before any HTTP call",
+  );
+  assert.equal(env.ANTHROPIC_AUTH_TOKEN, OPENROUTER_SHIM_AUTH_PLACEHOLDER);
+  // ⚠️ It must stay an OBVIOUS placeholder. The shim overwrites the header
+  // downstream, so this value never leaves the box — and the way it stays that
+  // way is that nobody can mistake it for a credential.
+  assert.doesNotMatch(env.ANTHROPIC_AUTH_TOKEN ?? "", /^sk-/, "never credential-shaped");
+});
+
+test("the subscription path's custom headers are cleared, so the shim's own Authorization stands", () => {
+  // The negative control for the row above: pointAdapterAtShim must do all three
+  // things, not just the one that was broken. A leftover ANTHROPIC_CUSTOM_HEADERS
+  // from the subscription path would ride alongside the shim's injected header.
+  const env: NodeJS.ProcessEnv = { ANTHROPIC_CUSTOM_HEADERS: "X-Leftover: 1" };
+  pointAdapterAtShim(env, 41234);
+  assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, undefined);
 });

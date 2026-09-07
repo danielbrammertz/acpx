@@ -102,6 +102,7 @@ import {
   effectiveAccountMetadataFromEnv,
   readEnvCredential,
   resolveConfiguredAuthCredential,
+  pointAdapterAtShim,
   startOpenRouterShimForSession,
   type AgentSessionContext,
   type EffectiveAccountMetadata,
@@ -1177,14 +1178,20 @@ export class AcpClient {
     }
   }
 
-  /** Reconnect: point the adapter back at the shim process that is still running. */
+  /**
+   * Reconnect: point the adapter back at the shim process that is still running.
+   *
+   * ⚠️ THROUGH `pointAdapterAtShim`, NOT A SECOND COPY OF THE THREE LINES. This
+   * method used to carry its own `ANTHROPIC_AUTH_TOKEN = " "`, so the blank-token
+   * defect had TWO homes and repairing the spawn one alone would have left every
+   * RESUMED OpenRouter session — legacy profile and picker route alike — still
+   * refusing locally with `Not logged in`, while a fresh create looked fixed.
+   */
   private reinjectRunningShim(env: NodeJS.ProcessEnv): void {
     if (!this.shimHandle) {
       return;
     }
-    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${this.shimHandle.port}`;
-    env.ANTHROPIC_AUTH_TOKEN = " ";
-    delete env.ANTHROPIC_CUSTOM_HEADERS;
+    pointAdapterAtShim(env, this.shimHandle.port);
   }
 
   /**
