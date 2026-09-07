@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { applyHarnessConfigDir } from "../src/acp/harness-config-dir.js";
-import { readPiAdvertisedModelIds } from "../src/acp/pi-model-knowledge.js";
+import {
+  piKnowledgeCachePath,
+  readPiAdvertisedModelIds,
+  readReplyLine,
+  resetPiKnowledgeMemo,
+} from "../src/acp/pi-model-knowledge.js";
 import { deriveBilling } from "../src/models/catalogue.js";
 import { deriveCostFigure, reportedCost, type CostUnit } from "../src/models/cost-provenance.js";
 
@@ -26,6 +31,15 @@ import { deriveCostFigure, reportedCost, type CostUnit } from "../src/models/cos
 // are pointed at fixtures, so no `pi` process is spawned and no network is
 // touched. A test that silently fell back to a real spawn would be measuring the
 // box, not the change.
+//
+// 🛑 THAT SENTENCE WAS HALF FALSE UNTIL BRICK ff298f02, AND THE FALSE HALF WAS
+// INVISIBLE BECAUSE IT PASSED. `ACPX_MODELS_CACHE` was set in the fixture env and
+// then ignored: `defaultCatalogueCachePath()` resolved `process.env` and
+// `os.homedir()`, so CASE 1 read `/home/node/.acpx/models-cache.json` and passed
+// only because that file happened to contain `qwen/qwen3.8-flash`. Measured by
+// running this file under three HOMEs: it RED under two of them and green under
+// the box's own. A fixture variable that is set but not consulted is worse than
+// no fixture at all — it makes the file LOOK hermetic to every later reader.
 
 const PI_COMMAND = "node /opt/pi-acp/dist/index.js";
 
@@ -83,6 +97,11 @@ function fixture(options: {
       JSON.stringify({ openrouter: { lastModified: 1, checkedAt: 1, models: options.boxOverlay } }),
     );
   }
+
+  // The knowledge memo is process-wide and every fixture shares one process.
+  // Each fixture has its own cache path, so a collision is unlikely rather than
+  // impossible — and "unlikely" is not a property a test should rest on.
+  resetPiKnowledgeMemo();
 
   return {
     root,
@@ -213,12 +232,32 @@ test("CASE 4 — with the box overlay file ABSENT (the box's ACTUAL state) both 
   }
 });
 
+test("pi knowledge: the cache path honours the PASSED env, never the process's own home", () => {
+  // Regression for a latent defect: resolving through `homedir()` reads the
+  // CURRENT PROCESS's home, so a caller with a scoped env — every unit test
+  // here, and any isolated rig — would still have written the REAL ~/.acpx.
+  // The same class as the box contamination this brick's lane caused with two
+  // un-isolated probes: isolation is per-invocation and fails silently once.
+  const scoped = piKnowledgeCachePath({ HOME: "/scoped-home" });
+  assert.equal(scoped, "/scoped-home/.acpx/pi-model-knowledge.json");
+  assert.equal(
+    piKnowledgeCachePath({ ACPX_STATE_HOME: "/state", HOME: "/scoped-home" }),
+    "/state/.acpx/pi-model-knowledge.json",
+    "ACPX_STATE_HOME still wins, as it does for every other acpx path resolver",
+  );
+  assert.ok(
+    !scoped.startsWith(homedir()),
+    "must not resolve into the real home when env is scoped",
+  );
+});
+
 test("pi knowledge: a failure to ASK is null, and is not the same as an empty set", () => {
   // These two lead to opposite decisions — "pi knows nothing, provision
   // everything" vs "I could not establish it" — so they must not collapse.
   const root = mkdtempSync(join(tmpdir(), "acpx-pi-know-"));
   try {
     const cachePath = join(root, "k.json");
+    resetPiKnowledgeMemo();
     assert.equal(
       readPiAdvertisedModelIds({}, { cachePath, readAdvertised: () => null }),
       null,
@@ -229,12 +268,161 @@ test("pi knowledge: a failure to ASK is null, and is not the same as an empty se
     assert.equal(empty.size, 0);
 
     // A stale cache beats nothing when pi cannot be asked.
+    // ⚠️ The reset is load-bearing, not hygiene: the empty Set above is now
+    // MEMOISED under this cachePath, and without clearing it this assertion would
+    // read the previous answer instead of the file it just wrote.
+    resetPiKnowledgeMemo();
     writeFileSync(
       cachePath,
       JSON.stringify({ fetchedAt: new Date(0).toISOString(), ids: ["a/b"] }),
     );
     const stale = readPiAdvertisedModelIds({}, { cachePath, readAdvertised: () => null });
     assert.deepEqual([...(stale ?? [])], ["a/b"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pi knowledge: a reply frame with NO models array is 'could not ask', never 'knows nothing'", () => {
+  // 🛑 THE REGRESSION THIS PINS. A refactor turned this case into an EMPTY ID
+  // LIST, i.e. "pi advertises nothing" — the exact collapse the module exists to
+  // prevent, and the one that drives the opposite decision one level up
+  // (provision everything vs. provision nothing). It changed no test, because no
+  // test reached this line.
+  assert.deepEqual(readReplyLine('{"type":"response","id":"acpx-knowledge","data":{}}'), {
+    kind: "malformed",
+  });
+  assert.deepEqual(
+    readReplyLine('{"type":"response","id":"acpx-knowledge","data":{"models":"nope"}}'),
+    { kind: "malformed" },
+  );
+
+  // ... and the three neighbours it must NOT be confused with. Without these the
+  // assertion above passes on a classifier that answers "malformed" to everything.
+  assert.deepEqual(
+    readReplyLine('{"type":"response","id":"acpx-knowledge","data":{"models":[]}}'),
+    {
+      kind: "ids",
+      ids: [],
+    },
+  );
+  assert.deepEqual(
+    readReplyLine(
+      '{"type":"response","id":"acpx-knowledge","data":{"models":[{"id":"a/b"},{"nope":1}]}}',
+    ),
+    { kind: "ids", ids: ["a/b"] },
+  );
+  assert.deepEqual(readReplyLine('{"type":"event","id":"acpx-knowledge"}'), { kind: "other" });
+  assert.deepEqual(readReplyLine("not json at all"), { kind: "other" });
+  assert.deepEqual(readReplyLine("   "), { kind: "other" });
+});
+
+test("pi knowledge: the cache is keyed by the pi BINARY's identity, and a mismatch re-asks", () => {
+  const root = mkdtempSync(join(tmpdir(), "acpx-pi-ident-"));
+  try {
+    const cachePath = join(root, "k.json");
+    let asks = 0;
+    const reader = () => {
+      asks += 1;
+      return ["fresh/from-the-binary"];
+    };
+
+    // A cold read stamps the cache with the binary it asked.
+    resetPiKnowledgeMemo();
+    const first = readPiAdvertisedModelIds(
+      {},
+      { cachePath, readAdvertised: reader, binaryStamp: "/usr/bin/pi:111:222" },
+    );
+    assert.deepEqual([...(first ?? [])], ["fresh/from-the-binary"]);
+    assert.equal(asks, 1);
+    assert.equal(
+      (JSON.parse(readFileSync(cachePath, "utf8")) as { binary?: string }).binary,
+      "/usr/bin/pi:111:222",
+      "the cache must record WHICH binary answered, or identity can never be checked",
+    );
+
+    // Same binary ⇒ the cache is used and pi is NOT asked again.
+    resetPiKnowledgeMemo();
+    readPiAdvertisedModelIds(
+      {},
+      { cachePath, readAdvertised: reader, binaryStamp: "/usr/bin/pi:111:222" },
+    );
+    assert.equal(asks, 1, "same binary, fresh cache ⇒ no second spawn");
+
+    // A DIFFERENT binary ⇒ the cache is stale however recent it is. This is the
+    // direction the 24 h TTL could not express: a pi upgrade was invisible for a
+    // day, and a rig's pi and the box's pi shared one answer.
+    resetPiKnowledgeMemo();
+    readPiAdvertisedModelIds(
+      {},
+      { cachePath, readAdvertised: reader, binaryStamp: "/usr/bin/pi:999:222" },
+    );
+    assert.equal(asks, 2, "a different binary must re-ask, TTL notwithstanding");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pi knowledge: NO resolvable pi ⇒ NO spawn is attempted at all, and the memo skips a repeat", () => {
+  const root = mkdtempSync(join(tmpdir(), "acpx-pi-nospawn-"));
+  try {
+    const cachePath = join(root, "k.json");
+    let asks = 0;
+    const reader = () => {
+      asks += 1;
+      return ["should/never-be-reached"];
+    };
+
+    // `binaryStamp: null` is the "pi is not on PATH" state — the state EVERY box
+    // without pi is in. The old code paid a failed spawnSync per session create
+    // to learn what a stat answers.
+    resetPiKnowledgeMemo();
+    assert.equal(
+      readPiAdvertisedModelIds({}, { cachePath, readAdvertised: reader, binaryStamp: null }),
+      null,
+      "no binary and no cache ⇒ could not establish",
+    );
+    assert.equal(asks, 0, "a spawn was attempted for a pi that does not exist");
+
+    // ... and with a cache present it is used, still without asking.
+    writeFileSync(
+      cachePath,
+      JSON.stringify({ fetchedAt: new Date().toISOString(), ids: ["cached/one"] }),
+    );
+    resetPiKnowledgeMemo();
+    assert.deepEqual(
+      [
+        ...(readPiAdvertisedModelIds(
+          {},
+          { cachePath, readAdvertised: reader, binaryStamp: null },
+        ) ?? []),
+      ],
+      ["cached/one"],
+    );
+    assert.equal(asks, 0);
+
+    // The process memo: a SECOND identical read does not even re-read the file.
+    // Proven by deleting the file between the two calls — a read that still
+    // answers can only have come from the memo.
+    rmSync(cachePath, { force: true });
+    assert.deepEqual(
+      [
+        ...(readPiAdvertisedModelIds(
+          {},
+          { cachePath, readAdvertised: reader, binaryStamp: null },
+        ) ?? []),
+      ],
+      ["cached/one"],
+      "the memo did not answer — session creates would re-read the cache file each time",
+    );
+    // And the control that makes that meaningful: clear the memo and the same
+    // call now correctly reports it cannot establish anything.
+    resetPiKnowledgeMemo();
+    assert.equal(
+      readPiAdvertisedModelIds({}, { cachePath, readAdvertised: reader, binaryStamp: null }),
+      null,
+      "with the memo cleared and the file gone, the answer MUST change",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

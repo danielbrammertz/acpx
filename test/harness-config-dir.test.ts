@@ -22,6 +22,7 @@ import {
   pruneOrphanHarnessConfigDirs,
   removeHarnessConfigDir,
 } from "../src/acp/harness-config-dir.js";
+import { resetPiKnowledgeMemo } from "../src/acp/pi-model-knowledge.js";
 import { AGENT_REGISTRY } from "../src/agent-registry.js";
 import { cloneSessionAcpxState } from "../src/session/conversation-model.js";
 import { setHarnessConfigDir } from "../src/session/mode-preference.js";
@@ -51,6 +52,64 @@ function withTempRoot<T>(run: (root: string) => T): T {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * 🛑 THE ENV EVERY PI PROVISIONING ROW MUST USE — it reads NOTHING from the box.
+ *
+ * ## Why this exists (brick ff298f02)
+ *
+ * `writePiModelsStore` makes its decision from TWO reads, and BOTH resolved
+ * against the machine when the caller passed a scoped env:
+ *
+ *  - `readBoxPiOpenRouterModels` → `<HOME>/.pi/agent/models-store.json`, and with
+ *    `HOME` unset that is the REAL `/home/node`;
+ *  - `readPiAdvertisedModelIds` → `<HOME>/.acpx/pi-model-knowledge.json`, and on a
+ *    miss it SPAWNS `pi`.
+ *
+ * So a row written as `const env = {}` asserted against whatever the box happened
+ * to hold. Measured: an un-isolated probe left `/home/node/.pi/agent/models-store.json`
+ * behind at 08:37:22Z on 2026-09-07 and the row below went RED for every lane on
+ * this box for three hours; it went green again when the file was moved away.
+ * **A unit test whose result depends on box state is itself the defect** — and it
+ * is what made a differential unable to separate two causes, because the
+ * contamination sat in BOTH arms.
+ *
+ * ⚠️ `PATH: ""` is not decoration. It states that no `pi` binary is resolvable,
+ * which is what makes "no spawn happens here" a PROPERTY OF THE FIXTURE rather
+ * than an accident of the box not having pi installed.
+ *
+ * The knowledge cache is written with no `binary` stamp deliberately: with no
+ * resolvable binary there is nothing to compare it against, so freshness alone
+ * decides and the injected ids are used verbatim.
+ */
+function piIsolatedEnv(
+  root: string,
+  options: { piKnows: string[]; boxCatalogue?: unknown[] },
+): NodeJS.ProcessEnv {
+  const boxHome = join(root, "box-home");
+  mkdirSync(boxHome, { recursive: true });
+
+  if (options.boxCatalogue) {
+    const boxAgentDir = join(boxHome, ".pi", "agent");
+    mkdirSync(boxAgentDir, { recursive: true });
+    writeFileSync(
+      join(boxAgentDir, "models-store.json"),
+      JSON.stringify({ openrouter: { lastModified: 1, models: options.boxCatalogue } }),
+    );
+  }
+
+  const cachePath = join(root, "pi-knowledge.json");
+  writeFileSync(
+    cachePath,
+    JSON.stringify({ fetchedAt: new Date().toISOString(), ids: options.piKnows }),
+  );
+
+  // The knowledge memo lives for the life of the process, and every row here
+  // shares one. Without this, a row would measure the PREVIOUS row's answer.
+  resetPiKnowledgeMemo();
+
+  return { HOME: boxHome, ACPX_PI_KNOWLEDGE_CACHE: cachePath, PATH: "" };
 }
 
 // ── THE GUARDRAIL: the three Claude/codex agents gain NOTHING ────────────────
@@ -220,7 +279,12 @@ test("pi DOES get a generated models-store.json now that the merge semantics are
   // 333 offered models became 334 with a one-entry file planted, a pre-existing
   // slug still resolved, and 333 came back after restore.
   withTempRoot((root) => {
-    const env: NodeJS.ProcessEnv = {};
+    // HERMETIC (brick ff298f02): the box overlay and pi's knowledge are both
+    // INJECTED. `zzz/not-in-any-catalogue` is a slug pi does not know, so case 3
+    // ("pi already knows it ⇒ write nothing") does not apply here and the
+    // reversal this row encodes is unaffected — only its dependence on the box
+    // is removed. The row below asserts the injection is load-bearing.
+    const env = piIsolatedEnv(root, { piKnows: ["some/model-pi-really-does-know"] });
     applyHarnessConfigDir({
       env,
       agentCommand: AGENT_REGISTRY.pi,
@@ -266,6 +330,86 @@ test("pi DOES get a generated models-store.json now that the merge semantics are
   });
 });
 
+test("HERMETICITY CONTROL: pi provisioning reads the INJECTED state, in both directions", () => {
+  // 🛑 THE ROW ABOVE IS ONLY HERMETIC IF THE INJECTED STATE IS WHAT IT READS.
+  // Asserting "the fixture is isolated" proves nothing on its own — an isolated
+  // fixture and an IGNORED fixture produce the same green. So this row varies the
+  // injected state and requires the OUTCOME to move with it. A row that only
+  // checked the happy path would pass just as well against the box.
+  withTempRoot((root) => {
+    // (a) pi does NOT know the slug, and the injected box overlay is EMPTY ⇒ an
+    //     entry is written, and it is the ONLY one.
+    const notKnown = piIsolatedEnv(root, { piKnows: ["some/other-model"] });
+    applyHarnessConfigDir({
+      env: notKnown,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_pi_ctl_a",
+      provisionModelId: "openrouter/zzz/not-in-any-catalogue",
+      rootDir: root,
+    });
+    const storeA = join(notKnown.PI_CODING_AGENT_DIR as string, "models-store.json");
+    assert.ok(existsSync(storeA), "(a) pi does not know the slug — an entry must be written");
+    assert.deepEqual(
+      (
+        JSON.parse(readFileSync(storeA, "utf8")) as { openrouter: { models: { id: string }[] } }
+      ).openrouter.models.map((m) => m.id),
+      ["zzz/not-in-any-catalogue"],
+    );
+  });
+
+  withTempRoot((root) => {
+    // (b) THE SAME CALL, varying ONLY the injected pi knowledge ⇒ NO FILE AT ALL.
+    //     This is the discriminator: if the row were reading the box instead of
+    //     the fixture, flipping the fixture could not change the outcome.
+    const known = piIsolatedEnv(root, { piKnows: ["zzz/not-in-any-catalogue"] });
+    applyHarnessConfigDir({
+      env: known,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_pi_ctl_b",
+      provisionModelId: "openrouter/zzz/not-in-any-catalogue",
+      rootDir: root,
+    });
+    assert.equal(
+      existsSync(join(known.PI_CODING_AGENT_DIR as string, "models-store.json")),
+      false,
+      "(b) pi already knows the slug and the overlay is empty — no store may be written",
+    );
+  });
+
+  withTempRoot((root) => {
+    // (c) The BOX-overlay lever, proven through the injected HOME rather than
+    //     through PI_CODING_AGENT_DIR. A planted entry that could only have come
+    //     from the fixture must appear in the generated store — which is what
+    //     rules out `/home/node` as the source.
+    const planted = piIsolatedEnv(root, {
+      piKnows: [],
+      boxCatalogue: [
+        {
+          id: "planted/only-in-the-injected-home",
+          api: "openai-completions",
+          baseUrl: "https://openrouter.ai/api/v1",
+        },
+      ],
+    });
+    applyHarnessConfigDir({
+      env: planted,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_pi_ctl_c",
+      provisionModelId: "openrouter/zzz/not-in-any-catalogue",
+      rootDir: root,
+    });
+    const ids = (
+      JSON.parse(
+        readFileSync(join(planted.PI_CODING_AGENT_DIR as string, "models-store.json"), "utf8"),
+      ) as { openrouter: { models: { id: string }[] } }
+    ).openrouter.models.map((m) => m.id);
+    assert.deepEqual(ids.toSorted(), [
+      "planted/only-in-the-injected-home",
+      "zzz/not-in-any-catalogue",
+    ]);
+  });
+});
+
 test("provisioning COPIES the box catalogue forward and repairs the Anthropic baseUrl by id", () => {
   // Two failures in one row, both measured:
   //  1. writing ONLY the slug costs the session every model pi had cached
@@ -301,7 +445,19 @@ test("provisioning COPIES the box catalogue forward and repairs the Anthropic ba
       }),
     );
 
-    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: boxAgentDir };
+    // Hermetic like the rows above. `PI_CODING_AGENT_DIR` is THIS row's lever for
+    // the overlay, but the KNOWLEDGE read is a second, independent box read: with
+    // no cache path and no HOME it resolves the real `/home/node` and then tries
+    // to spawn pi (brick ff298f02). Both are pinned here.
+    const knowledgeCache = join(root, "pi-knowledge.json");
+    writeFileSync(knowledgeCache, JSON.stringify({ fetchedAt: new Date().toISOString(), ids: [] }));
+    resetPiKnowledgeMemo();
+    const env: NodeJS.ProcessEnv = {
+      PI_CODING_AGENT_DIR: boxAgentDir,
+      ACPX_PI_KNOWLEDGE_CACHE: knowledgeCache,
+      HOME: join(root, "box-home"),
+      PATH: "",
+    };
     applyHarnessConfigDir({
       env,
       agentCommand: AGENT_REGISTRY.pi,
