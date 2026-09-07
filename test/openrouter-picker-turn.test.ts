@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { OPENROUTER_SHIM_AUTH_PLACEHOLDER, pointAdapterAtShim } from "../src/acp/auth-env.js";
-import { trimmedOrUndefined, type AcpClient } from "../src/acp/client.js";
+import { shimConfigDirSessionId, type AcpClient } from "../src/acp/client.js";
 import { applyPromptModelIfAdvertised } from "../src/cli/session/runtime.js";
 import { createSessionConversation } from "../src/session/conversation-model.js";
 import { defaultSessionEventLog } from "../src/session/event-log.js";
@@ -229,19 +229,22 @@ test("a blank record id never yields the SHARED /tmp/or- config dir — on eithe
   // every blank-id session, defeating the per-session isolation that directory
   // exists for. The picker route already guarded it; the legacy route did not.
   //
-  // Asserted on the guard rather than on either call site, because the guard is
-  // the thing both routes now share — a call-site test would pass again the next
-  // time someone writes `??` at a third site.
+  // ⚠️ ASSERTED ON `shimConfigDirSessionId` — THE FUNCTION BOTH CALL SITES USE —
+  // NOT ON THE GENERIC TRIM HELPER. The first version of this test asserted the
+  // helper, and a mutation probe proved it VACUOUS: reverting the legacy call
+  // site to `?? profileId`, i.e. reinstating the exact defect, left this whole
+  // file GREEN, because the helper was still correct and nothing here touched the
+  // rule under repair. True and unattached is the pair that survives review.
   for (const blank of ["", " ", "\t", "\n", "   "]) {
-    assert.equal(trimmedOrUndefined(blank), undefined, `${JSON.stringify(blank)} must not survive`);
+    assert.equal(
+      shimConfigDirSessionId({ acpxRecordId: blank }, "fallback-id"),
+      "fallback-id",
+      `${JSON.stringify(blank)} must fall back, not become part of the path`,
+    );
   }
-  // The positive control: a real id must survive untouched, or the guard would
-  // "pass" by rejecting everything.
-  assert.equal(
-    trimmedOrUndefined("cd93c99f-cd1a-4df4-81a4-5bf78597ec10"),
-    "cd93c99f-cd1a-4df4-81a4-5bf78597ec10",
-  );
-  assert.equal(trimmedOrUndefined("  padded-id  "), "padded-id");
-  assert.equal(trimmedOrUndefined(undefined), undefined);
-  assert.equal(trimmedOrUndefined(null), undefined);
+  // The positive control: a real id must survive untouched, or the rule would
+  // "pass" by rejecting everything and every session would share the fallback.
+  assert.equal(shimConfigDirSessionId({ acpxRecordId: "real-id" }, "fallback-id"), "real-id");
+  assert.equal(shimConfigDirSessionId({ acpxRecordId: "  padded  " }, "fallback-id"), "padded");
+  assert.equal(shimConfigDirSessionId(undefined, "fallback-id"), "fallback-id");
 });

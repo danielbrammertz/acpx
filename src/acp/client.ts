@@ -605,13 +605,37 @@ export function trimmedOrUndefined(value: string | null | undefined): string | u
   return trimmed ? trimmed : undefined;
 }
 
+/**
+ * The id that namespaces a shim's `CLAUDE_CONFIG_DIR` (`/tmp/or-<id>`), for BOTH
+ * routes — the legacy profile route passes the profile id as its fallback, the
+ * picker route a fresh uuid.
+ *
+ * ⚠️ IT IS A NAMED FUNCTION, NOT AN INLINE EXPRESSION, SO A TEST CAN BIND THE
+ * THING THE CALL SITE ACTUALLY USES. The first version of this fix asserted the
+ * generic `trimmedOrUndefined` helper instead, and a mutation probe proved that
+ * vacuous: reverting the legacy call site to `?? profileId` — the original defect
+ * — left the whole test file GREEN, because the helper was still correct and the
+ * test never touched the call site. True and unattached.
+ *
+ * ⚠️ STATED RESIDUAL: a mutation that stops CALLING this function altogether is
+ * still not caught by a unit test — that needs a spawn. What is caught is every
+ * mutation of the rule itself, which is where the `??`-does-not-catch-`""` defect
+ * actually lived.
+ */
+export function shimConfigDirSessionId(
+  ctx: AgentSessionContext | undefined,
+  fallback: string,
+): string {
+  return trimmedOrUndefined(ctx?.acpxRecordId) ?? fallback;
+}
+
 function pickerShimContext(ctx: AgentSessionContext | undefined): {
   sessionId: string;
   effort: string | undefined;
   bypassedProfileId: string | undefined;
 } {
   return {
-    sessionId: trimmedOrUndefined(ctx?.acpxRecordId) ?? randomUUID(),
+    sessionId: shimConfigDirSessionId(ctx, randomUUID()),
     effort: trimmedOrUndefined(ctx?.reasoningEffort),
     bypassedProfileId: trimmedOrUndefined(ctx?.profileId),
   };
@@ -1270,7 +1294,7 @@ export class AcpClient {
     // That is pre-existing legacy-route behaviour and changing it would alter a
     // path this branch is required to leave otherwise untouched; the picker route
     // uses `randomUUID()` for genuine per-spawn uniqueness.
-    const sessionId = trimmedOrUndefined(ctx?.acpxRecordId) ?? profileId;
+    const sessionId = shimConfigDirSessionId(ctx, profileId);
     const reasoningEffort = ctx?.reasoningEffort ?? null;
     this.shimHandle =
       (await applyProfileAuth(
