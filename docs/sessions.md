@@ -352,7 +352,7 @@ acpx codex --no-wait 'after the current turn ends, write the release notes'
 
 `sessions sweep-config-dirs` reclaims **orphaned per-session harness config
 directories** — the `acpx-<harness>-<id>` directories acpx writes under the system
-temp dir for harnesses whose primer travels in a config file (OpenCode and Pi).
+temp dir for harnesses whose primer travels in a config file (Pi).
 
 **It removes DIRECTORIES ONLY. It never deletes a session record or a messages
 sidecar.** That is the whole point: `prune` reclaims those directories only by

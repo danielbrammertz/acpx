@@ -23,7 +23,6 @@ The default agent for top-level commands like `acpx exec â€¦` and `acpx prompt â
 | `kilocode` | `npx -y @kilocode/cli acp`                     | [Kilocode](https://kilocode.ai)                                                                                 |
 | `kimi`     | `kimi acp`                                     | [Kimi CLI](https://github.com/MoonshotAI/kimi-cli)                                                              |
 | `kiro`     | `kiro-cli-chat acp`                            | [Kiro CLI](https://kiro.dev)                                                                                    |
-| `opencode` | `npx -y opencode-ai acp`                       | [OpenCode](https://opencode.ai)                                                                                 |
 | `qoder`    | `qodercli --acp`                               | [Qoder CLI](https://docs.qoder.com/cli/acp)                                                                     |
 | `qwen`     | `qwen --acp`                                   | [Qwen Code](https://github.com/QwenLM/qwen-code)                                                                |
 | `trae`     | `traecli acp serve`                            | [Trae CLI](https://docs.trae.cn/cli)                                                                            |
@@ -154,12 +153,6 @@ If your Cursor install exposes ACP as `agent acp` instead of `cursor-agent acp`,
 - Built-in name: `kiro`
 - Default command: `kiro-cli-chat acp`
 - Upstream: [kiro.dev](https://kiro.dev)
-
-### OpenCode
-
-- Built-in name: `opencode`
-- Default command: `npx -y opencode-ai acp`
-- Upstream: [opencode.ai](https://opencode.ai)
 
 ### Qwen
 

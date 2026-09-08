@@ -575,7 +575,6 @@ function homeHero(page) {
     "droid",
     "qwen",
     "qoder",
-    "opencode",
     "kimi",
   ];
   return `<header class="home-hero">

@@ -107,7 +107,6 @@ Friendly agent names resolve to commands:
 - `kilocode` -> `npx -y @kilocode/cli acp`
 - `kimi` -> `kimi acp`
 - `kiro` -> `kiro-cli-chat acp`
-- `opencode` -> `npx -y opencode-ai acp`
 - `qoder` -> `qodercli --acp`
   Forwards Qoder-native `--allowed-tools` and `--max-turns` startup flags from `acpx` session options.
 - `qwen` -> `qwen --acp`
