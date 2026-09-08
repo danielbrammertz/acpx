@@ -2146,13 +2146,11 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
       applyPersistedClosedState(persisted);
       await eventWriter.checkpoint({ persistedLifecycle: { value: persisted } });
     },
-    onError: (error) => {
-      if (options.verbose) {
-        process.stderr.write(
-          "[acpx] live session checkpoint failed: " + formatErrorMessage(error) + "\n",
-        );
-      }
-    },
+    // ⚠️ NO `onError` HERE ON PURPOSE (brick://48aca560). This used to carry one
+    // gated behind `options.verbose`, which meant every ordinary queue-owner
+    // turn — i.e. every real turn — reported a failed checkpoint as nothing at
+    // all. LiveSessionCheckpoint's own default reports unconditionally, and a
+    // default cannot be forgotten the way this gate was.
   });
 
   const ownClient = options.client == null;

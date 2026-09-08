@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { assertPersistedKeyPolicy } from "../../persisted-key-policy.js";
 import { hydrateSessionMessagesFromLog, messagesLogPath } from "../../session/messages-log.js";
 import { parseSessionRecord } from "../../session/persistence/parse.js";
 import { serializeSessionRecordForDisk } from "../../session/persistence/serialize.js";
@@ -59,8 +58,8 @@ class FileSessionStore implements AcpSessionStore {
 
   async save(record: AcpSessionRecord): Promise<void> {
     await this.ensureDir();
+    // Key policy asserted inside serializeSessionRecordForDisk (brick://48aca560).
     const persisted = serializeSessionRecordForDisk(record);
-    assertPersistedKeyPolicy(persisted);
 
     const file = this.filePath(record.acpxRecordId);
     // Per-call randomUUID: `${pid}.${Date.now()}` alone is NOT unique. Two saves

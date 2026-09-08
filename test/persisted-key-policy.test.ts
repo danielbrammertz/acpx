@@ -127,3 +127,51 @@ test("persisted key policy allows pinned account_switch seam keys", () => {
   assert.deepEqual(findPersistedKeyPolicyViolations(persisted), []);
   assertPersistedKeyPolicy(persisted);
 });
+
+/**
+ * brick://48aca560 — the assert lives INSIDE serializeSessionRecordForDisk, not
+ * in its callers, so no writer can bypass it. The tests' own record writers
+ * (`test/cli.test.ts`, `test/runtime-test-helpers.ts`) call serialize and
+ * `fs.writeFile` directly; while the assert sat in `repository.ts` they wrote
+ * shapes production could never persist, and the suite stayed green.
+ */
+test("serializeSessionRecordForDisk itself throws on a camelCase acpx key", () => {
+  const record = makeRecord();
+  // The shape an unguarded change produces: SessionAcpxState does not admit it,
+  // which is the point — this simulates the field a future author adds.
+  record.acpx = { ...record.acpx, cost_units: [{ cacheRead: 512 }] } as SessionRecord["acpx"];
+
+  assert.throws(() => {
+    serializeSessionRecordForDisk(record);
+  }, /acpx\.cost_units\.cacheRead/);
+});
+
+test("serializeSessionRecordForDisk accepts the same record once the key is snake_case", () => {
+  const record = makeRecord();
+  record.acpx = { ...record.acpx, cost_units: [{ cache_read: 512 }] } as SessionRecord["acpx"];
+
+  // CONTROL for the test above: the rejection must be about the KEY NAME, not
+  // about `cost_units` being unknown to the policy.
+  assert.deepEqual(findPersistedKeyPolicyViolations(serializeSessionRecordForDisk(record)), []);
+});
+
+test("serializeSessionRecordForDisk rejects the provisioning_warning breadcrumb's old key names", () => {
+  const record = makeRecord();
+  record.acpx = {
+    ...record.acpx,
+    session_options: {
+      provisioning_warning: {
+        at: "2026-06-13T12:00:00.000Z",
+        profileId: "home1",
+        authMode: "claude-home",
+        message: "hook install failed",
+      },
+    },
+  } as SessionRecord["acpx"];
+
+  // This shape shipped from 2026-06-13 and could never be written. It is pinned
+  // so the rename cannot be quietly reverted by a future edit to the emitter.
+  assert.throws(() => {
+    serializeSessionRecordForDisk(record);
+  }, /provisioning_warning\.profileId/);
+});

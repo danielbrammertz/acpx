@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { SessionNotFoundError, SessionResolutionError } from "../../errors.js";
 import { incrementPerfCounter, measurePerf } from "../../perf-metrics.js";
-import { assertPersistedKeyPolicy } from "../../persisted-key-policy.js";
 import type { SessionRecord } from "../../types.js";
 import { getLoggedMessageCount, markAllMessagesLogged } from "../messages-log-bookkeeping.js";
 import {
@@ -356,8 +355,9 @@ async function writeSessionRecordInternal(
       await clearMissingMessagesLogPointerForWrite(record, logPath);
     }
 
+    // The snake_case key policy is asserted INSIDE serializeSessionRecordForDisk
+    // (brick://48aca560) so test fixtures cannot bypass it; do not re-walk here.
     const persistedRecord = serializeSessionRecordForDisk(record, { messages: "split-tail" });
-    assertPersistedKeyPolicy(persistedRecord);
 
     const file = sessionFilePath(record.acpxRecordId);
     // The temp name must be unique PER CALL, not per millisecond: two writes

@@ -1,3 +1,4 @@
+import { assertPersistedKeyPolicy } from "../../persisted-key-policy.js";
 import type { SessionRecord, SubagentRef } from "../../types.js";
 import { SESSION_RECORD_SCHEMA } from "../../types.js";
 import { getLoggedMessageCount } from "../messages-log-bookkeeping.js";
@@ -17,6 +18,22 @@ export type SerializeSessionRecordForDiskOptions = {
   messages?: "inline" | "split-tail";
 };
 
+/**
+ * ⚠️ THIS THROWS ON A NON-SNAKE_CASE PERSISTED KEY, AND THE ASSERT LIVES HERE
+ * ON PURPOSE (brick://48aca560).
+ *
+ * It used to sit in the two CALLERS — `repository.ts` and `file-session-store.ts`
+ * — which meant the production write path was checked and every test fixture
+ * was not: the test helpers serialize and `fs.writeFile` themselves. So a record
+ * shape that could never be persisted in production round-tripped happily
+ * through the suite. `test/session-persistence.test.ts`'s
+ * "preserves … provisioning_warning breadcrumb" was green for three months
+ * against a breadcrumb that was, in production, unwritable.
+ *
+ * Putting it here makes the coverage structural rather than a list of call
+ * sites to remember: producing the persisted shape AT ALL is what is checked,
+ * so a new writer — test or production — cannot be added without it.
+ */
 export function serializeSessionRecordForDisk(
   record: SessionRecord,
   options: SerializeSessionRecordForDiskOptions = {},
@@ -30,7 +47,7 @@ export function serializeSessionRecordForDisk(
     ? canonical.messages.slice(getLoggedMessageCount(record))
     : canonical.messages;
 
-  return {
+  const persisted: Record<string, unknown> = {
     schema: canonical.schema,
     acpx_record_id: canonical.acpxRecordId,
     acp_session_id: canonical.acpSessionId,
@@ -83,4 +100,7 @@ export function serializeSessionRecordForDisk(
         }
       : undefined,
   };
+
+  assertPersistedKeyPolicy(persisted);
+  return persisted;
 }
