@@ -13,7 +13,11 @@ import {
   recordDepthOutcome,
 } from "./depth-application.js";
 import type { DepthProjection } from "./depth-projection.js";
-import { getDesiredConfigOptions, setDesiredConfigOption } from "./mode-preference.js";
+import {
+  getDesiredConfigOptions,
+  setDesiredConfigOption,
+  setDesiredModeId,
+} from "./mode-preference.js";
 import { assertOutputStyleAdvertised, OUTPUT_STYLE_CONFIG_ID } from "./output-style.js";
 
 /** Minimal client surface so this is unit-testable with a stub. */
@@ -364,6 +368,27 @@ export async function persistAndApplyRequestedEffort(params: {
       timeoutMs: params.timeoutMs,
       verbose: params.verbose,
     });
+    // 🛑 REMEMBER THE MODE, OR IT IS GONE BY THE FIRST TURN. Measured end to end
+    // 2026-09-08: `sessions new` applied the mode to the CREATING adapter, that
+    // adapter's pi session was not resumable on the next spawn (`session/load` →
+    // `-32602 Unknown sessionId`), acpx recovered with a fresh `session/new`, and
+    // the reconnect replay restored the MODEL but nothing restored the MODE — the
+    // depth request was replayed as `session/set_config_option {configId:"effort"}`,
+    // which pi answers `-32602 Unknown config option: effort` because its id is
+    // `thought_level`. Result: EVERY rung ran the turn at pi's default. With a
+    // logging proxy in front of OpenRouter, `off`, `low`, `medium` and `high` all
+    // put `{"effort":"medium"}` on the wire while the record claimed `exact`.
+    //
+    // `desired_mode_id` is the field the reconnect path ALREADY replays
+    // (`replayDesiredMode`) and is ALREADY in `cloneSessionAcpxState`'s allowlist,
+    // so this needs no new field and cannot be dropped by the turn path — the
+    // failure mode that ate `depth_projection` and two fields before it.
+    //
+    // ⚠️ `appliedId`, never `projection.value`: `value` may have been downgraded
+    // to the agent's advertised served EFFORT, which is not a mode id.
+    if (projection.appliedId) {
+      setDesiredModeId(params.record, projection.appliedId);
+    }
     recordDepthOutcome(params.record, projection);
     return;
   }

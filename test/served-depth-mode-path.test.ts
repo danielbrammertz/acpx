@@ -208,10 +208,20 @@ test("F-14/mode: the collapse applies even when NO set is sent", async () => {
   assert.equal(p.value, "low");
 });
 
-test("F-14/mode: `max` off the advertised ladder stays projected", async () => {
-  // `max` is not among pi's advertised modes, so the projection-by-position layer
-  // moves it — to `high`, not `xhigh`: the canonical vocabulary has SEVEN rungs
-  // and `max` is index 5, so `round(5/6 × 5) = 4` and pi's ladder[4] is `high`.
+test("F-14/mode: `max` off the advertised ladder stays projected — onto the ladder's TOP", async () => {
+  // `max` is not among pi's advertised modes, so the projection layer moves it.
+  //
+  // ⚠️ THIS ROW USED TO EXPECT `high`, AND THAT EXPECTATION ENCODED A DEFECT.
+  // Its reasoning was the arithmetic itself: "`max` is canonical index 5, so
+  // `round(5/6 × 5) = 4` and pi's ladder[4] is `high`". The proportional rule
+  // assumed the ladder SPANS the canonical scale, so it skipped `xhigh` — an
+  // advertised rung the user could have had — and served LESS than was asked for
+  // while a lower request (`xhigh`) would have been served exactly. Measured on
+  // live pi sessions 2026-09-08 with the real 5-rung per-model ladder, the same
+  // rule put both `xhigh` and `max` on `medium`, one rung BELOW plain `high`.
+  //
+  // A request above every rung now lands on the TOP rung — pi's own
+  // `clampThinkingLevel` walks up from the request and only then down.
   const c = client();
   const p = await applyDepthAsMode({
     client: c,
@@ -220,9 +230,12 @@ test("F-14/mode: `max` off the advertised ladder stays projected", async () => {
     modes: modes("low", COLLAPSING),
     harness: "pi",
   });
-  assert.deepEqual(c.sent, ["high"], "control: acpx must have had to move the request");
+  assert.deepEqual(c.sent, ["xhigh"], "control: acpx must have had to move the request");
   assert.equal(p.kind, "projected");
-  assert.equal(p.value, "high");
+  // COLLAPSING advertises `xhigh` as served `max`, so the recorded value follows
+  // the agent's own word — and the outcome stays `projected`, never upgraded to
+  // `exact`, because acpx did not send what was asked for.
+  assert.equal(p.value, "max");
 });
 
 test("F-14/mode: a projection is never UPGRADED, even when the collapse lands on the request", async () => {

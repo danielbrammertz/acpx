@@ -31,6 +31,7 @@ import {
   advertisedAfterModelApply,
   applyRequestedModelIfAdvertised,
   type ModelApplyOutcome,
+  modesAfterModelApply,
 } from "../../session/model-application.js";
 import {
   mirrorModelGuardToMessages,
@@ -283,7 +284,12 @@ async function createSessionRecordWithClient(
     record,
     reasoningEffort: effectiveSessionOptions?.reasoningEffort,
     advertised: advertisedAfterModel,
-    modes: sessionResult.modes,
+    // POST-model, for exactly the reason stated three lines above about config
+    // options — and this is the field where getting it wrong was measurable:
+    // for a `mode`-mechanism harness the ACP mode advertisement IS the depth
+    // ladder and pi's is per model, so `sessionResult.modes` projected every
+    // request onto pi's DEFAULT model's ladder. See `modesAfterModelApply`.
+    modes: modesAfterModelApply(sessionResult.modes, advertisedAfterModel),
     agentCommand: options.agentCommand,
     modelId: effectiveSessionOptions?.model,
     timeoutMs: options.timeoutMs,

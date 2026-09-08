@@ -57,9 +57,9 @@ test("an off-rung is used when the ladder has one", () => {
   }
 });
 
-test("projection by position is L[round(i/6 x (|L|-1))], monotone and total", () => {
+test("a canonical-speaking ladder projects by NAME — up first, then down — monotone and total", () => {
   // A measured per-model ladder for z-ai/glm-5.3-flash.
-  const ladder = ["low", "high", "max"]; // |L| = 3, so indices 0..2
+  const ladder = ["low", "high", "max"]; // canonical positions 1, 3, 5
   const landed = CANONICAL_DEPTH_RUNGS.map((rung, index) => {
     const projection = projectDepthOntoLadder(rung, ladder);
     // Every canonical rung must land somewhere — the rule is TOTAL.
@@ -69,15 +69,103 @@ test("projection by position is L[round(i/6 x (|L|-1))], monotone and total", ()
   });
   assert.deepEqual(
     landed.map(([, , value]) => value),
-    // minimal(0)->0, low(1)->0(exact), medium(2)->1, high(3)->1(exact),
-    // xhigh(4)->1, max(5)->2(exact), ultra(6)->2
-    ["low", "low", "high", "high", "high", "max", "max"],
+    // minimal(0)->low, low exact, medium(2)->high, high exact,
+    // xhigh(4)->max, max exact, ultra(6)-> nothing above -> max
+    ["low", "low", "high", "high", "max", "max", "max"],
   );
   // MONOTONE: a stronger request never lands on a weaker rung.
   const ranks = landed.map(([, , value]) => ladder.indexOf(value ?? ""));
   for (let i = 1; i < ranks.length; i += 1) {
     assert.ok(ranks[i] >= ranks[i - 1], "projection is not monotone");
   }
+});
+
+test("🛑 a request ABOVE the ladder's top lands on the TOP, never compressed into the middle", () => {
+  // THE SHIPPED DEFECT, measured on live pi sessions 2026-09-08. The proportional
+  // rule `L[round(i/6 x (|L|-1))]` assumed the ladder SPANS the canonical scale.
+  // Pi's is the BOTTOM of it, so `xhigh` and `max` both landed on `medium` —
+  // strictly less thinking than plain `high`, one rung down in the same
+  // vocabulary. Asking for more gave less.
+  const piNoMapLadder = ["off", "minimal", "low", "medium", "high"];
+  for (const request of ["xhigh", "max", "ultra"]) {
+    const projection = projectDepthOntoLadder(request, piNoMapLadder);
+    assert.equal(projection.kind, "projected", request);
+    assert.equal(projection.value, "high", `${request} must reach the ladder's top`);
+  }
+  // …and the old arithmetic, kept here as the thing that must never come back.
+  const compressed = piNoMapLadder[Math.round((4 / 6) * (piNoMapLadder.length - 1))];
+  assert.equal(compressed, "medium", "the proportional rule's answer for xhigh");
+  assert.notEqual(projectDepthOntoLadder("xhigh", piNoMapLadder).value, compressed);
+});
+
+test("⚠️ NEVER project a rung request onto an OFF-rung — that would disable reasoning silently", () => {
+  // `off` sits below the whole scale and is reachable only by REQUESTING it.
+  // Letting it compete as a projection target answers "give me a little thinking"
+  // by turning thinking off — a maximal miss dressed as a near one.
+  for (const request of ["minimal", "low"]) {
+    const projection = projectDepthOntoLadder(request, ["off", "high"]);
+    assert.equal(projection.value, "high", request);
+  }
+});
+
+/**
+ * THE INDEPENDENT ORACLE — pi's own clamp, in pi's own words, not acpx's.
+ *
+ * ⚠️ THIS IS THE CHECK THE PREVIOUS FIX DID NOT HAVE, AND ITS ABSENCE IS WHY A
+ * WRONG TABLE SHIPPED. `PI_WIRE_DEPTH_LADDER` was believed because acpx's
+ * `--verbose` "confirmed" it — with a string acpx generated FROM that table. A
+ * self-comparison can only ever agree.
+ *
+ * These two fixtures are the nativai `pi-acp` fork's own advertisement, captured
+ * off the wire on 2026-09-08 from the deployed build (`af431c6e`) by an ACP client
+ * that is not acpx: `session/new` for the no-map default model, and the
+ * `config_option_update` pushed after `session/set_model →
+ * openrouter/~google/gemini-flash-latest`. `clampedFrom` is computed inside the
+ * adapter from pi 0.84.4's `clampThinkingLevel`, so it states where PI sends each
+ * unadvertised level — a fact acpx plays no part in producing.
+ *
+ * The assertion: acpx's projection lands where pi says it would.
+ */
+const FORK_ADVERTISEMENTS = [
+  {
+    label: "no thinkingLevelMap (pi's default model, session/new)",
+    ladder: ["off", "minimal", "low", "medium", "high"],
+    clampedFrom: { off: [], minimal: [], low: [], medium: [], high: ["xhigh"] },
+  },
+  {
+    label: "~google/gemini-flash-latest (map nulls off, minimal, xhigh, max)",
+    ladder: ["low", "medium", "high"],
+    clampedFrom: { low: ["off", "minimal"], medium: [], high: ["xhigh"] },
+  },
+] as const;
+
+test("acpx's projection agrees with pi's OWN clamp (_meta.piAcp.clampedFrom), row by row", () => {
+  let checked = 0;
+  for (const advertisement of FORK_ADVERTISEMENTS) {
+    for (const [rung, clampedFrom] of Object.entries(advertisement.clampedFrom)) {
+      for (const level of clampedFrom) {
+        const projection = projectDepthOntoLadder(level, advertisement.ladder);
+        assert.equal(
+          projection.value,
+          rung,
+          `${advertisement.label}: pi clamps "${level}" onto "${rung}", acpx projected "${projection.value}"`,
+        );
+        checked += 1;
+      }
+    }
+  }
+  // ⚠️ COUNT THE ROWS. A loop over a fixture that silently became empty asserts
+  // nothing and passes — the shape of green this whole brick exists to distrust.
+  assert.equal(checked, 4, "the oracle must actually have rows to check");
+});
+
+test("a ladder in a FOREIGN vocabulary still projects by proportion", () => {
+  // The name rule needs the target to speak our words. When it does not, position
+  // is genuinely all there is — and the old arithmetic is still the right answer.
+  const ladder = ["fast", "balanced", "thorough"];
+  assert.equal(projectDepthOntoLadder("minimal", ladder).value, "fast");
+  assert.equal(projectDepthOntoLadder("high", ladder).value, "balanced");
+  assert.equal(projectDepthOntoLadder("ultra", ladder).value, "thorough");
 });
 
 test("a substitution is always RECORDED, never silent", () => {

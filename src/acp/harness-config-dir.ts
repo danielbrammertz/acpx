@@ -1329,6 +1329,44 @@ function piCostFrom(billing: ModelBilling | undefined): PiEntryCost {
  * what any human-facing surface renders. **A zero must never be PRESENTED as a
  * cost; that is the defect this brick removes, and re-introducing it one level up
  * by suppressing the block would trade a wrong number for a broken session.**
+ *
+ * ## `reasoning` IS READ FROM THE ROW; `thinkingLevelMap` IS DELIBERATELY ABSENT
+ *
+ * These two look like one decision and are not (brick 98ed1041). pi derives the
+ * whole thinking ladder from this entry, so both fields set a user-visible depth
+ * control, but they are known to VERY different confidence:
+ *
+ *  - **`reasoning` was hard-coded `true`, which is not a measurement at all** —
+ *    it is the same class of frozen constant as the deleted `PI_WIRE_DEPTH_LADDER`,
+ *    one field over. pi's rule is `reasoning === false ⇒ the ladder is `["off"]``,
+ *    so a hard `true` advertises five thinking rungs on a model that cannot think.
+ *    Measured 2026-09-08: of the **66** acpx slugs pi does not know (426 vs 363),
+ *    **44** have no `reasoning` block in acpx's own OpenRouter cache. Checked
+ *    against the 360 models BOTH catalogues carry, "acpx has a `reasoning` block"
+ *    agrees with pi's own flag **352/360**.
+ *    ⚠️ Downgraded ONLY on a row acpx actually has. All four disagreements in the
+ *    strip-direction are router pseudo-models (`openrouter/auto`, `auto-beta`,
+ *    `free`, `fusion`) — no fixed underlying model, so acpx legitimately carries
+ *    no `reasoning` while pi says `true`. Reading a MISSING ROW as "does not
+ *    reason" would strip every rung from exactly those.
+ *
+ *  - **`thinkingLevelMap` is NOT derived, and that is a decision, not an
+ *    omission.** It could be: acpx's cache carries `reasoning.supported_efforts`,
+ *    and the derivation reproduces pi's own map for `~google/gemini-flash-latest`
+ *    exactly. But measured across every model both catalogues carry, it agrees on
+ *    only **142 of 151** — and the population it would actually serve is **6
+ *    models**, the only slugs among those 66 that carry `supported_efforts` at
+ *    all. ⇒ a table that is wrong ~6% of the time where it CAN be checked, applied
+ *    to six models where it CANNOT, carrying acpx's confidence. That is the trade
+ *    5000f0bb exists to refuse: *a gap is a gap; an invented value is a lie that
+ *    reads like a measurement.* Without a map pi applies its own no-map default
+ *    (every level but `xhigh`), which is pi's behaviour rather than acpx's guess.
+ *
+ * ⚠️ **DO NOT "FINISH THE JOB" BY DERIVING THE MAP HERE.** It looks like the
+ * obvious completion of the line above it and it is the bug. If it is ever worth
+ * doing, the honest form is to carry the derivation's PROVENANCE to the surface
+ * that renders the control, not to write a guess into pi's catalogue where it is
+ * indistinguishable from the model's own declaration.
  */
 function buildPiCatalogueEntry(modelId: string, env: NodeJS.ProcessEnv): PiCatalogueModel {
   const priced = lookupOpenRouterPricing(modelId, env);
@@ -1338,7 +1376,9 @@ function buildPiCatalogueEntry(modelId: string, env: NodeJS.ProcessEnv): PiCatal
     api: "openai-completions",
     baseUrl: OPENROUTER_API_BASE,
     provider: "openrouter",
-    reasoning: true,
+    // `priced === null` ⇒ acpx has no row and therefore no opinion; keep pi's
+    // optimistic default rather than reading absence as a negative.
+    reasoning: priced ? priced.reasons : true,
     input: ["text"],
     cost: piCostFrom(priced?.billing),
     contextWindow: priced?.contextLength ?? PI_FALLBACK_CONTEXT_WINDOW,
@@ -1354,7 +1394,12 @@ function buildPiCatalogueEntry(modelId: string, env: NodeJS.ProcessEnv): PiCatal
 function lookupOpenRouterPricing(
   modelId: string,
   env: NodeJS.ProcessEnv,
-): { billing: ModelBilling; contextLength: number | null; maxTokens: number | null } | null {
+): {
+  billing: ModelBilling;
+  contextLength: number | null;
+  maxTokens: number | null;
+  reasons: boolean;
+} | null {
   // The SCOPED env, not the process's: see defaultCatalogueCachePath (brick ff298f02).
   const snapshot = readOpenRouterCacheSync(defaultCatalogueCachePath(env));
   const row = snapshot?.models.find((model) => model.id === modelId);
@@ -1373,6 +1418,11 @@ function lookupOpenRouterPricing(
       typeof row.top_provider?.max_completion_tokens === "number"
         ? row.top_provider.max_completion_tokens
         : null,
+    // ⚠️ ONLY MEANINGFUL BECAUSE THE ROW EXISTS. A `null` return above means acpx
+    // has no row at all and therefore no opinion — the caller must keep pi's
+    // optimistic default, not read absence as "does not reason". See the note on
+    // {@link buildPiCatalogueEntry}.
+    reasons: (row as { reasoning?: unknown }).reasoning != null,
   };
 }
 

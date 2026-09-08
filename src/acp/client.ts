@@ -756,6 +756,16 @@ export class AcpClient {
    */
   private latestConfigOptions?: SessionConfigOption[];
   /**
+   * How many `config_option_update` NOTIFICATIONS this connection has seen.
+   *
+   * ⚠️ A COUNTER, not a flag, and that is the whole point: it lets
+   * {@link setSessionModel} tell "the adapter re-advertised BECAUSE OF MY CALL"
+   * from "a stale advertisement is sitting in `latestConfigOptions`". Reading
+   * the field alone would hand back the `session/new` snapshot as if it were the
+   * post-model re-read — the exact staleness this exists to end.
+   */
+  private configOptionUpdateCount = 0;
+  /**
    * Set when this adapter answered `-32601 Method not found` for
    * `session/set_model` — a durable capability fact, not a transient failure.
    */
@@ -2243,8 +2253,12 @@ export class AcpClient {
    * a hand-maintained list, and a hand-maintained list survives its own violation.
    * Any future per-mechanism dispatch belongs HERE, never re-inlined into callers.
    */
-  async setSessionModel(sessionId: string, modelId: string): Promise<void> {
+  async setSessionModel(
+    sessionId: string,
+    modelId: string,
+  ): Promise<{ refreshedConfigOptions?: SessionConfigOption[] }> {
     const connection = this.getConnection();
+    const updatesBefore = this.configOptionUpdateCount;
     try {
       await this.runConnectionRequest(() =>
         connection.unstable_setSessionModel({
@@ -2256,6 +2270,14 @@ export class AcpClient {
       // NOW. Learning must run in BOTH directions or a restored capability stays
       // invisible (see setModelSetMethodUnsupported).
       this.modelSetMethodUnsupported = false;
+      // ⚠️ ONLY WHEN THE COUNTER MOVED. An adapter that re-advertises nothing
+      // must yield `undefined` — meaning "this mechanism had nothing to re-read",
+      // which `advertisedAfterModelApply` translates into keeping the `session/new`
+      // snapshot. Returning `latestConfigOptions` unconditionally would relabel
+      // that snapshot as a post-model re-read on every adapter that does not push.
+      return this.configOptionUpdateCount > updatesBefore
+        ? { refreshedConfigOptions: this.latestConfigOptions }
+        : {};
     } catch (error) {
       // ⚠️ LEARN THE CAPABILITY (F-12). `-32601 Method not found` says the adapter
       // has no such handler — it will not become true later for the same binary,
@@ -3037,6 +3059,22 @@ export class AcpClient {
   }
 
   private async handleSessionUpdate(notification: SessionNotification): Promise<void> {
+    // ⚠️ READ THE ADVERTISEMENT OFF THE NOTIFICATION, SYNCHRONOUSLY, BEFORE THE
+    // QUEUE. `session/set_model` returns `{}` — the re-advertisement arrives as a
+    // PUSHED `config_option_update` written to the same stream just ahead of that
+    // response, so it is already parsed by the time `setSessionModel` resolves.
+    // Deferring it onto `sessionUpdateChain` (which the handler below awaits, but
+    // whose body runs in a later microtask) would make the capture race the very
+    // return that consumes it.
+    // ⚠️ OPTIONAL CHAIN, NOT COSMETIC. This is the single sink for EVERY
+    // notification, and a throw here escapes into the connection's read loop
+    // rather than into any caller. `update` is required by the schema and absent
+    // in practice only from a malformed frame — which is exactly when refusing to
+    // dereference matters. (Caught by `client.test.ts`, which sends one.)
+    if (notification.update?.sessionUpdate === "config_option_update") {
+      this.configOptionUpdateCount += 1;
+      this.rememberConfigOptions(notification.update.configOptions ?? undefined);
+    }
     const sequence = ++this.observedSessionUpdates;
     this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
       try {

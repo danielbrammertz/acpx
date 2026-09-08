@@ -53,6 +53,7 @@ export async function applyDepthAsMode(params: {
     // WIRE collapse applies just the same — so this arm is downgraded too.
     return withWireCollapse(projection, params.harness, params.modes);
   }
+  const appliedId = projection.value;
   try {
     await withTimeout(
       params.client.setSessionMode(params.sessionId, projection.value),
@@ -69,7 +70,9 @@ export async function applyDepthAsMode(params: {
   reportDepth(params.verbose, describeAdvertisedServedEffort(params.modes, projection.value));
   const served = withWireCollapse(projection, params.harness, params.modes);
   reportDepth(params.verbose, served.reason);
-  return served;
+  // The id we SENT, carried out separately from the (possibly downgraded) value —
+  // see {@link DepthProjection.appliedId}.
+  return { ...served, appliedId };
 }
 
 /**

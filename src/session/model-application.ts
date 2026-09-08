@@ -1,4 +1,4 @@
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption, SessionModeState } from "@agentclientprotocol/sdk";
 import type { SessionCreateResult } from "../acp/client.js";
 import {
   harnessIdForAgentCommand,
@@ -45,7 +45,13 @@ export function modelServedOutOfBand(
  * each arm's dependency is visible. `AcpClient` satisfies it structurally.
  */
 export interface ModelApplyClient {
-  setSessionModel(sessionId: string, modelId: string): Promise<void>;
+  /** Resolves with the post-model re-read when the adapter pushed one — see
+   *  {@link ModelApplyOutcome.refreshedConfigOptions}. A stub may return
+   *  `undefined`, which reads as "nothing re-advertised". */
+  setSessionModel(
+    sessionId: string,
+    modelId: string,
+  ): Promise<{ refreshedConfigOptions?: SessionConfigOption[] } | void>;
   setSessionConfigOption(
     sessionId: string,
     configId: string,
@@ -76,10 +82,25 @@ export interface ModelApplyClient {
  * options that describe the session after the model change come back on this
  * field for free — no second round-trip, and no snapshot to go stale.
  *
- * ⚠️ It is `undefined` for every other mechanism, and that is not a gap:
- * `session/set_model` returns nothing to re-read, and the caller must then keep
- * using the `session/new` advertisement. A caller that treats `undefined` as
- * "no options advertised" would delete claude's working depth path.
+ * ⚠️ `undefined` means "this mechanism had nothing to re-read", and the caller
+ * must then keep using the `session/new` advertisement. A caller that treats
+ * `undefined` as "no options advertised" would delete claude's working depth path.
+ *
+ * 🛑 IT IS NO LONGER ALWAYS `undefined` FOR `session/set_model`, AND THE COMMENT
+ * THAT SAID IT WAS COST EVERY PI SESSION ITS DEPTH LADDER. The claim was
+ * *"`session/set_model` returns nothing to re-read"*. The RESPONSE returns
+ * nothing — true, and irrelevant: the nativai `pi-acp` fork **pushes** a
+ * `config_option_update` carrying the re-advertised `thought_level` selector,
+ * written to the same stream just ahead of that response. Measured 2026-09-08
+ * against the deployed fork (`af431c6e`): `session/new` advertises
+ * `[off, minimal, low, medium, high]`, and after
+ * `set_model → ~google/gemini-flash-latest` the pushed update advertises
+ * `[low, medium, high]` — the model's real ladder, which the response alone
+ * could never have told us.
+ *
+ * ⚠️ So do not re-derive this from the RESPONSE shape. `AcpClient.setSessionModel`
+ * answers from a notification COUNTER, so an adapter that pushes nothing still
+ * yields `undefined` and every non-pushing harness keeps today's behaviour.
  */
 export interface ModelApplyOutcome {
   applied: boolean;
@@ -196,14 +217,15 @@ async function applyModelAsSetModel(
   if (!guardForced && params.models.currentModelId === requestedModel) {
     return { applied: true };
   }
-  await withTimeout(
+  const result = await withTimeout(
     params.client.setSessionModel(params.sessionId, requestedModel),
     params.timeoutMs,
   );
-  // ⚠️ Deliberately NO `refreshedConfigOptions`. `session/set_model` returns
-  // nothing to re-read, so the caller must keep the `session/new` advertisement —
-  // see `advertisedAfterModelApply`.
-  return { applied: true };
+  // The post-model re-read, when the adapter pushed one — see the note on
+  // `ModelApplyOutcome.refreshedConfigOptions` for why the RESPONSE being empty
+  // is not evidence that nothing was re-advertised.
+  const refreshed = result ? result.refreshedConfigOptions : undefined;
+  return { applied: true, ...(refreshed ? { refreshedConfigOptions: refreshed } : {}) };
 }
 
 /**
@@ -220,6 +242,113 @@ export function advertisedAfterModelApply(
   sessionNewAdvertisement: SessionConfigOption[] | undefined,
 ): SessionConfigOption[] | undefined {
   return outcome.refreshedConfigOptions ?? sessionNewAdvertisement;
+}
+
+/**
+ * The MODE ladder to use after a model was applied — the sibling of
+ * {@link advertisedAfterModelApply}, and the fix for the defect that having only
+ * one of the two produced.
+ *
+ * 🛑 THE DEFECT, MEASURED ON LIVE SESSIONS 2026-09-08. For a `mode`-mechanism
+ * harness the ACP mode advertisement **is** the depth ladder, and for pi it is
+ * **per model**. `session-management.ts` passed `advertised: advertisedAfterModel`
+ * (post-model) and `modes: sessionResult.modes` (**`session/new`** — pre-model) to
+ * the same call, so every pi session projected its depth request onto pi's
+ * *default* model's ladder. That default carries no `thinkingLevelMap`, so no
+ * rung ever carried a `_meta.piAcp.servedEffort` and the read-the-agent's-own-
+ * advertisement mechanism that replaced `PI_WIRE_DEPTH_LADDER` **could not fire
+ * even once** — 83 of pi 0.84.4's 362 catalogue models declare a renaming map and
+ * not one of them was reachable. `--reasoning-effort off` on a model whose map
+ * nulls `off` recorded `outcome: "off"` while pi sent `{"effort":"low"}`.
+ *
+ * ## Why the config option, and not a re-read of `session/new`
+ *
+ * ACP has **no notification variant that re-advertises `availableModes`** (the
+ * `SessionUpdate` union has `current_mode_update` and nothing for the list), and
+ * `session/set_model` answers `{}`. But an agent whose depth is a mode also
+ * advertises it as a selector carrying ACP's own spec category
+ * **`thought_level`**, and THAT is re-emitted on `config_option_update`. So the
+ * post-model ladder is already on the wire; it simply had no reader.
+ *
+ * ⚠️ Matched on `category`, never on the option's `id`. pi's id is
+ * `thought_level` but claude's is `effort` — an id match is a per-harness list,
+ * which is the shape of every fact this programme has had to un-freeze.
+ *
+ * ⚠️ `_meta` is carried through per option, because that is where
+ * `advertisedServedEffort` reads `_meta.piAcp.servedEffort`. Dropping it would
+ * leave the ladder correct and the served value invisible — the same gap one
+ * layer down.
+ *
+ * ⚠️ An option with no values yields `undefined`, NOT an empty ladder. An empty
+ * ladder projects to `unavailable`, so a malformed advertisement would silently
+ * disable a depth control that works; keeping `session/new` is the safe read.
+ */
+export function modesAfterModelApply(
+  sessionNewModes: SessionModeState | undefined,
+  advertisedAfterModel: SessionConfigOption[] | undefined,
+): SessionModeState | undefined {
+  const option = advertisedAfterModel?.find(
+    (entry) => entry.category === "thought_level" && entry.type === "select",
+  );
+  if (option?.type !== "select") {
+    return sessionNewModes;
+  }
+  const availableModes = flattenSelectValues(option.options).map(toAdvertisedMode);
+  if (availableModes.length === 0) {
+    return sessionNewModes;
+  }
+  return {
+    currentModeId: currentModeIdFrom(option.currentValue, sessionNewModes, availableModes[0].id),
+    availableModes,
+  };
+}
+
+/** The selector's own current value, else the `session/new` mode, else the ladder's foot. */
+function currentModeIdFrom(
+  currentValue: unknown,
+  sessionNewModes: SessionModeState | undefined,
+  fallback: string,
+): string {
+  const advertised = typeof currentValue === "string" ? currentValue.trim() : "";
+  return advertised || sessionNewModes?.currentModeId || fallback;
+}
+
+/**
+ * A `select` option's entries are either values or GROUPS of values; only a value
+ * names a rung. Groups are FLATTENED rather than skipped — a harness that groups
+ * its rungs must not read as advertising an empty ladder.
+ */
+function flattenSelectValues(entries: readonly unknown[]): AdvertisedSelectValue[] {
+  const flat: AdvertisedSelectValue[] = [];
+  for (const entry of entries) {
+    const group = entry as { options?: unknown };
+    if (Array.isArray(group.options)) {
+      flat.push(...(group.options as AdvertisedSelectValue[]));
+    } else {
+      flat.push(entry as AdvertisedSelectValue);
+    }
+  }
+  return flat;
+}
+
+/** The value entries of a `select` config option, as much of them as a mode needs. */
+interface AdvertisedSelectValue {
+  value: string;
+  name?: string | null;
+  description?: string | null;
+  _meta?: unknown;
+}
+
+function toAdvertisedMode(
+  value: AdvertisedSelectValue,
+): SessionModeState["availableModes"][number] {
+  return {
+    id: value.value,
+    name: value.name ?? value.value,
+    ...(value.description ? { description: value.description } : {}),
+    // Carried, not dropped: `_meta.piAcp.servedEffort` lives here.
+    ...(value._meta ? { _meta: value._meta as Record<string, unknown> } : {}),
+  };
 }
 
 /**

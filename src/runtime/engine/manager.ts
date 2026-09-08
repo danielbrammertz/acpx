@@ -29,6 +29,7 @@ import {
 import {
   advertisedAfterModelApply,
   applyRequestedModelIfAdvertised,
+  modesAfterModelApply,
 } from "../../session/model-application.js";
 import {
   stampAppliedOutputStyle,
@@ -752,7 +753,10 @@ export class AcpRuntimeManager {
       record,
       reasoningEffort: effectiveSessionOptions?.reasoningEffort,
       advertised: advertisedAfterModel,
-      modes: session.sessionResult.modes,
+      // POST-model, same rule and same reason as the advertisement above: for a
+      // `mode`-mechanism harness the mode advertisement IS the per-model depth
+      // ladder. See `modesAfterModelApply`.
+      modes: modesAfterModelApply(session.sessionResult.modes, advertisedAfterModel),
       agentCommand,
       modelId: effectiveSessionOptions?.model,
       timeoutMs: this.options.timeoutMs,
