@@ -356,6 +356,17 @@ function parseAcpxState(raw: unknown): SessionAcpxState | undefined {
   assignParsedOwnerOptions(state, record.owner_options);
   assignParsedSessionOptions(state, record.session_options);
 
+  // brick://5026423b — the cost figure and the units behind it must round-trip on
+  // a cold reload, or a resumed session's cost restarts from zero. Lenient
+  // passthrough, matching `config_options` above: acpx authored these and the READ
+  // boundary is not where a malformed acpx write should be re-litigated.
+  if (record.cost !== undefined && record.cost !== null) {
+    state.cost = record.cost as SessionAcpxState["cost"];
+  }
+  if (Array.isArray(record.cost_units)) {
+    state.cost_units = record.cost_units as SessionAcpxState["cost_units"];
+  }
+
   // brick://07dd62c9: the live served block + floor breadcrumbs MUST round-trip on
   // a cold disk reload (mirror context_window_size), or every queue-owner delivery
   // / owner respawn strips them — the served-truth surface goes blank and the

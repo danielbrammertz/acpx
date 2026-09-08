@@ -25,6 +25,7 @@ import type {
   SessionToolUse,
   SessionUserContent,
 } from "../types.js";
+import { rememberSessionCost } from "./cost-ingest.js";
 import { copyLoggedMessageCount, dropLoggedMessagesFromHead } from "./messages-log-bookkeeping.js";
 
 export type LegacyHistoryEntry = {
@@ -706,6 +707,14 @@ export function cloneSessionAcpxState(
     progress: state.progress ? deepClone(state.progress) : undefined,
     config_options: state.config_options ? deepClone(state.config_options) : undefined,
     owner_options: state.owner_options ? { ...state.owner_options } : undefined,
+    // ⚠️ brick://5026423b — AND THIS FUNCTION IS THE ALLOWLIST THAT HAS ALREADY
+    // EATEN THREE FIELDS (`applied_output_style` 874fee67, `served` 07dd62c9,
+    // `depth_projection`). A field missing here is present at `sessions new` and
+    // NULL AFTER ONE PROMPT, with typecheck, lint and the whole unit suite green,
+    // because the turn path re-bases `record.acpx` off this clone. Both cost
+    // fields are proven through a REAL TURN, not an in-memory test.
+    cost: state.cost ? { ...state.cost } : undefined,
+    cost_units: state.cost_units ? deepClone(state.cost_units) : undefined,
     // brick://07dd62c9: the live served block + floor breadcrumbs MUST survive the
     // clone. savePromptSuccess stamps `served` then re-bases acpxState off this
     // clone; without these the served-truth surface + durable park are dropped on
@@ -1044,6 +1053,7 @@ const SESSION_UPDATE_HANDLERS: Record<string, SessionUpdateHandler> = {
     if (update.sessionUpdate === "usage_update") {
       applyUsageUpdate(conversation, update);
       rememberContextWindow(acpx, update);
+      rememberCostFromUsageUpdate(acpx, update);
     }
   },
   session_info_update: (conversation, _acpx, update) => {
@@ -1104,6 +1114,41 @@ function applyUsageUpdate(conversation: SessionConversation, update: UsageUpdate
   if (userId) {
     conversation.request_token_usage[userId] = usage;
   }
+}
+
+/**
+ * brick://5026423b — fold this usage event into the session's cost.
+ *
+ * ⚠️ THE COUNTS COME FROM THE PER-MESSAGE BLOCK, NOT FROM `used`. `used` is the
+ * CONTEXT FILL (a level), not a delta: summing it would multiply-count the whole
+ * conversation on every message. The per-message deltas live in the adapter's
+ * `_meta` — measured on pi 2026-09-08:
+ *
+ *     _meta.piAcp.message = { input, output, reasoning, cacheRead, cacheWrite, ... }
+ *
+ * ⚠️ `reasoning` IS NOT ADDED TO `output`. Reconciled against the catalogue on a
+ * real session (`01a08095`, kimi-k2.6): input 9499 x $0.00000095 + output 47 x
+ * $0.000004 + cacheRead 512 x $0.00000016 = 0.00929397, matching the adapter's own
+ * figure to the last digit — and only with `output` alone. Folding `reasoning` in
+ * would over-charge every reasoning model, quietly and plausibly.
+ *
+ * An update with no per-message block contributes NOTHING rather than a zero unit:
+ * a zero unit would count toward `coverage.total` and dilute a real figure.
+ */
+function rememberCostFromUsageUpdate(acpx: SessionAcpxState, update: UsageUpdate): void {
+  const meta = asRecord(asRecord(asRecord(update)?._meta)?.piAcp);
+  const message = asRecord(meta?.message);
+  const reported = asRecord(asRecord(update)?.cost)?.amount;
+  if (!message) {
+    return;
+  }
+  rememberSessionCost(acpx, {
+    input: numberField(message, ["input"]) ?? 0,
+    output: numberField(message, ["output"]) ?? 0,
+    cacheRead: numberField(message, ["cacheRead"]) ?? 0,
+    cacheWrite: numberField(message, ["cacheWrite"]) ?? 0,
+    reportedAmount: typeof reported === "number" ? reported : null,
+  });
 }
 
 /** Fix A (brick 92a994a0): remember the context-window `size` the adapter just
