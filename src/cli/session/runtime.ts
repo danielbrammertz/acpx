@@ -369,7 +369,7 @@ function deliveryPhaseForStopReason(
  *    else it returns `undefined` and the adapter's own wording survives, because
  *    burying it under acpx boilerplate is the same harm in the other direction.
  */
-function turnErrorForDeliveryTerminal(
+export function turnErrorForDeliveryTerminal(
   terminalStopReason: RunPromptResult["stopReason"],
   turnError: string | undefined,
   currentModelId: string | undefined,

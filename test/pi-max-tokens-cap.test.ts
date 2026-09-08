@@ -27,6 +27,7 @@ import test from "node:test";
 import { applyHarnessConfigDir } from "../src/acp/harness-config-dir.js";
 import { resetPiKnowledgeMemo } from "../src/acp/pi-model-knowledge.js";
 import { explainPiTurnError } from "../src/acp/pi-turn-error.js";
+import { turnErrorForDeliveryTerminal } from "../src/cli/session/runtime.js";
 
 const PI_COMMAND = "node /opt/pi-acp/dist/index.js";
 
@@ -297,4 +298,40 @@ test("0095b715: the explanation still works when the session has no model id", (
   assert.ok(explained, "still recognised");
   assert.ok(!explained.includes("undefined"), "never renders the literal word `undefined`");
   assert.ok(/pinned model/i.test(explained), "falls back to a readable phrase");
+});
+
+// ---------------------------------------------------------------------------
+// The WIRING. The explainer being correct is not the same claim as acpx
+// actually calling it, and the seam it sits on is the one 4ec33f59 warns is
+// invisible from inside this repo: `buildDeliveryEvent` substitutes
+// EMPTY_DELIVERY_ERROR whenever `error` is absent, and acpx-ui treats a
+// non-empty message as the failure note. So both directions are pinned here.
+// ---------------------------------------------------------------------------
+
+test("0095b715: the delivery terminal carries acpx's explanation, not the raw payload", () => {
+  const raw = MEASURED_OUTPUT_CEILING[0][1];
+  const note = turnErrorForDeliveryTerminal("end_turn", raw, KIMI_ID);
+
+  assert.ok(note, "a failed turn still reports");
+  assert.notEqual(note, raw, "the raw provider payload is not what reaches the user");
+  assert.ok(note.includes(KIMI_ID), "the note names the model");
+  assert.ok(note.includes(raw), "and still carries the provider's own text verbatim");
+});
+
+test("0095b715 CONTROL: the terminal invents no note for a turn that did not fail", () => {
+  // The 4ec33f59 property, re-pinned at the seam this brick touched: widening it
+  // stamps a failure note onto every successful turn in acpx-ui.
+  assert.equal(turnErrorForDeliveryTerminal("end_turn", undefined, KIMI_ID), undefined);
+  assert.equal(
+    turnErrorForDeliveryTerminal("cancelled", MEASURED_OUTPUT_CEILING[0][1], KIMI_ID),
+    undefined,
+    "a cancelled turn reports nothing, even when the adapter supplied an error",
+  );
+});
+
+test("0095b715 CONTROL: an unexplained failure still reaches the terminal unchanged", () => {
+  // The adapter's own wording must survive when acpx has nothing better to say —
+  // it is the only account of the failure anyone gets.
+  const raw = "pi could not complete the turn: upstream provider returned no completion";
+  assert.equal(turnErrorForDeliveryTerminal("end_turn", raw, KIMI_ID), raw);
 });
