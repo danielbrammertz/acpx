@@ -71,7 +71,7 @@ const PROVIDERS_FILENAME = "providers.json";
 
 /**
  * Raise the expiry warning at 14 days. Not polish: when the key expires and
- * nothing renews it, EVERY OpenCode and Pi session on the box fails at the
+ * nothing renews it, EVERY Pi session on the box fails at the
  * provider with a 401 that surfaces as an unhelpful `UnknownError`. This is what
  * turns a silent fleet-wide outage into a two-week warning, and it is the whole
  * reason `expiresAt` is stored rather than inferred.

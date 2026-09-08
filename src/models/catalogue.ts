@@ -103,7 +103,14 @@ export function deriveBilling(model: OpenRouterRawModel): ModelBilling {
       account: OPENROUTER_ACCOUNT,
     };
   }
-  return { kind: "metered", inPerM, outPerM, cacheReadPerM, cacheWritePerM, account: OPENROUTER_ACCOUNT };
+  return {
+    kind: "metered",
+    inPerM,
+    outPerM,
+    cacheReadPerM,
+    cacheWritePerM,
+    account: OPENROUTER_ACCOUNT,
+  };
 }
 
 /** The band grouping. Derived server-side so the UI and the CLI band identically (C5 §8.1). */
@@ -285,7 +292,7 @@ function available(model: CatalogueModel, capability: AvailabilityCapability): A
  * payload and not merely to the picker. A wrong reason outlives the UI that
  * works around it.
  *
- * The same was true of opencode for as long as `provisioned` was declared and
+ * The same was true of pi for as long as `provisioned` was declared and
  * the spawn was not yet routed — which is precisely why this is keyed on the
  * kind: that harness's answer corrected itself when the routing landed, with no
  * edit here.
@@ -304,7 +311,7 @@ function available(model: CatalogueModel, capability: AvailabilityCapability): A
  * property of claude** — it describes the pre-routing state, and it stays
  * correct for any future `via-shim` harness that arrives unrouted. Keyed on the
  * kind, that transition needs no edit here: it is the same self-correction
- * opencode's answer already made when its routing landed.
+ * pi's answer already made when its routing landed.
  */
 function arbitraryModelDenial(capability: AvailabilityCapability): AgentAvailability {
   if (capability.arbitraryModelSupport === "none") {

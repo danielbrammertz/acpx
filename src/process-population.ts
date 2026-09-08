@@ -49,11 +49,7 @@ export interface LiveProcessScan {
  * be the wrong way round — this list must match what that module SETS, so it is
  * asserted against it in the tests rather than duplicated by hope.
  */
-export const CONFIG_DIR_ENV_NAMES = [
-  "XDG_CONFIG_HOME",
-  "OPENCODE_CONFIG_DIR",
-  "PI_CODING_AGENT_DIR",
-] as const;
+export const CONFIG_DIR_ENV_NAMES = ["PI_CODING_AGENT_DIR"] as const;
 
 /**
  * Variables the config-dir writer sets that are DELIBERATELY NOT ownership
@@ -78,10 +74,9 @@ export const CONFIG_DIR_ENV_NAMES = [
  *
  * ## Why `XDG_DATA_HOME` fails that criterion
  *
- * It points at ONE box-wide root (`~/.acpx/harness-data`) shared by every OpenCode
- * session — that is its whole design, chosen so the 63 MB-per-session cost that
- * `seedOpenCodePluginInstall` already avoids is not re-introduced for data. It is
- * a **constant**, and a constant discriminates nothing.
+ * Where it is set at all it points at ONE box-wide root shared by every session
+ * of a harness, rather than at a per-session directory. It is a **constant**, and
+ * a constant discriminates nothing.
  *
  * ⚠️ **AND ADDING IT WOULD WIDEN OWNERSHIP ATTRIBUTION, WHICH IS THE DANGEROUS
  * DIRECTION.** The clause it feeds is `retain: true, reason: "liveProcess"`.

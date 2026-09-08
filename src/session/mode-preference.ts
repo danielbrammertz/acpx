@@ -334,7 +334,7 @@ export function syncAdvertisedModelState(
  */
 export function setHarnessConfigDir(record: SessionRecord, dir: string | undefined): void {
   const normalized = dir?.trim();
-  // ⚠️ NOTHING TO WRITE ⇒ TOUCH NOTHING (RS-14). Only opencode and pi ever get a
+  // ⚠️ NOTHING TO WRITE ⇒ TOUCH NOTHING (RS-14). Only pi ever gets a
   // config dir, so this runs with `undefined` on every claude / claude-pty /
   // codex spawn — and those records must not gain the key, be it a value, a
   // `null` or an `{}`. An unconditional `record.acpx = clone ?? {}` would give a

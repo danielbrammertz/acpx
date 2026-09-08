@@ -39,7 +39,7 @@ function sharedDir(root: string, sessionId: string, holders: number): string[] {
   for (let i = 0; i < holders; i += 1) {
     const plan = applyHarnessConfigDir({
       env: {},
-      agentCommand: AGENT_REGISTRY.opencode,
+      agentCommand: AGENT_REGISTRY.pi,
       sessionId,
       primer: "P",
       rootDir: root,
@@ -54,7 +54,7 @@ test("4a6fdda0: the FIRST of two clients closing does NOT remove the shared dir"
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "4a6fdda0-"));
   try {
     const [first, second] = sharedDir(root, "shared-1", 2);
-    const dir = path.join(root, "acpx-opencode-shared-1");
+    const dir = path.join(root, "acpx-pi-shared-1");
 
     // CONTROL: both clients really did land on ONE directory. Without this the
     // row would pass just as well on a build that gave each its own.
@@ -80,7 +80,7 @@ test("4a6fdda0: a single client still removes its dir — the fast path is intac
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "4a6fdda0-solo-"));
   try {
     const [only] = sharedDir(root, "solo-1", 1);
-    const dir = path.join(root, "acpx-opencode-solo-1");
+    const dir = path.join(root, "acpx-pi-solo-1");
     assert.equal(existsSync(dir), true, "control: the dir was never created");
     const result = releaseHarnessConfigDir(dir, only);
     assert.equal(result.removed, true, "a sole holder's close no longer removes the dir");
@@ -95,7 +95,7 @@ test("4a6fdda0: an UNREADABLE holder set removes NOTHING and says so", async () 
   // holders" would restore the unconditional delete this whole change removes.
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "4a6fdda0-unread-"));
   try {
-    const dir = path.join(root, "acpx-opencode-no-holders");
+    const dir = path.join(root, "acpx-pi-no-holders");
     await fs.mkdir(dir, { recursive: true });
     const result = releaseHarnessConfigDir(dir, "some-holder");
     assert.equal(result.notMeasured, true, "an unreadable holder set was treated as measured");
@@ -126,7 +126,7 @@ test("4a6fdda0 REAL SPAWN: the dir survives client A's close AND client B's TURN
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "4a6fdda0-spawn-"));
   const clients: AcpClient[] = [];
   try {
-    const linkDir = path.join(scratch, "opencode-ai");
+    const linkDir = path.join(scratch, "pi-acp");
     await fs.mkdir(linkDir, { recursive: true });
     const mockLink = path.join(linkDir, "mock-agent.js");
     await fs.symlink(MOCK_AGENT_PATH, mockLink);
@@ -158,7 +158,7 @@ test("4a6fdda0 REAL SPAWN: the dir survives client A's close AND client B's TURN
       "the two clients did not share a directory — this row is vacuous",
     );
     const dir = a.client.harnessConfigDirPath;
-    const configPath = path.join(dir, "opencode", "opencode.json");
+    const configPath = path.join(dir, "settings.json");
     assert.equal(existsSync(configPath), true, "control: the config was never written");
 
     await a.client.close();

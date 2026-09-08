@@ -155,7 +155,7 @@ test("acpx agents --json prints the {agents: [...]} envelope", async () => {
   const agents = parsed.agents as Array<Record<string, unknown>>;
   assert.deepEqual(
     agents.map((agent) => agent.id),
-    ["claude", "claude-pty", "codex", "opencode", "pi"],
+    ["claude", "claude-pty", "codex", "pi"],
   );
   for (const agent of agents) {
     // The C5 §8.4 + C4 §8 field set the consumers gate on.
@@ -194,12 +194,12 @@ test("acpx agents --json prints the {agents: [...]} envelope", async () => {
 });
 
 test("acpx agents show <id> --json prints one object, and rejects an unknown agent", async () => {
-  const stdout = await runAgents(["show", "opencode", "--json"]);
+  const stdout = await runAgents(["show", "pi", "--json"]);
   const parsed = JSON.parse(stdout) as Record<string, unknown>;
   assert.equal(Array.isArray(parsed), false);
   assert.equal(Object.hasOwn(parsed, "agents"), false, "the show form is NOT enveloped");
-  assert.equal(parsed.id, "opencode");
-  // B3 routed the config-option mechanism, so opencode's model IS live now.
+  assert.equal(parsed.id, "pi");
+  // pi's model rides `session/set_model`, which acpx routes, so it IS live.
   // Before B3 this asserted false. The DERIVATION moved it — HARNESS_FACTS was
   // not edited, only the routing list, in the same commit as the apply branch.
   assert.equal(parsed.canSetModelLive, true);
@@ -219,7 +219,7 @@ test("acpx agents list is the same payload as the bare noun", async () => {
 test("the text form renders a table naming each harness and its mechanism", async () => {
   const stdout = await runAgents([]);
   assert.equal(stdout.includes("No acpx session found"), false);
-  for (const id of ["claude", "claude-pty", "codex", "opencode", "pi"]) {
+  for (const id of ["claude", "claude-pty", "codex", "pi"]) {
     assert.ok(stdout.includes(id), `text output does not mention ${id}`);
   }
   assert.ok(stdout.includes("FORK@INDEX"), "the text form is not a table");

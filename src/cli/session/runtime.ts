@@ -8,7 +8,6 @@ import {
   isRetryablePromptError,
   normalizeOutputError,
 } from "../../acp/error-normalization.js";
-import { modelMechanismForAgentCommand } from "../../acp/harness-capabilities.js";
 import {
   emitsTurnEndMarker,
   injectionAbsorbsIntoActiveTurn,
@@ -776,41 +775,6 @@ function recordApplyBeltGuardForced(
 }
 
 /**
- * The prompt-time config-option arm (F-9), extracted so
- * `applyPromptModelIfAdvertised` stays inside the complexity budget. It is the
- * SAME dispatcher the create and replay paths use — the whole point of F-9 is
- * that there is one.
- */
-async function applyPromptModelAsConfigOption(
-  params: {
-    client: AcpClient;
-    sessionId: string;
-    requestedModelSource: string | undefined;
-    record: SessionRecord;
-    timeoutMs?: number;
-  },
-  requestedModel: string,
-  before: ReturnType<typeof modelPinSnapshot>,
-): Promise<void> {
-  const outcome = await applyRequestedModelIfAdvertised({
-    client: params.client,
-    sessionId: params.sessionId,
-    requestedModel,
-    models: undefined,
-    advertisedConfigOptions: params.record.acpx?.config_options,
-    agentCommand: params.record.agentCommand,
-    timeoutMs: params.timeoutMs,
-    context: "apply",
-  });
-  if (!outcome.applied) {
-    return;
-  }
-  setDesiredModelId(params.record, requestedModel);
-  persistExplicitPromptModelSource(params.record, params.requestedModelSource);
-  await persistChangedModelPin(params.record, before);
-}
-
-/**
  * ⚠️ EXPORTED FOR THE TURN-PATH REGRESSION TEST (brick 007eaac8), and the reason
  * is worth the export. This function is THE prompt path — it runs on every turn,
  * right after `connectForPrompt()` — and it is where a picker-route session broke
@@ -842,15 +806,6 @@ export async function applyPromptModelIfAdvertised(params: {
   const requestedModel = guarded.model;
 
   const models = advertisedModelsForRecord(params.record);
-
-  // ⚠️ F-9: THE SAME DISPATCHER THE CREATE PATH USES. A config-option harness
-  // (OpenCode) advertises no ACP models at all, so `advertisedModelsForRecord`
-  // is undefined and the generic assert below would throw on a session whose
-  // model IS settable — the prompt-time twin of the replay defect.
-  if (modelMechanismForAgentCommand(params.record.agentCommand) === "config-option") {
-    await applyPromptModelAsConfigOption(params, requestedModel, before);
-    return;
-  }
 
   // 🛑 SERVED OUT OF BAND — SUPPRESS THE WHOLE ACP-SIDE APPLY (brick 007eaac8).
   //
@@ -3146,9 +3101,9 @@ export async function runOnce(options: RunOnceOptions): Promise<RunPromptResult>
           timeoutMs: options.timeoutMs,
         });
         // One-shot: no persisted record, so apply effort live for this turn only.
-        // The post-model re-read applies here too — `acpx opencode exec --model
-        // <reasoning model> --reasoning-effort high` would otherwise read the
-        // `session/new` snapshot, in which `effort` is not yet advertised (I1 R8),
+        // The post-model re-read applies here too — an `exec --model
+        // <reasoning model> --reasoning-effort high` on a per-model ladder would
+        // otherwise read the `session/new` snapshot, in which `effort` is not yet advertised,
         // and drop the depth for the one turn the whole command exists to run.
         await applyExecReasoningEffort({
           client,

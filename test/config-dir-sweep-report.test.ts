@@ -31,7 +31,6 @@ import {
 const CLI_PATH = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const AGENT_COMMAND = "node /opt/claude-agent-acp/dist/index.js";
 const SEVEN_HOURS_MS = 7 * 60 * 60 * 1000;
-const HOUR = 60 * 60 * 1000;
 
 type CliResult = { code: number | null; stdout: string; stderr: string };
 
@@ -89,7 +88,7 @@ function freshRoot(prefix: string): string {
 test("0bac6a00 §5: a dry run CLASSIFIES, reports wouldRemove, and deletes nothing", () => {
   const root = freshRoot("acpx-0bac6a00-dry-");
   try {
-    const dir = plantAged(root, "acpx-opencode-orphan-1");
+    const dir = plantAged(root, "acpx-pi-orphan-1");
     // ⚠️ A CLOSED RECORD, not an empty store. Since `unrecognised` became
     // retain-and-report, an unclaimed directory is never removable — so a preview
     // fixture with no record would preview nothing and this test would assert the
@@ -123,7 +122,7 @@ test("0bac6a00 §5: the SAME fixture without --dry-run really is removed (the pr
   // would ever have performed is a preview of a fiction.
   const root = freshRoot("acpx-0bac6a00-wet-");
   try {
-    const dir = plantAged(root, "acpx-opencode-orphan-1");
+    const dir = plantAged(root, "acpx-pi-orphan-1");
     const result = pruneOrphanHarnessConfigDirs({
       records: new Map<string, KnownSessionRecord>([["orphan-1", { closed: true }]]),
       liveScan: measuredScan(),
@@ -165,7 +164,7 @@ test("0bac6a00 §5: `sessions prune --dry-run` PREVIEWS a directory an OPEN aban
         { defaultName: false, defaultAcpx: false },
       ),
     );
-    const dir = plantAged(root, "acpx-opencode-dryrun-abandoned");
+    const dir = plantAged(root, "acpx-pi-dryrun-abandoned");
 
     const result = await runCliUnguarded(["claude", "sessions", "prune", "--dry-run"], homeDir);
 
@@ -186,7 +185,7 @@ test("0bac6a00 §5: `sessions prune --dry-run` PREVIEWS a directory an OPEN aban
 test("0bac6a00 §6: a REFUSAL attributes to `unmeasured`, never to `liveProcess`", () => {
   const root = freshRoot("acpx-0bac6a00-refuse-");
   try {
-    plantAged(root, "acpx-opencode-a");
+    plantAged(root, "acpx-pi-a");
     plantAged(root, "acpx-pi-b");
     // An unmeasured census: the shape that made the old code claim every candidate
     // was held by a live process. `liveProcess: 6` was measured with none running.
@@ -261,61 +260,6 @@ test("0bac6a00 §7: the census prints WITHOUT --verbose", async () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// §10.1 — the plugin cache excluded by SCOPE, not by its name's leading dot
-// ---------------------------------------------------------------------------
-
-test("0bac6a00 §10.1: a plugin cache WITHOUT its leading dot is still excluded", () => {
-  // ⚠️ THE FIRE TEST FOR THE POINT OF §10.1. Today the cache is spared because the
-  // dot makes `.acpx-opencode-plugin-cache-<v>` miss the `acpx-<harness>-` prefix —
-  // a naming convention, and the next tidy-up removes those. Named WITHOUT the dot
-  // the old filter would read it as a session whose id is `plugin-cache-1.18.28`,
-  // recognise it from no record, and delete it once aged — silently restoring the
-  // 63 MB-per-session cost the cache exists to prevent.
-  const root = freshRoot("acpx-0bac6a00-cache-");
-  try {
-    const undotted = plantAged(root, "acpx-opencode-plugin-cache-1.18.28");
-    const dotted = plantAged(root, ".acpx-opencode-plugin-cache-1.18.28");
-    // The CONTROL: an ordinary orphan in the same root, same age, must still go —
-    // otherwise "nothing was deleted" would prove nothing about the exclusion.
-    const ordinary = plantAged(root, "acpx-opencode-ordinary-orphan");
-
-    const result = pruneOrphanHarnessConfigDirs({
-      records: new Map<string, KnownSessionRecord>([["ordinary-orphan", { closed: true }]]),
-      liveScan: measuredScan(),
-      rootDir: root,
-    });
-
-    assert.deepEqual(result.removed, [ordinary], "the control orphan was not removed");
-    assert.equal(existsSync(undotted), true, "the cache was eaten once its dot was gone");
-    assert.equal(existsSync(dotted), true);
-    assert.equal(result.scanned, 1, "the cache must not even be a CANDIDATE");
-    assert.deepEqual(
-      result.candidates.map((c) => c.dir),
-      [ordinary],
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("0bac6a00 §10.1: the exclusion does not swallow a real session dir with a similar name", () => {
-  // A guard that is too broad is the other failure: `acpx-opencode-plugin-x` is a
-  // session id, not the cache, and must remain reapable.
-  const root = freshRoot("acpx-0bac6a00-cache2-");
-  try {
-    const lookalike = plantAged(root, "acpx-opencode-plugin-x", 8 * HOUR);
-    const result = pruneOrphanHarnessConfigDirs({
-      records: new Map<string, KnownSessionRecord>([["plugin-x", { closed: true }]]),
-      liveScan: measuredScan(),
-      rootDir: root,
-    });
-    assert.deepEqual(result.removed, [lookalike]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("0bac6a00 §6b: a REMOVED dir reports `closedRecord`, never `openRecord`", () => {
   // ⚠️ THE LINE THIS PINS ONCE READ "WOULD REMOVE …(openRecord)" — "I am deleting
   // this, and the reason is that its record is open." Measured on staging against
@@ -326,8 +270,8 @@ test("0bac6a00 §6b: a REMOVED dir reports `closedRecord`, never `openRecord`", 
   // remove-because-closed branch never executed. Both branches are asserted here.
   const root = freshRoot("acpx-0bac6a00-closedreason-");
   try {
-    const closedDir = plantAged(root, "acpx-opencode-closed-one");
-    const openDir = plantAged(root, "acpx-opencode-open-one");
+    const closedDir = plantAged(root, "acpx-pi-closed-one");
+    const openDir = plantAged(root, "acpx-pi-open-one");
     const records = new Map<string, KnownSessionRecord>([
       ["closed-one", { closed: true }],
       ["open-one", { closed: false }],
@@ -353,8 +297,8 @@ test("0bac6a00 §6b: a REMOVED dir reports `closedRecord`, never `openRecord`", 
 
     // And the rendered preview — the thing a human actually reads.
     const plan = describeHarnessConfigDirSweepPlan(result);
-    assert.match(plan, /WOULD REMOVE .*acpx-opencode-closed-one \(closedRecord\)/);
-    assert.match(plan, /RETAIN .*acpx-opencode-open-one \(openRecord\)/);
+    assert.match(plan, /WOULD REMOVE .*acpx-pi-closed-one \(closedRecord\)/);
+    assert.match(plan, /RETAIN .*acpx-pi-open-one \(openRecord\)/);
     assert.equal(
       /WOULD REMOVE .*\(openRecord\)/.test(plan),
       false,
@@ -370,8 +314,8 @@ test("0bac6a00 §6b: `retainedBy` still counts only RETENTIONS, and closedRecord
   // a retention. This asserts the arithmetic that separation protects.
   const root = freshRoot("acpx-0bac6a00-tally-");
   try {
-    plantAged(root, "acpx-opencode-closed-a");
-    plantAged(root, "acpx-opencode-open-b");
+    plantAged(root, "acpx-pi-closed-a");
+    plantAged(root, "acpx-pi-open-b");
     const result = pruneOrphanHarnessConfigDirs({
       records: new Map<string, KnownSessionRecord>([
         ["closed-a", { closed: true }],
@@ -410,7 +354,7 @@ test("0bac6a00: `prune` CANNOT reap the dirs of the sessions it just deleted —
   //   sweep-config-dirs      -> record after 1, dir REMOVED  (removed=1)
   const root = freshRoot("acpx-0bac6a00-prunegap-");
   try {
-    const dir = plantAged(root, "acpx-opencode-gap-one");
+    const dir = plantAged(root, "acpx-pi-gap-one");
 
     // Arm 1: the record is GONE, as it is after prune has deleted it.
     const afterPrune = pruneOrphanHarnessConfigDirs({

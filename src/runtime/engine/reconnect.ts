@@ -242,9 +242,8 @@ async function replayDesiredModel(params: {
     //
     // F-9: B3 gave the APPLY path a config-option arm and left THIS path on the
     // generic `assertRequestedModelSupported`, which throws whenever `models` is
-    // undefined — OpenCode’s exact shape (it advertises no ACP models at all;
-    // measured: the string "models" occurs ZERO times in its session stream). So
-    // `acpx opencode set model` reported success, persisted the pin, and every
+    // undefined — the exact shape of a harness that advertises no ACP models at
+    // all. So `set model` on such a harness reported success, persisted the pin, and every
     // later turn then died here — returning rc=0 with EMPTY CONTENT, which is why
     // the rc was not the evidence. That re-created brick 2efdf8b2 in a worse form
     // than B0 shipped, because B0 at least refused loudly and wrote nothing.
@@ -870,8 +869,8 @@ async function ensurePendingSwitchTranscript(
 ): Promise<void> {
   // THE RESUME END of the Claude-family gate (CONCEPTION §5.5). Everything below
   // resolves a Claude SDK transcript JSONL, which only a Claude-family adapter
-  // ever writes. A non-Claude record carrying `account_switch` — every OpenCode
-  // and Pi session created before this fix, plus 7 measured codex records on
+  // ever writes. A non-Claude record carrying `account_switch` — every Pi
+  // session created before this fix, plus 7 measured codex records on
   // devbox (I2) — would otherwise be refused here forever, since the transcript
   // it is asked for cannot come into existence.
   //

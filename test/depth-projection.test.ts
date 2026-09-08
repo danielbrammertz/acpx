@@ -58,7 +58,7 @@ test("an off-rung is used when the ladder has one", () => {
 });
 
 test("projection by position is L[round(i/6 x (|L|-1))], monotone and total", () => {
-  // Measured OpenCode ladder for z-ai/glm-5.3-flash (I1 R8).
+  // A measured per-model ladder for z-ai/glm-5.3-flash.
   const ladder = ["low", "high", "max"]; // |L| = 3, so indices 0..2
   const landed = CANONICAL_DEPTH_RUNGS.map((rung, index) => {
     const projection = projectDepthOntoLadder(rung, ladder);
@@ -98,8 +98,8 @@ test("a model with no ladder is UNAVAILABLE WITH A REASON, never silently absent
 test("every canonical request against every measured ladder yields a named outcome", () => {
   // The completeness sweep: no input may produce an outcome that says nothing.
   const measuredLadders = [
-    ["low", "high", "max"], // opencode z-ai/glm-5.3-flash (I1 R8)
-    ["low", "medium", "high"], // opencode anthropic/claude-haiku-4.5 (I1 R8)
+    ["low", "high", "max"], // z-ai/glm-5.3-flash
+    ["low", "medium", "high"], // anthropic/claude-haiku-4.5
     ["off", "minimal", "low", "medium", "high", "xhigh"], // pi ACP modes (I2 R8)
     [], // a non-reasoning model
   ];
@@ -263,7 +263,7 @@ test("GUARDRAIL: the Claude family record is NOT touched by the depth recorder",
 });
 
 test("the recorder MERGES into served and never destroys a sibling model write", async () => {
-  const record = recordFor(AGENT_REGISTRY.opencode);
+  const record = recordFor(AGENT_REGISTRY.pi);
   record.acpx = { ...record.acpx, served: { model: "openrouter/deepseek/deepseek-v4-pro" } };
   recordDepthOutcome(record, projectDepthOntoLadder("high", ["low", "medium", "high"]));
   assert.equal(

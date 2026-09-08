@@ -623,8 +623,8 @@ export type SessionAcpxState = {
    * The transcript producer is Claude-only by construction: `readLastServedModel`
    * returns undefined unless `isClaudeAcpAgentCommand`. The depth producer is
    * gated on `!isClaudeFamilyAgent` for the same reason from the other side. So
-   * this block is **no longer absent for non-Claude agents** — for OpenCode and
-   * Pi it carries the depth outcome and no model.
+   * this block is **no longer absent for non-Claude agents** — for Pi it
+   * carries the depth outcome and no model.
    *
    * ⚠️ `setServedState` REPLACES this whole block rather than merging.
    * `recordDepthOutcome` therefore merges by hand instead of calling it. A third

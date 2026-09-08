@@ -737,8 +737,8 @@ export class AcpRuntimeManager {
     });
     // The post-model re-read, same rule as the CLI creation path
     // (src/cli/session/session-management.ts): a config-option harness answers
-    // `session/set_config_option` with a REFRESHED advertisement, and OpenCode
-    // advertises `effort` only once the selected model reasons (I1 R8).
+    // `session/set_config_option` with a REFRESHED advertisement, and a
+    // per-model ladder advertises `effort` only once the selected model reasons.
     // `undefined` means "this mechanism had nothing to re-read" — keep the
     // session/new snapshot, never treat it as an empty advertisement.
     const advertisedAfterModel = advertisedAfterModelApply(

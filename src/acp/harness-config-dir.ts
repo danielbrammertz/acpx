@@ -22,15 +22,7 @@ import {
   HARNESS_IDS,
   type HarnessId,
 } from "./harness-capabilities.js";
-import {
-  resolveHarnessConfigDirRoot,
-  resolveHarnessDataDirRoot,
-} from "./harness-config-dir-root.js";
-import {
-  isOpenCodePluginCacheEntry,
-  type PluginCacheResult,
-  seedOpenCodePluginInstall,
-} from "./opencode-plugin-cache.js";
+import { resolveHarnessConfigDirRoot } from "./harness-config-dir-root.js";
 import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
 
 /**
@@ -42,12 +34,11 @@ import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
  * reject an unknown slug **locally, without ever putting the request on the wire
  * to the provider** (I1 R6, I2 R5).
  *
- * ⚠️ **THE TWO CATALOGUES ARE NOT THE SAME KIND OF ARTIFACT, AND ONLY PI'S IS
- * BUNDLED.** pi's ships with the package (`@earendil-works/pi-agent-core`);
- * **OpenCode's is FETCHED LIVE from models.dev at runtime and cached** under
- * `$XDG_CACHE_HOME/opencode/`, so it carries a network dependency, a cache, and a
- * row count that moves between runs. The measurement and what reasoning from
- * "bundled" gets wrong are on {@link composeOverBoxConfig}.
+ * ⚠️ **PI'S CATALOGUE IS BUNDLED — do not generalise that to the next harness.**
+ * pi's ships with the package (`@earendil-works/pi-agent-core`), so it is on
+ * disk before the first request. A harness that instead fetches its catalogue
+ * live at runtime carries a network dependency, a cache, and a row count that
+ * moves between runs; nothing here may assume otherwise on its behalf.
  *
  * So "any
  * OpenRouter model" is not free: it requires generating a catalogue fragment
@@ -73,8 +64,8 @@ import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
  * agent, claude / claude-pty / codex would each silently gain env entries they
  * have no use for — a real behaviour change to three harnesses the program
  * requires to be untouched. The gate is `primerChannel === "config-file"`, which
- * only opencode and pi declare, so a harness that carries its primer on an ACP
- * `_meta` channel is never given a config dir it would ignore.
+ * only pi declares, so a harness that carries its primer on an ACP `_meta`
+ * channel is never given a config dir it would ignore.
  *
  * ⚠️ **RS-01 CANNOT SEE THIS, IN EITHER DIRECTION**, so it is not the evidence
  * that the gate works. There are two spawn boundaries one level apart:
@@ -117,8 +108,6 @@ function configDirName(harness: HarnessId, sessionId: string): string {
  *   **pi-acp 0.0.33** — its ONLY recursive enumeration is `loadCommandsFromDir`,
  *   over `~/.pi/agent/prompts` and `<cwd>/.pi/prompts`, reading `.md` files. It
  *   never enumerates `PI_CODING_AGENT_DIR` itself.
- *   **OpenCode** — pointed at `<dir>/opencode` and reads that, so a dot-prefixed
- *   sibling of that path is outside what it looks at.
  *
  * ⚠️ **THAT IS A VERSION-PINNED MEASUREMENT, NOT A PROPERTY.** It is the same
  * shape of fact as the `pi-acp` `session/set_model` capability cell, which was
@@ -661,18 +650,6 @@ function findConfigDirCandidates(
   }
   const candidates: { dir: string; sessionId: string }[] = [];
   for (const entry of entries) {
-    // ⚠️ THE SHARED PLUGIN CACHE IS EXCLUDED BY AN EXPLICIT PREDICATE, NOT BY THE
-    // ACCIDENT THAT ITS NAME STARTS WITH A DOT (CONCEPTION §10.1). The dot is what
-    // makes `.acpx-opencode-plugin-cache-<version>` miss the prefix test below —
-    // a NAMING CONVENTION, and a naming convention is exactly what the next
-    // tidy-up removes. Removing the cache silently restores the 63 MB-per-session
-    // cost it exists to prevent, and under a dedicated config-dir root
-    // (CONCEPTION §8.1) the cache would sit inside this very walk with nothing but
-    // that dot between it and `rmSync`. The two protections are redundant ON
-    // PURPOSE; do not delete this one because the dot "already covers it".
-    if (isOpenCodePluginCacheEntry(entry)) {
-      continue;
-    }
     const harness = gated.find((id) => entry.startsWith(`${CONFIG_DIR_PREFIX}${id}-`));
     if (harness !== undefined) {
       candidates.push({
@@ -692,7 +669,7 @@ function resolvePruneDefaults(params: {
   orphanMinAgeMs?: number;
 }): { root: string; now: number; orphanMinAgeMs: number } {
   return {
-    // Shared with the WRITER and the plugin cache (`harness-config-dir-root.ts`).
+    // Shared with the WRITER (`harness-config-dir-root.ts`).
     // A sweep resolving its root independently of the writer is a sweep that can
     // report a clean census over a directory nothing was ever written to.
     root: resolveHarnessConfigDirRoot(params.rootDir),
@@ -775,9 +752,9 @@ function classifyConfigDir(
     //
     // ⚠️ THE INCONSISTENCY THIS RESOLVES, measured on staging 2026-09-05: the census
     // summary printed `unrecognised=0` as a RETAIN tally in the very same run that
-    // removed `/tmp/acpx-opencode-session` with reason `unrecognised`. **One token
-    // named both a retain bucket and a remove path**, so the counter could read zero
-    // while that exact reason was deleting things. Now `unrecognised` means one
+    // removed a `/tmp/acpx-<harness>-session` dir with reason `unrecognised`. **One
+    // token named both a retain bucket and a remove path**, so the counter could read
+    // zero while that exact reason was deleting things. Now `unrecognised` means one
     // thing, and the counter means what it says.
     //
     // ⚠️ AND THE AGE GATE NO LONGER AUTHORISES ANY DELETION. It now only separates
@@ -918,9 +895,6 @@ export interface HarnessConfigDirPlan {
   /** This client's claim on the directory — hand it back to
    *  {@link releaseHarnessConfigDir} at close. */
   holderId?: string;
-  /** What the shared OpenCode plugin install did, so `seeded`/`cache-miss` is
-   *  visible rather than inferred from a directory size (brick 9cd608d9). */
-  pluginCache?: PluginCacheResult;
 }
 
 export interface HarnessConfigDirInput {
@@ -999,8 +973,7 @@ export function applyHarnessConfigDir(
     // holders and remove the directory underneath this one. Narrowing it to two
     // syscalls is what makes the refcount worth having.
     const holderId = registerConfigDirHolder(dir);
-    const plan =
-      harness === "opencode" ? writeOpenCodeConfigDir(dir, input) : writePiConfigDir(dir, input);
+    const plan = writePiConfigDir(dir, input);
     return { ...plan, holderId };
   } catch (error) {
     process.stderr.write(
@@ -1009,372 +982,6 @@ export function applyHarnessConfigDir(
     );
     return undefined;
   }
-}
-
-/**
- * Warn when the per-session config DISCARDS keys the box's own `opencode.json`
- * had set (F-13, brick 6d2ca570).
- *
- * ⚠️ THE SIGNATURE OF THIS DEFECT IS THAT EVERYTHING ELSE PASSES. acpx re-points
- * BOTH `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`, so the box's config is never
- * read — and the directory still exists, the env is still correct, the primer
- * still arrives, and the turn still works. Measured on the rig across two
- * sessions: with a box-level pin of `deepseek-v4-pro` and a session created with
- * NO `--model`, the per-session config carried only `instructions` and OpenCode's
- * own store served OpenCode's default (`big-pickle`). Nothing failed; the pin
- * simply evaporated.
- *
- * ⚠️ **THE DISCARD HAS SINCE BEEN STOPPED, AND THIS WARNING WAS RE-AIMED RATHER
- * THAN DELETED.** Treating the box config as a BASE and acpx's keys as an
- * OVERLAY landed as {@link composeOverBoxConfig} (brick 13f73472), called from
- * `writeOpenCodeConfigDir` before the env re-point. `warnDiscardedBoxConfigKeys`
- * is now fed the **COMPOSED** key set, so a key the overlay carried through is
- * not reported, and **it should normally be silent**; anything the composition
- * genuinely fails to carry still gets named.
- *
- * ⚠️ READ THE NAMES, NOT THE PROXIMITY: this block is a FLOATING doc comment, not
- * attached to the function it describes. The next declaration below it is
- * `composeOverBoxConfig`; `warnDiscardedBoxConfigKeys` is further down with its
- * own doc block. Every reference here is deliberately by NAME for that reason —
- * a "this function" or a "below" would resolve to the wrong one.
- *
- * ⚠️ SILENT IS THE PASS CONDITION HERE, WHICH IS WHY THE CALL WAS KEPT. A
- * warning deleted alongside its defect leaves nothing to notice a regression; one
- * re-aimed at the new invariant does. `opencode-config-overlay.test.ts` pins both
- * halves — that the box's model survives a session pinning none, and that this
- * warning goes quiet.
- *
- * ⚠️ IT DETECTS A MISSING KEY, NOT AN OVERWRITTEN VALUE. A box key whose VALUE
- * the overlay replaced is present in the composed set and is therefore NOT
- * reported. Today the only such case is `model`, and only when the caller passed
- * `--model` — a user-requested override, where a warning would be noise rather
- * than visibility. It is a deliberate boundary, not an oversight; widen it if a
- * key acpx writes UNBIDDEN ever collides with a box value.
- *
- * ⚠️ AND THE SENTENCE THIS REPLACES IS WHY THE PARAGRAPH ABOVE IS EXPLICIT. It
- * read *"…is B4's job (brick 13f73472)"* and stayed there after B4 shipped, six
- * lines above the function that does the job — so a reader was told the
- * composition was future work while standing next to it, and it cost a full
- * assignment cycle to disprove. **A comment asserting a FUTURE STATE expires the
- * moment the state arrives, and nothing fails when it does.** This file has now
- * been corrected twice for that class; see also the note at
- * {@link composeOverBoxConfig} recording a prior comment whose *"both halves were
- * false"*.
- *
- * It is read through the env acpx is ABOUT to overwrite, because that is the
- * config the child would otherwise have inherited — reading `$HOME/.config`
- * directly would answer a different question on any box that sets XDG.
- */
-/**
- * The box's `opencode.json` as the BASE, acpx's per-session keys as an OVERLAY
- * (brick 13f73472 — the better half of the F-13 split).
- *
- * ## What this fixes
- *
- * acpx re-points BOTH `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME` at the
- * per-session dir, so the box's own config was never read. Measured on the rig,
- * reproduced on two sessions: with a box-level pin of
- * `openrouter/deepseek/deepseek-v4-pro` and a session created with NO `--model`,
- * the per-session config carried only `instructions` and OpenCode served its own
- * default (`big-pickle`). **Every acpx-side assertion passed while the model the
- * box configured was not what served.**
- *
- * Composing keeps BOTH properties that were in tension: sessions still get their
- * own directory and cannot write into the box's or each other's (B3's
- * isolation), and a setting configured once for the box is honoured by every
- * session that does not explicitly override it.
- *
- * ## ⚠️ THREE COMPOSITION RULES, AND EACH ONE IS A DECISION
- *
- * 1. **Nested objects DEEP-merge.** A shallow overlay of
- *    `provider.openrouter.models.<slug>` would drop every model the box had
- *    declared under the same key — silently replacing a catalogue while looking
- *    like an addition.
- *
- *    ⚠️ **THIS IS A DIFFERENT LAYER FROM OPENCODE'S OWN MERGE SEMANTICS — TWO
- *    QUESTIONS, TWO ANSWERS, AND NEITHER SETTLES THE OTHER** (brick b4da4a48).
- *    The rule here is about **acpx's own** compose of the box `opencode.json`
- *    into the per-session one: acpx's code, acpx's format, answered by the merge
- *    written below. Whether **OPENCODE ITSELF** deep-merges an empty
- *    `provider.openrouter.models.<slug>: {}` over an entry it already has is
- *    opencode's code and opencode's format. As `client.ts` puts it: *"Two
- *    harnesses, two different config formats, two separate questions; answering
- *    one does not answer the other."*
- *
- *    **THAT SECOND QUESTION IS NOW ANSWERED, AND THE ANSWER IS MERGE** — measured
- *    2026-09-06 against OpenCode 1.18.28 on a scratch rig, brick 4c7a38b2,
- *    `verification/evidence/B4-M1-opencode-config-merge-vs-replace.md`. An empty
- *    declaration preserved `capabilities.reasoning: true` (the support the
- *    `effort` ladder is advertised from — the loss this paragraph used to warn
- *    about) along with name, family, cost and limit, and a pre-existing
- *    PROJECT-level entry survived it as well. `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR`
- *    accordingly now carries `"opencode"` beside `"pi"`.
- *
- *    ⚠️ **THE TWO ANSWERS AGREEING IS NOT A LICENCE TO CONFLATE THE LAYERS.**
- *    Cite the measurement, not this rule, for anything about opencode's own
- *    loader — and cite this rule, not the measurement, for anything about what
- *    acpx composes.
- *
- *    ⚠️ **AND THE CATALOGUE IS LIVE-REFRESHED, NOT A BUNDLED SNAPSHOT.** The
- *    entry a declaration merges over comes from a ~4.5 MB `models.json` OpenCode
- *    fetches from models.dev at runtime and caches under
- *    `$XDG_CACHE_HOME/opencode/`. It CHURNS: across three rig runs minutes apart
- *    the openrouter row count moved 359 → 362 → 361 with a set diff of +5/−2
- *    while exactly one slug was planted. Anyone reasoning from "bundled" will get
- *    the caching and the failure modes wrong — and will read catalogue drift as
- *    their own change doing something.
- * 2. **`instructions` UNIONS rather than replaces**, box entries first, acpx's
- *    primer last. It is an array, and arrays normally replace — but replacing is
- *    exactly the discard this brick exists to end, and a box that configured
- *    instructions would lose them to any session that carries a primer. Order is
- *    box-policy-then-acpx-context, and duplicates are dropped so a re-spawn
- *    cannot accumulate.
- * 3. **Everything else: acpx's value WINS where acpx set one.** An explicit
- *    `--model` must override the box's model — that is the point of passing it —
- *    while a session with no `--model` inherits the box's.
- *
- * ⚠️ **A LIMIT THIS CANNOT FIX, STATED RATHER THAN HIDDEN.** Any RELATIVE path
- * inside the box config is resolved by OpenCode against the config dir, and the
- * config dir has moved. Absolute paths (what acpx writes, and what the primer
- * mechanism requires) are unaffected. Rewriting relative paths would need
- * OpenCode's own resolution rules per key, which are not measured — so they are
- * carried through unchanged, and this note is the warning.
- */
-function composeOverBoxConfig(
-  env: NodeJS.ProcessEnv,
-  acpxKeys: Record<string, unknown>,
-): Record<string, unknown> {
-  const boxConfig = readBoxOpenCodeConfig(resolveBoxOpenCodeConfigDir(env));
-  if (!boxConfig) {
-    return acpxKeys; // no box config, or unreadable — today's behaviour exactly
-  }
-  const composed = deepMergeConfig(boxConfig, acpxKeys);
-  const boxInstructions = toStringArray(boxConfig.instructions);
-  const acpxInstructions = toStringArray(acpxKeys.instructions);
-  if (boxInstructions.length > 0 && acpxInstructions.length > 0) {
-    composed.instructions = [...new Set([...boxInstructions, ...acpxInstructions])];
-  }
-  return composed;
-}
-
-/** Plain objects merge; everything else takes the overlay's value. */
-function deepMergeConfig(
-  base: Record<string, unknown>,
-  overlay: Record<string, unknown>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    const existing = out[key];
-    out[key] =
-      isPlainObject(existing) && isPlainObject(value)
-        ? deepMergeConfig(existing, value)
-        : structuredCloneValue(value);
-  }
-  return out;
-}
-
-/** An object we may recurse into — NOT an array, which must replace wholesale. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Defensive copy, so the composed config never aliases the caller's object. */
-function structuredCloneValue<T>(value: T): T {
-  return value === undefined || typeof value === "function" ? value : (structuredClone(value) as T);
-}
-
-/** Only the string entries — a malformed `instructions` must not poison the union. */
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
-}
-
-/**
- * Where the child WOULD have read its config, in OpenCode's own precedence
- * order. Resolved through the env acpx is ABOUT to overwrite, never from
- * `$HOME/.config` directly — on a box that sets XDG those are different
- * directories and only the former answers "what is being discarded".
- */
-function resolveBoxOpenCodeConfigDir(env: NodeJS.ProcessEnv): string {
-  const explicit = env.OPENCODE_CONFIG_DIR?.trim();
-  if (explicit) {
-    return explicit;
-  }
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  if (xdg) {
-    return join(xdg, "opencode");
-  }
-  return join(env.HOME?.trim() || homedir(), ".config", "opencode");
-}
-
-/**
- * The box's own `opencode.json`, or undefined when there is none, it is
- * unreadable, or it is not a JSON object. The last case matters: a JSON array
- * parses fine and `Object.keys` would then report array INDICES as discarded
- * settings, which is a warning that names nothing real.
- */
-function readBoxOpenCodeConfig(dir: string): Record<string, unknown> | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(join(dir, "opencode.json"), "utf8"));
-  } catch {
-    return undefined;
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return undefined;
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function warnDiscardedBoxConfigKeys(env: NodeJS.ProcessEnv, sessionKeys: string[]): void {
-  const boxConfigDir = resolveBoxOpenCodeConfigDir(env);
-  const boxConfig = readBoxOpenCodeConfig(boxConfigDir);
-  if (!boxConfig) {
-    return; // no box config, or unreadable — nothing is being discarded
-  }
-  const kept = new Set(sessionKeys);
-  const discarded = Object.keys(boxConfig).filter((key) => !kept.has(key));
-  if (discarded.length === 0) {
-    return;
-  }
-  // ⚠️ NAME THE KEYS. "some settings were ignored" sends the reader to look for
-  // something they cannot identify; the whole value of this warning is that it
-  // says WHICH setting silently stopped applying.
-  process.stderr.write(
-    `[acpx] opencode: this session uses its own config dir, so ${discarded.length} ` +
-      `key(s) from ${join(boxConfigDir, "opencode.json")} are NOT applied: ` +
-      `${discarded.join(", ")}. Pass them per session (e.g. --model) if you need them.\n`,
-  );
-}
-
-/**
- * OpenCode (I1 R9, R15).
- *
- * ⚠️ **BOTH `XDG_CONFIG_HOME` AND `OPENCODE_CONFIG_DIR` ARE REQUIRED.** OpenCode
- * MERGES config from both, so setting only the latter does NOT isolate the
- * session — I1's first negative control failed for exactly this reason, and the
- * lane then twice re-created state in `/home/node` by invoking OpenCode without
- * them. Whatever spawns the adapter must set them unconditionally, together.
- *
- * ⚠️ **AND A THIRD, `XDG_DATA_HOME`, WHICH ANSWERS A DIFFERENT QUESTION** (brick
- * 6c94af4a). The two above decide what OpenCode READS; that one decides where it
- * KEEPS THE CONVERSATION. Getting the config pair right and leaving the data
- * variable unset is a complete, working, fully isolated session whose transcript
- * sits on storage nothing guarantees — which is why this was found in production
- * and not by any of the config work: **nothing fails until the process restarts,
- * and then it fails permanently.** The three are set together at the foot of this
- * function; `resolveHarnessDataDirRoot` carries the reasoning for the root.
- */
-function writeOpenCodeConfigDir(dir: string, input: HarnessConfigDirInput): HarnessConfigDirPlan {
-  const configDir = join(dir, "opencode");
-  mkdirSync(configDir, { recursive: true, mode: 0o700 });
-  const files: string[] = [];
-
-  // `"instructions"` takes ABSOLUTE paths to files outside the project root, and
-  // is repo-independent — proven in turn 1 AND after `session/load` (I1 R9).
-  // `_meta.systemPrompt.append` is accepted and SILENTLY IGNORED, so it is not
-  // an option here however familiar it looks from the Claude path.
-  const config: Record<string, unknown> = {};
-  if (input.primer) {
-    const primerPath = join(dir, "acpx-primer.md");
-    writeFileSync(primerPath, input.primer, { mode: 0o600 });
-    files.push(primerPath);
-    config.instructions = [primerPath];
-  }
-  if (input.model) {
-    config.model = input.model;
-  }
-  if (input.provisionModelId) {
-    // I1 R6: declaring the slug here is what makes an id outside OpenCode's own
-    // models.dev catalogue resolvable at all — a catalogue it FETCHES LIVE at
-    // runtime and caches, NOT a bundled snapshot (`composeOverBoxConfig`, rule 1),
-    // so which ids are "outside" it is a property of the version AND the moment.
-    // Measured: before the declaration
-    // OpenCode fails LOCALLY (`ProviderModelNotFoundError … Did you mean:`);
-    // after it, the identical request reaches OpenRouter and fails UPSTREAM
-    // instead — which is what proves the request was forwarded.
-    config.provider = {
-      openrouter: { models: { [stripProviderPrefix(input.provisionModelId)]: {} } },
-    };
-  }
-
-  // ⚠️ COMPOSE, DO NOT REPLACE (brick 13f73472). Read BEFORE the re-point below —
-  // the last moment the box's own config is reachable through the variables acpx
-  // is about to overwrite.
-  const composed = composeOverBoxConfig(input.env, config);
-
-  const configPath = join(configDir, "opencode.json");
-  writeFileSync(configPath, `${JSON.stringify(composed, null, 2)}\n`, { mode: 0o600 });
-  files.push(configPath);
-
-  // ⚠️ THE F-13 WARNING STAYS, AND IT SHOULD NOW BE SILENT. It is fed the
-  // COMPOSED key set, so a key the overlay carried through is not reported as
-  // discarded. It has not been defanged: anything the composition genuinely fails
-  // to carry still gets named. A warning that goes quiet because the defect is
-  // fixed is the correct end state for it.
-  warnDiscardedBoxConfigKeys(input.env, Object.keys(composed));
-
-  // ⚠️ SEED THE SHARED PLUGIN INSTALL BEFORE OpenCode STARTS (brick 9cd608d9).
-  // At `session/new` OpenCode installs `@opencode-ai/plugin` into this very
-  // directory — 63 MB per session, measured. Seeding a complete install by
-  // HARDLINK satisfies it and it no-ops, taking the per-session cost to directory
-  // entries. Best-effort: on any failure OpenCode installs for itself, which is
-  // exactly today's behaviour.
-  const pluginCache = seedOpenCodePluginInstall({ configDir, rootDir: input.rootDir });
-
-  // ⚠️ PIN THE DATA DIR TOO, OR THE SESSION DIES WITH THE CONTAINER (brick 6c94af4a).
-  // Setting only the two config variables leaves `XDG_DATA_HOME` unset, and OpenCode
-  // then keeps `opencode.db` — the `session` and `message` tables, i.e. the
-  // conversation — under `$HOME/.local/share/opencode`, which is NOT on the storage
-  // the platform guarantees. When that path goes, `session/resume` returns
-  // `-32603 "Internal error: OpenCode service failure"` and acpx retries it forever:
-  // `SESSION_RESUME_REQUIRED` is retryable, but a session whose rows no longer exist
-  // can never come back, so the retry is unbounded by construction and the user sees
-  // only an enqueue timeout.
-  //
-  // MEASURED on a rig (isolated HOME, OpenCode 1.18.28), three arms:
-  //   A  store intact,                  no XDG_DATA_HOME -> resume OK
-  //   B  store deleted,                 no XDG_DATA_HOME -> resume -32603, session rows 1 -> 0
-  //   C  store on durable storage, XDG_DATA_HOME set     -> the overlay path is NEVER
-  //      created, and resume still OK after that path is destroyed
-  // B is the reproduction of the production failure; C is this fix.
-  //
-  // ⚠️ NOT `dir`. The config root is `tmpdir()`, which is the SAME filesystem as the
-  // fallback this is replacing (`st_dev` 1048684 for both on devbox) — pointing the
-  // data dir at the per-session config dir would read as a fix and change nothing.
-  // `resolveHarnessDataDirRoot` documents why the root is durable and shared.
-  // ⚠️ DO NOT `mkdirSync` THIS — OpenCode CREATES IT, AND CREATING IT HERE WRITES
-  // INTO THE REAL `~/.acpx` FROM EVERY TEST THAT CALLS THIS FUNCTION.
-  //
-  // The eager mkdir was in the first version of this fix and it was wrong. Ten
-  // test files call `applyHarnessConfigDir`; exactly one isolates the data root,
-  // so the other nine created `~/.acpx/harness-data` on whatever box ran the
-  // suite. That is the same contamination class that cost this programme an hour
-  // when a probe left a pi models-store in the real HOME — a test reaching
-  // outside its fixture — and here it was reaching into the production acpx tree.
-  //
-  // MEASURED that it is unnecessary (opencode-ai 1.18.28, rig, isolated HOME):
-  // pointed at a path that did NOT exist, with acpx creating nothing, OpenCode
-  // created `<root>/opencode/opencode.db` itself, `session rows = 1`, and resume
-  // still succeeded after the overlay path was destroyed. Identical result to the
-  // arm that pre-created the root.
-  //
-  // So the directory is named here and created by its owner. Anything that needs
-  // it to exist earlier should create it where that need arises — not as a side
-  // effect of computing an environment.
-  const dataDir = resolveHarnessDataDirRoot();
-
-  input.env.XDG_CONFIG_HOME = dir;
-  input.env.OPENCODE_CONFIG_DIR = configDir;
-  input.env.XDG_DATA_HOME = dataDir;
-  return {
-    harness: "opencode",
-    dir,
-    envNames: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"],
-    files,
-    pluginCache,
-  };
 }
 
 /**

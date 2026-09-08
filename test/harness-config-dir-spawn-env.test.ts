@@ -27,7 +27,7 @@ import type { AcpClientOptions } from "../src/types.js";
 // NOT RUN, not PASS.
 //
 // ⚠️ WHAT IT STILL CANNOT SEE: whether the harness READ the files. That needs a
-// real OpenCode/Pi turn on the rig.
+// real Pi turn on the rig.
 //
 // ⚠️ THE MOCK AGENT'S ENV DUMP IS AN ALLOWLIST (ACPX_* / INDEPENDENT_CLAUDE_* /
 // CLAUDE_CONFIG_DIR). The three names under test are NONE of those, so without
@@ -39,17 +39,13 @@ const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url
 /** The names the config dir sets. Every arm captures ALL of them, so a harness
  *  that gains one it should not is caught as loudly as one that misses one. */
 const CONFIG_DIR_NAMES = [
+  // ⚠️ NAMES acpx MUST NOT SET ARE IN THIS LIST ON PURPOSE. Every arm captures
+  // ALL of them, so a harness that GAINS a name it should not is caught as
+  // loudly as one that misses the name it needs. Shrinking this list to only the
+  // names in use would delete exactly that half of the check.
   "XDG_CONFIG_HOME",
-  "OPENCODE_CONFIG_DIR",
-  "PI_CODING_AGENT_DIR",
-  // ⚠️ `XDG_DATA_HOME` is in this list even though it is not a CONFIG variable
-  // (brick 6c94af4a). It is applied by the same code at the same boundary, and
-  // this file is the only place that reads these names out of the CHILD's own
-  // environment rather than out of the plan acpx returned. Leaving it out would
-  // mean the variable that decides where the CONVERSATION is stored is the one
-  // name never verified to actually reach the adapter — and the list would be
-  // silently narrower than the mechanism it claims to cover.
   "XDG_DATA_HOME",
+  "PI_CODING_AGENT_DIR",
 ];
 
 /**
@@ -71,7 +67,6 @@ const HARNESS_DIR_TOKENS: Record<string, string> = {
   claude: "claude-agent-acp",
   "claude-pty": "claude-pty-acp",
   codex: "codex-acp",
-  opencode: "opencode-ai",
   pi: "pi-acp",
 };
 
@@ -80,7 +75,6 @@ const EXPECTED: Record<string, string[]> = {
   claude: [],
   "claude-pty": [],
   codex: [],
-  opencode: ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "XDG_DATA_HOME"],
   pi: ["PI_CODING_AGENT_DIR"],
 };
 
@@ -175,7 +169,7 @@ async function scopeTmpDir(): Promise<() => Promise<void>> {
   };
 }
 
-test("RS-13: config-dir vars reach opencode and pi ONLY — claude/claude-pty/codex EMPTY", async () => {
+test("RS-13: config-dir vars reach pi ONLY — claude/claude-pty/codex EMPTY", async () => {
   const observed: Record<string, string[]> = {};
   const populations: Record<string, number> = {};
 
@@ -213,7 +207,7 @@ test("RS-13: config-dir vars reach opencode and pi ONLY — claude/claude-pty/co
   // would mean the gate does not gate.
   const gained = Object.entries(observed).filter(([, names]) => names.length > 0);
   const empty = Object.entries(observed).filter(([, names]) => names.length === 0);
-  assert.equal(gained.length, 2, "exactly opencode and pi must gain config-dir vars");
+  assert.equal(gained.length, 1, "exactly pi must gain config-dir vars");
   assert.equal(empty.length, 3, "exactly claude, claude-pty and codex must gain none");
 });
 
@@ -233,7 +227,6 @@ test("RS-13 control: the probe CAN see these names — a planted value is captur
       "the instrument cannot see XDG_CONFIG_HOME at all — every absence assertion above is blind",
     );
     // And acpx did not overwrite an inherited value for a non-config-dir harness.
-    assert.equal(dump.OPENCODE_CONFIG_DIR, undefined);
     assert.equal(dump.PI_CODING_AGENT_DIR, undefined);
   } finally {
     if (previous === undefined) {
@@ -244,17 +237,20 @@ test("RS-13 control: the probe CAN see these names — a planted value is captur
   }
 });
 
-test("the config dir opencode receives is REAL — the files exist where the env points", async () => {
+test("the config dir pi receives is REAL — the files exist where the env points", async () => {
   // The env var alone proves a name was set, not that a primer was written.
   // Inspected via beforeClose: close() now removes the directory.
   let checked = false;
-  await spawnAndDumpEnv("opencode", async (dump) => {
-    const configDir = dump.OPENCODE_CONFIG_DIR;
+  await spawnAndDumpEnv("pi", async (dump) => {
+    const configDir = dump.PI_CODING_AGENT_DIR;
     assert.ok(
       configDir,
-      `OPENCODE_CONFIG_DIR unset; captured names=${JSON.stringify(Object.keys(dump).slice(0, 40))}`,
+      `PI_CODING_AGENT_DIR unset; captured names=${JSON.stringify(Object.keys(dump).slice(0, 40))}`,
     );
-    const configPath = path.join(configDir, "opencode.json");
+    // `settings.json` is the one file the writer emits UNCONDITIONALLY (the stall
+    // policy), so it is the honest probe for "a real directory with real content"
+    // on a spawn that pins no model and carries no primer.
+    const configPath = path.join(configDir, "settings.json");
     // ⚠️ Read with the failure state attached: this row has gone red once under
     // full-suite load and left only a `not ok` line to work from.
     const raw = await fs.readFile(configPath, "utf8").catch(async (error: unknown) => {
@@ -265,48 +261,41 @@ test("the config dir opencode receives is REAL — the files exist where the env
       );
     });
     const config = JSON.parse(raw) as Record<string, unknown>;
-    assert.ok(config, `opencode.json at ${configPath} did not parse`);
-    // XDG_CONFIG_HOME must be the PARENT — OpenCode merges both, so a mismatch
-    // silently de-isolates the session (I1 R15).
-    assert.equal(dump.XDG_CONFIG_HOME, path.dirname(configDir));
+    assert.ok(config, `settings.json at ${configPath} did not parse`);
+    // ⚠️ AND acpx MUST NOT HAVE TOUCHED XDG_CONFIG_HOME for pi — its config dir
+    // travels on `PI_CODING_AGENT_DIR` alone. A stray XDG re-point here would
+    // move a different harness's config root on the same box.
+    assert.equal(dump.XDG_CONFIG_HOME, undefined);
     checked = true;
   });
   assert.equal(checked, true, "beforeClose never ran — this row examined nothing");
 });
 
-test("acpx does NOT provision a catalogue entry for a pinned model today", async () => {
-  // ⚠️ FOUND AFTER MERGE. The first version passed the pinned model as
-  // `provisionModelId` unconditionally, so EVERY opencode session declared
-  // `provider.openrouter.models.<slug>: {}` — including for the ~358 models
-  // already in OpenCode's own catalogue, which is all acpx can pin today
-  // (`acceptsArbitraryModelIds` is false for opencode). ⚠️ That catalogue is
-  // FETCHED LIVE from models.dev and cached, not bundled, so the count is a
-  // moving baseline (359 → 362 → 361 across three runs minutes apart) and must
-  // never be used as a control — hence the `~`.
-  //
-  // Declaring an EMPTY config over an EXISTING catalogue entry is unmeasured: if
-  // OpenCode replaces rather than deep-merges, the model loses its catalogue
-  // metadata INCLUDING its reasoning support — and the `effort` option is
-  // advertised from exactly that, so the post-model re-read would find no ladder
-  // and depth would silently stop working for every pinned model.
-  //
-  // Same asymmetry that kept Pi's models-store.json out: provisioning buys
-  // nothing while arbitrary ids are declared unsupported, and risks that.
+test("a spawn that pins NO model writes no catalogue fragment", async () => {
+  // ⚠️ THE ASYMMETRY THIS PINS, THROUGH A REAL SPAWN. Provisioning is gated on
+  // `provisionModelId`; a spawn that pins nothing must write no catalogue at all.
+  // Writing one unconditionally would declare an EMPTY entry over whatever the
+  // harness already knows about that slug — and where a harness REPLACES rather
+  // than deep-merges, the model loses its catalogue metadata including its
+  // reasoning support, which is exactly what the `effort` ladder is advertised
+  // from. The unit-level twin is in `harness-config-dir.test.ts`; this row is the
+  // one that goes through the spawn.
   let checked = false;
-  await spawnAndDumpEnv("opencode", async (dump) => {
-    const configDir = dump.OPENCODE_CONFIG_DIR;
-    assert.ok(configDir, "OPENCODE_CONFIG_DIR unset — nothing to inspect");
-    const config = JSON.parse(
-      await fs.readFile(path.join(configDir, "opencode.json"), "utf8"),
-    ) as Record<string, unknown>;
+  await spawnAndDumpEnv("pi", async (dump) => {
+    const configDir = dump.PI_CODING_AGENT_DIR;
+    assert.ok(configDir, "PI_CODING_AGENT_DIR unset — nothing to inspect");
 
-    // CONTROL: the file is real and the writer ran, so `provider` being absent is
-    // a decision rather than an unwritten file.
-    assert.ok(config, "opencode.json did not parse");
+    // CONTROL: the writer ran, so `models-store.json` being absent is a decision
+    // rather than an unwritten directory.
+    const entries = await fs.readdir(configDir);
+    assert.ok(
+      entries.includes("settings.json"),
+      `the writer never ran — entries=${JSON.stringify(entries)}`,
+    );
     assert.equal(
-      config.provider,
-      undefined,
-      "a catalogue fragment was written for an already-catalogued model",
+      entries.includes("models-store.json"),
+      false,
+      "a catalogue fragment was written for a spawn that pinned no model",
     );
     checked = true;
   });
@@ -328,7 +317,7 @@ test("F-8: a spawn with NO sessionContext still gets a UNIQUE dir, never a share
   for (let i = 0; i < 2; i += 1) {
     const scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), "hp-b3-f8-nocontext-"));
     const envDumpPath = path.join(scratchDir, "env-dump.json");
-    const linkDir = path.join(scratchDir, "opencode-ai");
+    const linkDir = path.join(scratchDir, "pi-acp");
     await fs.mkdir(linkDir, { recursive: true });
     const mockLink = path.join(linkDir, "mock-agent.js");
     await fs.symlink(MOCK_AGENT_PATH, mockLink);
@@ -347,9 +336,9 @@ test("F-8: a spawn with NO sessionContext still gets a UNIQUE dir, never a share
       await client.createSession();
       const dump = JSON.parse(await fs.readFile(envDumpPath, "utf8")) as Record<string, string>;
       assert.ok(Object.keys(dump).length > 5, "control: the child must have run");
-      const configDir = dump.OPENCODE_CONFIG_DIR;
+      const configDir = dump.PI_CODING_AGENT_DIR;
       assert.ok(configDir, "no config dir was created without a sessionContext");
-      dirs.push(path.dirname(configDir));
+      dirs.push(configDir);
     } finally {
       await client.close().catch(() => {});
       await fs.rm(scratchDir, { recursive: true, force: true });
@@ -359,10 +348,10 @@ test("F-8: a spawn with NO sessionContext still gets a UNIQUE dir, never a share
   // THE ASSERTION: two context-less spawns get DIFFERENT directories.
   assert.notEqual(dirs[0], dirs[1], "two spawns shared a directory — the literal fallback is back");
   for (const dir of dirs) {
-    assert.match(path.basename(dir), /^acpx-opencode-/, "the dir prefix changed");
+    assert.match(path.basename(dir), /^acpx-pi-/, "the dir prefix changed");
     assert.doesNotMatch(
       path.basename(dir),
-      /^acpx-opencode-session$/,
+      /^acpx-pi-session$/,
       "the shared literal directory name is back",
     );
     // close() removed it — remove-on-close is the fast path (the sweep is the
@@ -374,7 +363,7 @@ test("F-8: a spawn with NO sessionContext still gets a UNIQUE dir, never a share
 /**
  * An OpenRouter slug no harness's own model catalogue carries, so its presence in
  * a written config file can only have come from acpx provisioning it. (Neither
- * catalogue is a fixed set: pi's is bundled but box-overlaid, and OpenCode's is
+ * catalogue is a fixed set: pi's is bundled but box-overlaid, and another's may be
  * fetched live from models.dev and churns — which is why the slug is a nonsense
  * one rather than merely an unpopular real id.)
  */
@@ -418,11 +407,11 @@ async function withProvisioningList<T>(
  * actually wrote a catalogue fragment for it.
  *
  * Each arm carries its OWN control, because "no fragment" and "the config dir was
- * never written" are the same observation otherwise: the config dir must exist,
- * and for opencode the config file must parse. So a `false` here means acpx
- * DECIDED not to provision, never that nothing ran.
+ * never written" are the same observation otherwise: the config dir must exist
+ * and be non-empty. So a `false` here means acpx DECIDED not to provision, never
+ * that nothing ran.
  */
-async function observeProvisioning(harness: "opencode" | "pi"): Promise<boolean> {
+async function observeProvisioning(harness: "pi"): Promise<boolean> {
   let observed: boolean | undefined;
   await spawnAndDumpEnv(
     harness,
@@ -431,7 +420,7 @@ async function observeProvisioning(harness: "opencode" | "pi"): Promise<boolean>
         Object.keys(dump).length > 5,
         `${harness}: env dump has ${Object.keys(dump).length} entries — the child never ran, so this arm is NOT RUN, not clean`,
       );
-      if (harness === "pi") {
+      {
         const dir = dump.PI_CODING_AGENT_DIR;
         assert.ok(dir, "pi: PI_CODING_AGENT_DIR unset — no config dir was written at all");
         // CONTROL: the directory is real and reachable, so a missing
@@ -450,20 +439,7 @@ async function observeProvisioning(harness: "opencode" | "pi"): Promise<boolean>
         observed = (store.openrouter?.models ?? []).some(
           (model) => model.id === PROVISIONED_SLUG_STRIPPED,
         );
-        return;
       }
-      const configDir = dump.OPENCODE_CONFIG_DIR;
-      assert.ok(
-        configDir,
-        "opencode: OPENCODE_CONFIG_DIR unset — no config dir was written at all",
-      );
-      // CONTROL: the file is real and parses, so `provider` being absent is a
-      // routing decision rather than an unwritten file.
-      const config = JSON.parse(
-        await fs.readFile(path.join(configDir, "opencode.json"), "utf8"),
-      ) as { provider?: { openrouter?: { models?: Record<string, unknown> } } };
-      assert.ok(config, "opencode: opencode.json did not parse");
-      observed = config.provider?.openrouter?.models?.[PROVISIONED_SLUG_STRIPPED] !== undefined;
     },
     { model: PROVISIONED_SLUG },
   );
@@ -487,81 +463,56 @@ test("the SHIPPED provisioning list is what the spawn routes on — both directi
   //
   // ## PART 1 — the shipped defaults, in BOTH directions
   //
-  // One harness that IS on the list and one that is NOT, measured through a real
-  // adapter spawn. A row that pinned only the positive would be the same
-  // one-sided defence being removed here.
-  // ⚠️ BOTH SHIPPED ENTRIES ARE NOW `true`, SO PART 1 ON ITS OWN IS ONE-SIDED —
-  // and saying so is the point. `opencode` used to be this part's negative;
-  // routing it (brick 4c7a38b2, the merge-vs-replace measurement) took that away.
-  // Part 2's EMPTY-LIST arm is what restores the negative direction through the
-  // very same instrument, which is why it is not optional decoration here.
+  // ⚠️ PART 1 ON ITS OWN IS ONE-SIDED —
+  // and saying so is the point. Part 1 observes only the harness that IS on the
+  // shipped list, so it cannot supply its own negative — Part 2's swapped-list
+  // arms restore the negative direction through the very same instrument, which
+  // is why they are not optional decoration here.
   const shippedPi = await observeProvisioning("pi");
-  const shippedOpencode = await observeProvisioning("opencode");
   process.stderr.write(
     `[cba6fa92] shipped list=${JSON.stringify([...ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR])} ` +
-      `pi=${shippedPi} opencode=${shippedOpencode}\n`,
+      `pi=${shippedPi}\n`,
   );
   assert.equal(shippedPi, true, "pi is on the shipped list and the spawn must provision for it");
-  assert.equal(
-    shippedOpencode,
-    true,
-    "opencode is on the shipped list (brick 4c7a38b2: OpenCode DEEP-MERGES an empty " +
-      "`provider.openrouter.models.<slug>: {}`) and the spawn must provision for it",
-  );
 
   // ## PART 2 — the routing is a DERIVATION, not a literal
   //
   // ⚠️ PART 1 ALONE CANNOT SEE THE DEFECT. A re-inlined `=== "pi"` literal agrees
-  // with the shipped list on pi, so Part 1's pi row would stay green. Only varying
+  // with the shipped list on pi, so Part 1's row would stay green. Only varying
   // the constant underneath the same real spawn separates them.
   //
-  // ### 2a — the EMPTY list: everything must go OFF
+  // ### 2a — the EMPTY list: provisioning must go OFF
   //
-  // This is also the two-sided control Part 1 no longer carries itself: the same
-  // instrument that reported `pi=true, opencode=true` must be able to report
-  // `false` for both, or those `true`s are a blind spot rather than observations.
-  const [emptyPi, emptyOpencode] = await withProvisioningList([], async () => [
-    await observeProvisioning("pi"),
-    await observeProvisioning("opencode"),
-  ]);
-  process.stderr.write(`[cba6fa92] swapped list=[] pi=${emptyPi} opencode=${emptyOpencode}\n`);
+  // This is also the two-sided control Part 1 cannot carry itself: the same
+  // instrument that reported `pi=true` must be able to report `false`, or that
+  // `true` is a blind spot rather than an observation.
+  const [emptyPi] = await withProvisioningList([], async () => [await observeProvisioning("pi")]);
+  process.stderr.write(`[cba6fa92] swapped list=[] pi=${emptyPi}\n`);
   assert.equal(
     emptyPi,
     false,
     "the spawn still provisioned for pi with the list EMPTY — the routing is hardcoded, not derived",
   );
-  assert.equal(
-    emptyOpencode,
-    false,
-    "the spawn still provisioned for opencode with the list EMPTY — the routing is hardcoded, not derived",
-  );
 
-  // ### 2b — a list naming only OPENCODE: the answer must be PER HARNESS
+  // ### 2b — a NON-EMPTY list that does not name pi: the answer must be PER HARNESS
   //
   // 2a alone cannot distinguish a per-harness derivation from an all-or-nothing
-  // one — an `if (list.length > 0)` bug passes it in both directions. Naming one
-  // harness and not the other is what forces the two answers apart, and it is
-  // also the arm that a restored `=== "pi"` literal reds twice over.
-  const [onlyOcPi, onlyOcOpencode] = await withProvisioningList(["opencode"], async () => [
+  // one — an `if (list.length > 0)` bug passes it. A list that is non-empty and
+  // still excludes pi is what forces those apart, and it is also the arm a
+  // restored `=== "pi"` literal reds on.
+  const [otherPi] = await withProvisioningList(["codex"], async () => [
     await observeProvisioning("pi"),
-    await observeProvisioning("opencode"),
   ]);
-  process.stderr.write(
-    `[cba6fa92] swapped list=["opencode"] pi=${onlyOcPi} opencode=${onlyOcOpencode}\n`,
-  );
+  process.stderr.write(`[cba6fa92] swapped list=["codex"] pi=${otherPi}\n`);
   assert.equal(
-    onlyOcPi,
+    otherPi,
     false,
-    "the spawn still provisioned for pi with pi OFF the list — the routing is hardcoded, not derived",
-  );
-  assert.equal(
-    onlyOcOpencode,
-    true,
-    "the spawn refused to provision for opencode with opencode ON the list — the routing is hardcoded, not derived",
+    "the spawn still provisioned for pi with a NON-EMPTY list that excludes pi — the routing is " +
+      "all-or-nothing or hardcoded, not per-harness",
   );
 
   // The restore actually happened, so nothing downstream inherits the swap.
-  assert.deepEqual([...ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR], ["pi", "opencode"]);
+  assert.deepEqual([...ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR], ["pi"]);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -574,9 +525,9 @@ test("the SHIPPED provisioning list is what the spawn routes on — both directi
 //   CONFIG-DIR leg  client.ts applyHarnessConfigDirEnv
 //                   -> primer: resolveSessionPrimer(env)          <- bare render
 //
-// The config-dir leg is the ONLY primer path opencode and pi have, so the block
-// reached neither. Measured on the production evidence run: claude 37,803 ch
-// WITH the block, pi and opencode 32,999 ch with ZERO brick tokens. agents.md was
+// The config-dir leg is the ONLY primer path pi has, so the block never reached
+// it. Measured on the production evidence run: claude 37,803 ch
+// WITH the block, pi 32,999 ch with ZERO brick tokens. agents.md was
 // complete in all three — never truncation — and `ACPX_BRICK` was correctly set
 // in the adapter env throughout, so every surface that could have shown the gap
 // looked healthy while a brick-linked agent was left to invent its own frame.
@@ -604,11 +555,9 @@ const TEST_BRICK_UUID = "11111111-2222-3333-4444-555555555555";
 
 /** Where each config-file harness writes the rendered primer. */
 const PRIMER_FILE: Record<string, { envName: string; fileName: string }> = {
-  // ⚠️ opencode is XDG_CONFIG_HOME, NOT OPENCODE_CONFIG_DIR. The writer puts the
-  // primer at `join(dir, "acpx-primer.md")` and sets XDG_CONFIG_HOME=dir while
-  // OPENCODE_CONFIG_DIR=dir/opencode — so reading the latter finds no file and
-  // is indistinguishable from a primer that was never written.
-  opencode: { envName: "XDG_CONFIG_HOME", fileName: "acpx-primer.md" },
+  // ⚠️ NAME THE VARIABLE THE PRIMER FILE ACTUALLY SITS UNDER. Reading a
+  // neighbouring config variable finds no file, which is indistinguishable from a
+  // primer that was never written.
   pi: { envName: "PI_CODING_AGENT_DIR", fileName: "APPEND_SYSTEM.md" },
 };
 
@@ -693,7 +642,7 @@ async function readWrittenPrimer(
   }
 }
 
-for (const harness of ["opencode", "pi"]) {
+for (const harness of ["pi"]) {
   test(`968519c3: the ${harness} config-dir primer carries the brick block for a brick-linked session — and NOT without a brick`, async () => {
     const withBrick = await readWrittenPrimer(harness, { brick: TEST_BRICK_UUID });
     const withoutBrick = await readWrittenPrimer(harness, {});

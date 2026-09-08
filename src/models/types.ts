@@ -136,11 +136,11 @@ export type AgentAvailability = {
    * a model this agent refuses has no id to send, and shipping one invites a
    * caller to send it.
    *
-   * ⚠️ **NOT ALWAYS `id`, AND NOT DERIVABLE FROM `source`.** Measured on all
-   * five harnesses (brick c4da2ff2): pi and opencode take `source + "/" + id`,
+   * ⚠️ **NOT ALWAYS `id`, AND NOT DERIVABLE FROM `source`.** Measured on every
+   * harness (brick c4da2ff2): pi takes `source + "/" + id`,
    * claude and claude-pty take the bare `id`, and codex takes `family[rung]`
    * with **a bare family refused**. So the obvious caller-side rule
-   * `source === "openrouter" ? \`openrouter/${id}\` : id` is right for two
+   * `source === "openrouter" ? \`openrouter/${id}\` : id` is right for one
    * harnesses and silently wrong for a third — which is exactly why the answer
    * is computed here and shipped, keyed on the `(model, agent)` PAIR that it is
    * actually a property of. See `src/models/wire-model-id.ts`.

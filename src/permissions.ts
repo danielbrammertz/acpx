@@ -381,10 +381,10 @@ export async function resolvePermissionRequest(
  *
  * ⚠️ DO NOT "restore" the mode/policy branches below by making this conditional
  * on `mode`. That looks like a fix and it is the ruling being undone. It is also
- * not a safety feature to restore: OpenCode and pi-acp never issue
- * `session/request_permission` at all (FINDINGS-opencode D3 / FINDINGS-pi R10 —
- * both measured `--deny-all` failing to stop a `bash` write), so the mode gate
- * only ever bound the two harnesses that were already spawned `--approve-all`
+ * not a safety feature to restore: pi-acp never issues
+ * `session/request_permission` at all (FINDINGS-pi R10 —
+ * measured `--deny-all` failing to stop a `bash` write), so the mode gate
+ * only ever bound harnesses that were already spawned `--approve-all`
  * fleet-wide. `test/permission-short-circuit.test.ts` goes red if this is
  * re-gated.
  *

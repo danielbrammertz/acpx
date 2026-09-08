@@ -22,19 +22,18 @@
  *
  * ## Why this is per-(MODEL, AGENT) and cannot live on the model
  *
- * Measured on all five harnesses (report
+ * Measured on every harness (report
  * `4145fe1e/reports/W2-wire-id-shapes-and-reason-split.md`):
  *
  *     claude       bare alias, no prefix, no bracket   `sonnet`
  *     claude-pty   bare alias, no prefix, no bracket   `sonnet`
  *     codex        no prefix, bracket MANDATORY        `gpt-5.6-sol[medium]`
- *     opencode     providerID + "/" + modelID          `openrouter/z-ai/glm-5.3-flash`
  *     pi           source + "/" + id                   `openrouter/qwen/qwen3-coder-flash`
  *
- * Two harnesses prefix, three do not, and one of the three fuses a rung in. So a
+ * One harness prefixes, three do not, and one of the three fuses a rung in. So a
  * per-model field cannot carry the answer, and the tempting UI-side rule
- * `source === "openrouter" ? \`openrouter/${id}\` : id` is correct for pi and
- * opencode and **silently wrong for codex**. Both terms come from the harness
+ * `source === "openrouter" ? \`openrouter/${id}\` : id` is correct for pi
+ * and **silently wrong for codex**. Both terms come from the harness
  * descriptor — {@link ModelIdForm} and `depth.mechanism` — never from the
  * agent's NAME.
  *

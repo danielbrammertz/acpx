@@ -35,7 +35,7 @@ const UNMEASURABLE: LivePidScan = { scanned: 0, pids: new Set() };
 
 function dirWithHolders(...holderIds: string[]): { root: string; dir: string; holders: string } {
   const root = mkdtempSync(join(tmpdir(), "hp-c9b2520f-"));
-  const dir = join(root, "acpx-opencode-ses-1");
+  const dir = join(root, "acpx-pi-ses-1");
   const holders = join(dir, ".acpx-holders");
   mkdirSync(holders, { recursive: true });
   for (const id of holderIds) {
@@ -148,7 +148,7 @@ test("c9b2520f: an UNREADABLE holder set is still a NON-MEASUREMENT, unchanged",
   // non-measurements — the holder set, and /proc — and neither may remove.
   const root = mkdtempSync(join(tmpdir(), "hp-c9b2520f-nohold-"));
   try {
-    const dir = join(root, "acpx-opencode-ses-2");
+    const dir = join(root, "acpx-pi-ses-2");
     mkdirSync(dir, { recursive: true });
     const result = releaseHarnessConfigDir(dir, "999001-aaaaaaaa", measuredPids([12345]));
     assert.equal(result.notMeasured, true, "an unreadable holder set was treated as measured");

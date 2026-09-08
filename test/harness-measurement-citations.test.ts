@@ -248,7 +248,7 @@ test("4791a88c: a cited PIN cannot drift from AGENT_REGISTRY — on EITHER launc
   // Its first form matched only `npx <spec>`, so when `resolvePiAcpCommand`
   // began returning `node /opt/pi-acp/dist/index.js` pi would have dropped out
   // of the checked set entirely — failing toward SILENCE, invisibly to the
-  // population guard, since `> 0` stays true on opencode alone.
+  // population guard, since `> 0` stays true on a single harness alone.
   //
   // Its second form classified both shapes but still read ONE box's resolution
   // (`AGENT_REGISTRY[id]`), and demanded static citations match it. `HARNESS_FACTS`
@@ -326,11 +326,11 @@ test("4791a88c: the anti-drift check GOES RED on a stale citation — each way i
 test("4791a88c: the two harnesses whose adapter and CLI move apart cite both", () => {
   // pi-acp is not pi, and codex-acp is not the codex CLI. Two things that go
   // stale independently must both be named, or one moves while the citation
-  // still looks current. (claude/claude-pty/opencode are single artifacts, so
+  // still looks current. (claude/claude-pty are single artifacts, so
   // `harness` is legitimately absent there — asserted, not assumed.)
   assert.ok(HARNESS_FACTS.pi.measuredAgainst.harness, "pi cites no underlying pi version");
   assert.ok(HARNESS_FACTS.codex.measuredAgainst.harness, "codex cites no underlying codex CLI");
-  for (const id of ["claude", "claude-pty", "opencode"] as const) {
+  for (const id of ["claude", "claude-pty"] as const) {
     assert.equal(
       HARNESS_FACTS[id].measuredAgainst.harness,
       undefined,

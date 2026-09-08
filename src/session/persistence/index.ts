@@ -444,7 +444,7 @@ function outputStyleSupportedFromRecord(acpx: SessionRecord["acpx"]): boolean | 
  * 2dc93747) — the STATIC descriptor REFINED by what this session's adapter
  * actually advertised.
  *
- * ⚠️ THE STATIC FLAG OVER-CLAIMS AND THE UI READS IT. Staging served opencode
+ * ⚠️ THE STATIC FLAG OVER-CLAIMS AND THE UI READS IT. Staging served a harness
  * with `canSetModelLive: true` while its adapter had advertised NO selectable
  * `model` option, so the live-model control would be offered on a session where
  * it can only ever refuse. Daniel's requirement is "declared in acpx, REFINED by

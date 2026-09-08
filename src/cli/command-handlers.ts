@@ -601,7 +601,7 @@ function effortWillBeComposedIntoModelId(
 // `--output-style` is meaningful only for a harness that ADVERTISES an
 // `outputStyle` config option, which is what `supportsOutputStyles` records
 // (claude + claude-pty today; zero `outputStyle` references in codex-acp, and it
-// is not an OpenCode or Pi concept at all — I1 R11 / I2 R11). Never an error,
+// is not a Pi concept at all — I2 R11). Never an error,
 // and never a write: the `advertisesConfigOption` gate in the apply path
 // enforces that independently.
 function warnOutputStyleNotSupported(globalFlags: GlobalFlags, effectiveAgentName: string): void {

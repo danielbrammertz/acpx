@@ -403,8 +403,8 @@ export async function persistAndApplyRequestedEffort(params: {
   //     warns under --verbose), and
   //   - the level it does send may be a NORMALIZED one, not the one requested.
   // Recording only in the not-advertised branch left `depth_projection` ABSENT on
-  // exactly the harness the field was built for — measured on opencode by hp-te2:
-  // the key missing after a turn that demonstrably ran.
+  // exactly the harness the field was built for — measured by hp-te2: the key
+  // missing after a turn that demonstrably ran.
   //
   // ⚠️ AND IT IS DERIVED FROM THE WIRE, NEVER RE-READ FROM THE RECORD (F-14,
   // brick 06ae06c1). The line that stood here was

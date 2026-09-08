@@ -24,19 +24,8 @@ const COMMANDS: Record<HarnessId, string> = {
   claude: AGENT_REGISTRY.claude,
   "claude-pty": AGENT_REGISTRY["claude-pty"],
   codex: AGENT_REGISTRY.codex,
-  opencode: AGENT_REGISTRY.opencode,
   pi: AGENT_REGISTRY.pi,
 };
-
-function captureThrow(run: () => void): ForkAtIndexUnsupportedError {
-  try {
-    run();
-  } catch (error) {
-    assert.ok(error instanceof ForkAtIndexUnsupportedError, "wrong error type");
-    return error;
-  }
-  throw new assert.AssertionError({ message: "expected a ForkAtIndexUnsupportedError" });
-}
 
 test("EVERY declared harness is covered by exactly one of {refuse, proceed} — no harness falls through", () => {
   // The population, not a hand-picked sample: if a sixth harness is declared, it
@@ -58,39 +47,34 @@ test("EVERY declared harness is covered by exactly one of {refuse, proceed} — 
     ["claude-pty", false, "exact"],
     // ⚠️ FALSE, and deliberately so. See the file header.
     ["codex", false, "turn-granular"],
-    ["opencode", true, "ignored"],
     // ⚠️ PI MOVED FROM {refuse, "unsupported"} TO {proceed, "exact"} WHEN THE
     // nativai pi-acp FORK LANDED (brick ef5999ca). Upstream pi-acp implements no
     // fork handler at all, so acpx refused; the fork implements session/fork on
     // pi's JSONL tree and truncates at a real index. THIS ROW IS THE POPULATION
-    // ROW, so the flip had to be made here rather than anywhere else — and the
-    // refusal branch keeps a member (opencode), which is what stops this from
-    // becoming a test that only exercises "proceed".
+    // ROW, so the flip had to be made here rather than anywhere else.
     ["pi", false, "exact"],
   ]);
-});
 
-test("the refusal names the descriptor value and what it means — a bare 'unsupported' is not actionable", () => {
-  // `assert.throws` returns undefined in node:test — capture the error by hand.
-  const error = captureThrow(() => assertForkAtIndexHonoured(COMMANDS.opencode, 2));
-  assert.equal(error.harness, "opencode");
-  assert.equal(error.atIndex, "ignored");
-  assert.match(error.message, /fork\.atIndex == "ignored"/);
-  // The user must learn WHY, or the refusal reads as a bug in acpx.
-  assert.match(error.message, /silently full-copies/);
-  // And what they can do instead: opencode's PLAIN fork works (fork.supported).
-  assert.match(error.message, /omit --at-index/);
-
-  // ⚠️ pi USED TO PROVIDE THE SECOND REFUSAL CASE HERE and no longer does — the
-  // fork honours --at-index. Asserting the POSITIVE in its place keeps the row
-  // two-sided: without it, a change that made assertForkAtIndexHonoured refuse
-  // everything would still pass on the opencode half alone.
-  assert.doesNotThrow(() => assertForkAtIndexHonoured(COMMANDS.pi, 2));
+  // 🛑 NO HARNESS EXERCISES THE REFUSAL BRANCH TODAY — every row above is
+  // `false`, so this test currently proves only that nothing falls through, NOT
+  // that the refusal still works. `assertForkAtIndexHonoured` refuses on
+  // `fork.atIndex` of `"ignored"` or `"unsupported"`, and neither is declared by
+  // any harness (see `ForkAtIndexSupport`, where both are documented as having
+  // no harness today). **A harness that declares either MUST arrive with a row
+  // here asserting `true`, and with the refusal-message row this file used to
+  // carry** — otherwise the guard ships untested. Asserted rather than left to a
+  // comment, so the day it stops being true is a red:
+  assert.deepEqual(
+    verdicts.filter(([, refused]) => refused).map(([id]) => id),
+    [],
+    "a harness now declares ignored/unsupported — restore the refusal coverage described above",
+  );
 });
 
 test("NO --at-index is never refused, for any harness — a full copy is honest everywhere", () => {
   // The positive control on the refusal: it must not have broken fork itself.
-  // opencode's plain fork is `fork.supported: true` and stays available.
+  // A harness that cannot honour --at-index still has a working plain fork where
+  // `fork.supported` is true.
   for (const id of HARNESS_IDS) {
     assert.doesNotThrow(() => assertForkAtIndexHonoured(COMMANDS[id], undefined), id);
   }

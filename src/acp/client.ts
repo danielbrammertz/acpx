@@ -60,7 +60,6 @@ import {
   resolvePermissionRequestWithDetails,
 } from "../permissions.js";
 import { getUnsupportedPromptContentMessage, textPrompt } from "../prompt-content.js";
-import { selectableConfigOptionValues } from "../session/config-option-application.js";
 import { ACTIVITY_NEUTRAL_EVENT_METHOD } from "../session/events.js";
 import { extractRuntimeSessionId } from "../session/runtime-session-id.js";
 import { buildSpawnCommandOptions } from "../spawn-command-options.js";
@@ -125,11 +124,9 @@ import {
 import { isCodexAcpCommand } from "./codex-compat.js";
 import { extractAcpError } from "./error-shapes.js";
 import {
-  acpxRoutesModelMechanism,
   HARNESS_FACTS,
   harnessIdForAgentCommand,
   harnessProvisionsModelCatalogue,
-  modelMechanismForAgentCommand,
 } from "./harness-capabilities.js";
 import {
   applyHarnessConfigDir,
@@ -141,7 +138,6 @@ import {
   isAcpMessageObject,
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
-import { RequestedModelUnsupportedError } from "./model-support.js";
 import {
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
@@ -1043,10 +1039,10 @@ export class AcpClient {
     await this.applyProfileEnv(spawnOptions.env);
     // B3: the per-session harness config dir — primer + model pin + catalogue
     // fragment, one directory (CONCEPTION §5.3). GATED PER HARNESS off the
-    // descriptor's `primerChannel === "config-file"`, so only opencode and pi
-    // receive it and claude / claude-pty / codex adapter environments are
-    // untouched. Applied unconditionally here it would be a real behaviour change
-    // to three harnesses this program requires to stay identical.
+    // descriptor's `primerChannel === "config-file"`, so only pi receives it and
+    // claude / claude-pty / codex adapter environments are untouched. Applied
+    // unconditionally here it would be a real behaviour change to three
+    // harnesses this program requires to stay identical.
     //
     // ⚠️ This is the ADAPTER boundary, one level downstream of the rig shim's
     // capture — RS-01 cannot observe it in either direction. RS-13 is its evidence.
@@ -1075,8 +1071,8 @@ export class AcpClient {
    * provider credential — exactly as the adapter will.
    *
    * ⚠️ THE BRICK BLOCK BELONGS HERE TOO, AND ITS ABSENCE IS SILENT (brick
-   * 968519c3). This leg is the ONLY primer path opencode and pi have, so a block
-   * folded in on the stream leg alone reaches neither of them. It shipped that
+   * 968519c3). This leg is the ONLY primer path pi has, so a block folded in on
+   * the stream leg alone never reaches it. It shipped that
    * way: `ACPX_BRICK` was set in the adapter env and `agents.md` rendered in
    * full, so every surface that could have shown the gap looked healthy while
    * the primer TEXT carried no brick at all — leaving a brick-linked agent to
@@ -1098,27 +1094,17 @@ export class AcpClient {
         await this.resolveBrickContext(),
       ),
       model: this.options.sessionOptions?.model,
-      // ⚠️ PROVISIONING IS ON FOR PI AND FOR OPENCODE, AND EACH `on` IS ITS OWN
-      // MEASUREMENT — NOT ONE ANSWER GENERALISED TO TWO HARNESSES.
+      // ⚠️ PROVISIONING IS ON FOR PI, AND THAT `on` IS ITS OWN MEASUREMENT — NOT
+      // AN ANSWER GENERALISABLE TO THE NEXT HARNESS.
       //
       // pi (brick ef5999ca): `models-store.json` merges BY ID with pi's catalogue
       // — same id replaces, new id appends — and `writePiModelsStore` copies the
       // box's own catalogue forward before upserting, so a slug pi already knows
       // keeps its real metadata rather than being overwritten with guesses.
       //
-      // opencode (brick 4c7a38b2, measured 2026-09-06 against 1.18.28 on a
-      // scratch rig): `provider.openrouter.models.<slug>: {}` declares an EMPTY
-      // config over an existing entry, and OpenCode DEEP-MERGES it. The subject
-      // kept `capabilities.reasoning: true` — the support the `effort` option is
-      // advertised from, and the thing whose loss would have silently killed
-      // depth for every pinned model — plus name, family, cost and limit; and a
-      // pre-existing PROJECT-level entry survived the same declaration, so a
-      // spawn does not clobber a user's own provider config.
-      //
-      // Two harnesses, two different config formats, two separate questions;
-      // answering one does not answer the other. That both answers came back
-      // `merge` is a coincidence of two measurements, not one fact — which is why
-      // the list below is keyed by HARNESS and not by `arbitraryModelSupport`.
+      // A second harness means a different config format and a separate question;
+      // answering pi's does not answer it — which is why the list below is keyed
+      // by HARNESS and not by `arbitraryModelSupport`.
       //
       // ⚠️ THIS ASKS THE CONSTANT, NOT A LITERAL — DO NOT "SIMPLIFY" IT BACK TO
       // `=== "pi"` (brick cba6fa92). It shipped as that literal, and the effect
@@ -2248,28 +2234,16 @@ export class AcpClient {
   }
 
   /**
-   * Set the session's model, DISPATCHING ON THIS ADAPTER'S MECHANISM (F-10).
+   * Set the session's model.
    *
-   * ⚠️ THE DISPATCH LIVES HERE, NOT IN THE CALLERS, AND THAT IS THE FIX. F-9
-   * routed the create, replay and prompt-time paths and left FOUR call sites
-   * reaching this method directly — the CLI verb's live-owner path among them,
-   * which is how a `set model` on a live OpenCode session still emitted
-   * `session/set_model` and was rejected `-32602` while the descriptor said
-   * `mechanism=config-option`. Routing each caller in turn is the same
-   * hand-maintained-list failure that created F-9; this is the ONE boundary that
-   * turns "set the model" into a wire call, and it already knows which adapter it
-   * is talking to, so a caller that has never heard of mechanisms cannot get it
-   * wrong.
-   *
-   * claude / claude-pty / codex are untouched: their mechanism is not
-   * `config-option`, so they take the original path below unchanged.
+   * ⚠️ THIS IS THE ONE BOUNDARY THAT TURNS "set the model" INTO A WIRE CALL, AND
+   * IT MUST STAY THAT WAY (F-10). F-9 routed the create, replay and prompt-time
+   * paths and left FOUR call sites reaching this method directly — the CLI verb's
+   * live-owner path among them — so a mechanism the callers had to know about was
+   * a hand-maintained list, and a hand-maintained list survives its own violation.
+   * Any future per-mechanism dispatch belongs HERE, never re-inlined into callers.
    */
   async setSessionModel(sessionId: string, modelId: string): Promise<void> {
-    if (this.routesModelAsConfigOption()) {
-      this.assertModelAdvertisedAsConfigOption(modelId);
-      await this.setSessionConfigOption(sessionId, "model", modelId);
-      return;
-    }
     const connection = this.getConnection();
     try {
       await this.runConnectionRequest(() =>
@@ -2311,45 +2285,6 @@ export class AcpClient {
       throw new Error(`Failed session/set_model for model "${modelId}": ${summary}`, {
         cause: error,
       });
-    }
-  }
-
-  /** Whether THIS adapter carries its model on a config option, and acpx routes it. */
-  private routesModelAsConfigOption(): boolean {
-    return (
-      modelMechanismForAgentCommand(this.options.agentCommand) === "config-option" &&
-      acpxRoutesModelMechanism("config-option")
-    );
-  }
-
-  /**
-   * ⚠️ VALIDATE BEFORE SENDING. A config-option harness resolves the slug against
-   * its own model catalogue and rejects an unknown one LOCALLY, behind an error
-   * that names nothing useful (I1: `{"name":"UnknownError"}`, the real cause only
-   * in its debug log). So acpx refuses first and writes nothing — the (b) floor
-   * F-9 restored, kept for the case that warrants it.
-   *
-   * ⚠️ **"LOCALLY" IS NOT "FROM A BUNDLED SET".** The one config-option harness
-   * today is opencode, and its catalogue is FETCHED LIVE from models.dev at
-   * runtime and cached — see `src/acp/harness-config-dir.ts`
-   * (`composeOverBoxConfig`, rule 1). What is local is the REJECTION, not the
-   * provenance of the roster it rejects against.
-   */
-  private assertModelAdvertisedAsConfigOption(modelId: string): void {
-    const option = (this.latestConfigOptions ?? []).find((entry) => entry.id === "model");
-    if (!option || option.type !== "select") {
-      throw new RequestedModelUnsupportedError(
-        `Cannot set the model to "${modelId}": this agent selects its model through ` +
-          `session/set_config_option, but it has advertised no selectable "model" option. ` +
-          `Nothing was written — the session is unchanged.`,
-      );
-    }
-    const advertised = selectableConfigOptionValues(option);
-    if (!advertised.has(modelId)) {
-      throw new RequestedModelUnsupportedError(
-        `Cannot set the model to "${modelId}": the agent did not advertise that model ` +
-          `(${advertised.size} advertised). Nothing was written — the session is unchanged.`,
-      );
     }
   }
 

@@ -60,7 +60,7 @@ function records(pairs: [string, boolean][]): ReadonlyMap<string, KnownSessionRe
 test("cc9a5f25 PROTECTION 1: an UNRECOGNISED id is RETAINED, not removed", async () => {
   // The `randomUUID()` fallback dir lands here: it is in no session list, ever.
   // Under the old code this was the REMOVE branch.
-  const root = fixture([{ name: "acpx-opencode-unknown-id-zzz9", ageMs: 60_000 }]);
+  const root = fixture([{ name: "acpx-pi-unknown-id-zzz9", ageMs: 60_000 }]);
   try {
     const result = pruneOrphanHarnessConfigDirs({
       records: records([]),
@@ -70,7 +70,7 @@ test("cc9a5f25 PROTECTION 1: an UNRECOGNISED id is RETAINED, not removed", async
     assert.equal(result.scanned, 1, "population: the candidate was not even examined");
     assert.deepEqual(result.removed, [], "an unrecognised id was REMOVED");
     assert.equal(result.retainedBy.tooYoung, 1);
-    assert.equal(existsSync(join(root, "acpx-opencode-unknown-id-zzz9")), true);
+    assert.equal(existsSync(join(root, "acpx-pi-unknown-id-zzz9")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -79,8 +79,8 @@ test("cc9a5f25 PROTECTION 1: an UNRECOGNISED id is RETAINED, not removed", async
 test("cc9a5f25 PROTECTION 2: a dir a LIVE PROCESS references is RETAINED", async () => {
   // Even with a closed record — the strongest form, because every other clause
   // says "remove" and only the live-process leg says no.
-  const root = fixture([{ name: "acpx-opencode-live-1", ageMs: 48 * HOUR }]);
-  const dir = join(root, "acpx-opencode-live-1");
+  const root = fixture([{ name: "acpx-pi-live-1", ageMs: 48 * HOUR }]);
+  const dir = join(root, "acpx-pi-live-1");
   try {
     const result = pruneOrphanHarnessConfigDirs({
       records: records([["live-1", true]]),
@@ -99,7 +99,7 @@ test("cc9a5f25 PROTECTION 2: a dir a LIVE PROCESS references is RETAINED", async
 test("cc9a5f25: an UNMEASURABLE /proc scan removes NOTHING and says so", async () => {
   // A refusal and a clean sweep both remove nothing. `notMeasured` is what tells
   // them apart, and without it "removed 0" reads like success.
-  const root = fixture([{ name: "acpx-opencode-closed-1", ageMs: 48 * HOUR }]);
+  const root = fixture([{ name: "acpx-pi-closed-1", ageMs: 48 * HOUR }]);
   try {
     for (const scan of [
       undefined,
@@ -115,7 +115,7 @@ test("cc9a5f25: an UNMEASURABLE /proc scan removes NOTHING and says so", async (
       assert.deepEqual(result.removed, [], "removed on an unmeasurable scan");
       assert.equal(result.scanned, 1, "the candidate population must still be reported");
     }
-    assert.equal(existsSync(join(root, "acpx-opencode-closed-1")), true);
+    assert.equal(existsSync(join(root, "acpx-pi-closed-1")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -125,8 +125,8 @@ test("cc9a5f25: an OPEN record retains its dir; a CLOSED one releases it", async
   // The two-sided control. A sweep that retained everything would pass every row
   // above and free nothing — this is the row that fails if it does.
   const root = fixture([
-    { name: "acpx-opencode-open-1", ageMs: 48 * HOUR },
-    { name: "acpx-opencode-closed-1", ageMs: 48 * HOUR },
+    { name: "acpx-pi-open-1", ageMs: 48 * HOUR },
+    { name: "acpx-pi-closed-1", ageMs: 48 * HOUR },
   ]);
   try {
     const result = pruneOrphanHarnessConfigDirs({
@@ -140,11 +140,11 @@ test("cc9a5f25: an OPEN record retains its dir; a CLOSED one releases it", async
     assert.equal(result.scanned, 2, "population");
     assert.deepEqual(
       result.removed.map((d) => d.split("/").pop()),
-      ["acpx-opencode-closed-1"],
+      ["acpx-pi-closed-1"],
       "exactly the closed record's dir must be removed",
     );
     assert.equal(result.retainedBy.openRecord, 1);
-    assert.equal(existsSync(join(root, "acpx-opencode-open-1")), true);
+    assert.equal(existsSync(join(root, "acpx-pi-open-1")), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -166,8 +166,8 @@ test("0bac6a00: an UNCLAIMED dir is NEVER removed — the age only picks which r
   // `unrecognised=0` as a RETAIN tally in the same run that removed a candidate whose
   // reason was `unrecognised`. One token named a retain bucket AND a remove path.
   const root = fixture([
-    { name: "acpx-opencode-orphan-young", ageMs: 1 * HOUR },
-    { name: "acpx-opencode-orphan-old", ageMs: 48 * HOUR },
+    { name: "acpx-pi-orphan-young", ageMs: 1 * HOUR },
+    { name: "acpx-pi-orphan-old", ageMs: 48 * HOUR },
   ]);
   try {
     const result = pruneOrphanHarnessConfigDirs({
@@ -180,8 +180,8 @@ test("0bac6a00: an UNCLAIMED dir is NEVER removed — the age only picks which r
     // NOTHING is removed, however old it is.
     assert.deepEqual(result.removed, [], "an unclaimed dir was removed");
     assert.equal(result.retained, 2);
-    assert.equal(existsSync(join(root, "acpx-opencode-orphan-old")), true);
-    assert.equal(existsSync(join(root, "acpx-opencode-orphan-young")), true);
+    assert.equal(existsSync(join(root, "acpx-pi-orphan-old")), true);
+    assert.equal(existsSync(join(root, "acpx-pi-orphan-young")), true);
 
     // ...but the age still SEPARATES them, so "sitting here for two days" does not read
     // the same as "written a minute ago". Both counters are asserted, so a change that
@@ -191,7 +191,7 @@ test("0bac6a00: an UNCLAIMED dir is NEVER removed — the age only picks which r
 
     // And the reason travels per candidate, not just as a tally — the per-candidate
     // line is what an operator reads.
-    const old = result.candidates.find((c) => c.dir.endsWith("acpx-opencode-orphan-old"));
+    const old = result.candidates.find((c) => c.dir.endsWith("acpx-pi-orphan-old"));
     assert.equal(old?.retain, true);
     assert.equal(old?.reason, "unrecognised");
     assert.ok((old?.unclaimedAgeMs ?? 0) >= 47 * HOUR, "the age must be reported with it");
@@ -233,7 +233,7 @@ test("cc9a5f25: the scanned env names match what the writer actually SETS", asyn
   const root = mkdtempSync(join(tmpdir(), "cc9a5f25-names-"));
   try {
     const observed = new Set<string>();
-    for (const id of ["opencode", "pi"] as const) {
+    for (const id of ["pi"] as const) {
       const env: NodeJS.ProcessEnv = {};
       applyHarnessConfigDir({
         env,

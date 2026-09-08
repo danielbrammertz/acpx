@@ -399,7 +399,7 @@ test("the pre-turn gate is opt-in and scoped to agent_message_chunk", () => {
   assert.deepEqual(legacyLast.Agent.content, [{ Text: "banner" }]);
 
   // 2. Pre-turn, but a DIFFERENT update kind -> still applied. The gate must not
-  //    widen into a general pre-turn mute: codex, claude and opencode all emit a
+  //    widen into a general pre-turn mute: codex and claude both emit a
   //    pre-turn `available_commands_update`, which is legitimate.
   const scoped = createSessionConversation("2026-09-06T23:00:00.000Z");
   const acpxState = recordSessionUpdate(

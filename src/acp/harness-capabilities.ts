@@ -30,7 +30,6 @@ import { acpAdapterKind } from "./agent-command.js";
  * ## Every cell traces to a measurement
  *
  * Citations in this file are one of:
- *   - `I1 R<n>` — FINDINGS-opencode, brick 13ef680d (measured 2026-09-03 on devbox)
  *   - `I2 R<n>` — FINDINGS-pi, brick c239d784 (measured 2026-09-03 on devbox)
  *   - `MAP §<n>` — CURRENT-STATE-capability-map, brick 2decfc57 (source reads, [V])
  *   - a `file:line` in this repo or in a deployed adapter under `/opt`.
@@ -80,7 +79,7 @@ import { acpAdapterKind } from "./agent-command.js";
  * the token with the real reason and cite the build you measured it on.
  */
 
-export const HARNESS_IDS = ["claude", "claude-pty", "codex", "opencode", "pi"] as const;
+export const HARNESS_IDS = ["claude", "claude-pty", "codex", "pi"] as const;
 
 export type HarnessId = (typeof HARNESS_IDS)[number];
 
@@ -103,7 +102,7 @@ export type ModelCatalogue = "acp" | "openrouter" | "static";
  *  - `acp`       — whatever the adapter advertises for the session
  *  - `per-model` — the advertised ladder depends on the CURRENTLY SELECTED model,
  *                  so it must be re-read after a model change and may be absent
- *                  entirely for a non-reasoning model (I1 R8)
+ *                  entirely for a non-reasoning model
  *  - `static`    — a fixed list, identical for every model
  */
 export type DepthLadder = "acp" | "per-model" | "static";
@@ -122,7 +121,7 @@ export type CredentialTier = "profile" | "box-provider" | "none";
  *                      {@link HarnessForkSupport.atIndexGranularityMessages} and
  *                      {@link HarnessForkSupport.atIndexRounding} so a consumer
  *                      can say WHERE it will land — see {@link resolveForkLandingIndex}.
- *  - `ignored`       — the request is accepted and SILENTLY full-copies (I1 R4)
+ *  - `ignored`       — the request is accepted and SILENTLY full-copies
  *  - `unsupported`   — refused loudly, so the caller knows
  *
  * The distinction `turn-granular` draws against `exact` is the whole reason this
@@ -135,9 +134,8 @@ export type ForkAtIndexSupport = "exact" | "turn-granular" | "ignored" | "unsupp
 /**
  * Which channel acpx uses to deliver the OS primer. Wider than
  * `PrimerChannel` in `./agent-command.ts` by one value: `config-file` is the
- * measured-available path for OpenCode (`opencode.json` `instructions`, I1 R9)
- * and Pi (`$PI_CODING_AGENT_DIR/APPEND_SYSTEM.md`, I2 R9), and B3 writes both —
- * see `src/acp/harness-config-dir.ts`.
+ * measured-available path for Pi (`$PI_CODING_AGENT_DIR/APPEND_SYSTEM.md`,
+ * I2 R9), and B3 writes it — see `src/acp/harness-config-dir.ts`.
  *
  * ⚠️ **THIS CELL IS A GATE, NOT ONLY A LABEL.** `applyHarnessConfigDir` gives a
  * per-session config dir — and therefore adapter ENVIRONMENT VARIABLES — to
@@ -153,7 +151,7 @@ export type HarnessPrimerChannel =
 
 /** A model's identity for the picker: the `(source, id)` pair (C5 §8.1). */
 export interface HarnessDefaultModel {
-  /** C5's model-source vocabulary: `openrouter | claude-subscription | claude-home | chatgpt | opencode-go`. */
+  /** C5's model-source vocabulary: `openrouter | claude-subscription | claude-home | chatgpt`. */
   source: string;
   /**
    * The model id, or the literal `default` when acpx pins nothing and the
@@ -172,7 +170,7 @@ export interface HarnessDefaultModel {
  *
  * ⚠️ **A PER-HARNESS PROPERTY, NOT A PER-SOURCE ONE — WHICH IS THE WHOLE REASON
  * THIS CELL EXISTS.** The obvious shortcut, `source === "openrouter" ? \`openrouter/${id}\`
- * : id`, is correct for pi and opencode and **silently wrong for codex**, whose
+ * : id`, is correct for pi and **silently wrong for codex**, whose
  * ids carry no prefix at all; and it would be wrong again the day claude's
  * `via-shim` path is wired, because the shim takes an unprefixed OpenRouter id.
  * A UI-side derivation on the source cannot express that, so it must be declared
@@ -200,11 +198,12 @@ export interface HarnessDepthSupport {
    *
    * This is not a detail — it is the single easiest thing in this program to get
    * subtly wrong (CONCEPTION §5.2). acpx reads the advertised options from the
-   * `session/new` SNAPSHOT (src/session/config-option-application.ts:252), and
-   * OpenCode advertises `effort` only when the CURRENTLY SELECTED model reasons,
-   * which the default model does not (I1 R8). So a depth mechanism that is
-   * routed in general still never fires there, and every test that pins a
-   * reasoning model at creation would pass while the flag silently did nothing.
+   * `session/new` SNAPSHOT (src/session/config-option-application.ts:252), so a
+   * harness that advertises `effort` only when the CURRENTLY SELECTED model
+   * reasons does not advertise it at all under a non-reasoning default. A depth
+   * mechanism that is routed in general still never fires there, and every test
+   * that pins a reasoning model at creation would pass while the flag silently
+   * did nothing.
    */
   configOptionAdvertisedAtSessionNew: boolean;
 }
@@ -287,8 +286,8 @@ export interface HarnessCapabilities {
   //
   // ⚠️ EACH IS A FACT ABOUT THE ADAPTER, NEVER ABOUT THE HARNESS'S NAME. That is
   // the whole point: acpx-ui answered all three with `agentType === "claude"`, so
-  // pi's and opencode's values were "measured" against no adapter at all and no
-  // adapter swap could ever change them (brick 82a2aafd, discharging 29b8ce8a).
+  // pi's values were "measured" against no adapter at all and no adapter swap
+  // could ever change them (brick 82a2aafd, discharging 29b8ce8a).
 
   /**
    * Can this harness clear a session's conversation IN PLACE, keeping the acpx
@@ -482,12 +481,11 @@ export type HarnessAdapterIdentity =
    *
    * ⚠️ **WHICH ADAPTERS THOSE ARE IS NOT FIXED — IT CHANGES WHEN A BOOTSTRAP
    * SHIPS.** Measured 2026-09-05, `info.json` carried `acpx`, `acpx-ui`,
-   * `claude-agent-acp`, `claude-pty-acp`, `codex-acp` and neither `pi-acp` nor
-   * `opencode`. **Re-measured on devbox 2026-09-06T23:00Z it carries `pi` and
+   * `claude-agent-acp`, `claude-pty-acp`, `codex-acp` and not `pi-acp`.
+   * **Re-measured on devbox 2026-09-06T23:00Z it carries `pi` and
    * `pi-acp` too** (`pi-acp` → `af431c6e`, `state: ok`, `ref: main`), because the
-   * `e50f051` bootstrap built the fork onto the fleet that morning (control:
-   * `opencode` is still absent, so this is a read of the file rather than of a
-   * default). So pi now has BOTH a resolvable commit and an npx fallback, and it
+   * `e50f051` bootstrap built the fork onto the fleet that morning. So pi now
+   * has BOTH a resolvable commit and an npx fallback, and it
    * needs a citation for each — see {@link HarnessMeasurementSource.cellOverrides}
    * and `test/harness-measurement-citations.test.ts` (brick 82a18653).
    *
@@ -631,12 +629,15 @@ export const MODEL_MECHANISMS_ROUTED_BY_ACPX: readonly ModelMechanism[] = [
   // and the adapter parses the bracket (MAP §4.2). A live re-pin is accepted and
   // takes effect from the next turn.
   "compose-into-id",
-  // B3: `applyRequestedModelIfAdvertised` routes `model` through
-  // `session/set_config_option` — the path `mode` already takes successfully
-  // (I1 D2's own contrast) — for a harness whose model IS a config option.
-  // Landed in the SAME commit as the branch, per the rule above; it is what
-  // flips `opencode.canSetModelLive` to true with no edit to the table.
-  "config-option",
+  // ⚠️ `config-option` IS DELIBERATELY ABSENT, AND RE-ADDING IT IS NOT A ONE-LINE
+  // CHANGE. acpx has NO model-as-config-option apply path: the branch, its
+  // validate-before-persist guard and the per-session `canSetModelLive`
+  // refinement were all removed with the last harness that needed them. Adding
+  // the entry back without landing that branch in the SAME commit re-creates the
+  // silent-brick defect verbatim — a `set model` that reports success, persists a
+  // value the adapter can never apply, and leaves the session unrecoverable
+  // INCLUDING by setting the model back. The trap and what a re-implementation
+  // must handle: brick://2b02ccd3.
 ];
 
 export const DEPTH_MECHANISMS_ROUTED_BY_ACPX: readonly DepthMechanism[] = [
@@ -673,21 +674,14 @@ export const ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX: readonly ArbitraryModelSupp
   // profile's own model on the profile's own account) is untouched.
   "via-shim",
   //
-  // ⚠️ `provisioned` IS NOT LISTED HERE EVEN THOUGH acpx NOW PROVISIONS FOR BOTH
-  // HARNESSES THAT DECLARE IT — and that is the correction, not an omission.
+  // ⚠️ `provisioned` IS NOT LISTED HERE EVEN THOUGH acpx PROVISIONS FOR THE
+  // HARNESS THAT DECLARES IT — and that is the correction, not an omission.
   // Provisioning is answered PER HARNESS, because each harness has its own config
   // format and its own merge semantics: pi's `models-store.json` merges by id
-  // (brick ef5999ca) and OpenCode's `provider.openrouter.models.<slug>`
-  // deep-merges (brick 4c7a38b2) — two separate measurements, taken separately,
-  // months of reasoning apart. Listing the KIND would have switched BOTH on from
-  // whichever measurement landed first, and one of opencode's pickers would have
-  // offered a band acpx did not provision for.
-  //
-  // ⚠️ THE FACT THAT BOTH ANSWERS CAME BACK `merge` IS NOT A REASON TO COLLAPSE
-  // THIS BACK INTO A KIND LIST. The next harness to declare `provisioned` would
-  // be switched on by a measurement taken against a config format it does not
-  // share. The per-harness array is the seam; two agreeing data points do not
-  // retire it.
+  // (brick ef5999ca), a measurement taken against pi's format alone. Listing the
+  // KIND would switch a harness on from a measurement taken against a config
+  // format it does not share, and its picker would offer a band acpx did not
+  // provision for. The per-harness array is the seam.
 ];
 
 /**
@@ -715,8 +709,7 @@ export const ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX: readonly ArbitraryModelSupp
  * an edit lands.** That is the whole point; do not re-inline either read.
  *
  * ⇒ **An entry added here PROVISIONS AT SPAWN TIME immediately.** It needs its own
- * merge-vs-replace measurement first — the argument, and the exact measurement
- * that licenses `"opencode"`, is in the block above and in
+ * merge-vs-replace measurement first — the argument is in the block above and in
  * `test/harness-capabilities.test.ts`'s "the SHIPPED per-harness provisioning
  * list …" row. Pinned in BOTH directions, on the shipped defaults and through a
  * real adapter spawn, by `test/harness-config-dir-spawn-env.test.ts` →
@@ -727,26 +720,6 @@ export const ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR: readonly HarnessId[] = [
   // replaces, new id appends, and `writePiModelsStore` copies the box's own
   // catalogue forward before upserting.
   "pi",
-  // opencode — MEASURED 2026-09-06, brick 4c7a38b2,
-  // `verification/evidence/B4-M1-opencode-config-merge-vs-replace.md`. OpenCode
-  // 1.18.28 DEEP-MERGES `provider.openrouter.models.<slug>: {}`; it does not
-  // replace. Both layers, on a scratch rig, each with its own control:
-  //
-  //   - over OPENCODE'S OWN catalogue entry: `moonshotai/kimi-k2-thinking` kept
-  //     `capabilities.reasoning: true` (the field whose loss would have silently
-  //     broken the advertised `effort` ladder — the exact hazard this array's
-  //     previous comment named), plus name, family, cost, limit, release_date. A
-  //     restore run with the config removed again returned the baseline exactly.
-  //   - over a PRE-EXISTING USER ENTRY: a project-level `opencode.json` setting
-  //     `name: "USER-MARKER-KIMI"` SURVIVED a session config declaring the same
-  //     slug as `{}`. So provisioning at spawn time does not clobber a user's
-  //     own provider config.
-  //
-  // The REPLACE outcome was not merely "reachable in principle" — it was rendered:
-  // a bare `{}` on a slug OpenCode does not know produces a visible stub
-  // (`reasoning: false`, cost 0, `limit.context` 0, empty family), which is
-  // exactly what a replace would have made of the subject. It did not.
-  "opencode",
 ];
 
 /**
@@ -1236,122 +1209,6 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
       "acpx has no live model path for this harness; recreate the session with a different --model.",
   },
 
-  opencode: {
-    id: "opencode",
-    measuredAgainst: {
-      // Pinned by brick 0ededc52; before that the command carried NO version and
-      // resolved `latest` at spawn on every box independently, so these claims
-      // named no build at all — the defect this field exists for, in its purest
-      // form. The pin is BARE, not `^1.18.28`: opencode-ai is a 1.x package and a
-      // caret there is a RANGE (see `ACP_ADAPTER_PACKAGE_RANGES`).
-      adapter: {
-        kind: "package-range",
-        spec: "opencode-ai@1.18.28",
-        // ⚠️ NOT A LESSER CITATION — opencode is not a bootstrapped component.
-        // Measured: `/workspace/.runtime/info.json` carries acpx, acpx-ui,
-        // claude-agent-acp, claude-pty-acp and codex-acp, and NEITHER opencode
-        // NOR pi-acp (control: `has("codex-acp")` -> true). It is npx-resolved at
-        // spawn, so there is no commit to resolve to and `package-range` is the
-        // honest form for what acpx actually resolves.
-        cannotDistinguish:
-          "the exact published tarball behind the pin — npx resolves 1.18.28 from the registry at spawn, so two boxes agreeing on this spec are not thereby proven to have run identical bytes. A commit becomes citable only if opencode is ever bootstrapped into /opt like the adapters above.",
-      },
-      source: "ACP_ADAPTER_PACKAGE_RANGES.opencode in src/agent-registry.ts",
-    },
-    label: "opencode",
-    // No `AuthMode` maps to a fourth harness — the mapping is a closed switch,
-    // not a table (MAP §2.2). Credentials reach OpenCode as box-provider env.
-    supportsProfiles: false,
-    supportsOutputStyles: false, // not an OpenCode concept (I1 R11 — configOptions are model/mode/effort)
-    arbitraryModelSupport: "provisioned", // I1 R6 — declare `provider.openrouter.models.<id>` in opencode.json
-    model: {
-      // I1 R5/R11: model is an ACP config option (`configId: "model"`, 401
-      // options, `type: select`), set via `session/set_config_option`. NO ACP
-      // `models` array and NO `session/set_model`.
-      mechanism: "config-option",
-      catalogue: "acp", // the whole roster is enumerable from the handshake, with display names (I1 R11)
-      // MEASURED on a live turn by the opencode-models lane (brick 4c7a38b2):
-      // the id acpx sends equals `providerID + "/" + modelID`, i.e. the
-      // catalogue row's `source + "/" + id`. Corroborated by this box's own
-      // session store — e.g. `openrouter/z-ai/glm-5.3-flash`.
-      idForm: "source-prefixed",
-    },
-    depth: {
-      // I1 R8: reasoning effort is OpenCode's "variant", exposed as the ACP
-      // config option `effort` (category `thought_level`).
-      mechanism: "config-option",
-      // I1 R8: the ladder differs per model (`low/high/max` vs `low/medium/high`)
-      // and is ABSENT for a non-reasoning model — and it is not advertised at
-      // `session/new` with the default model, which is why acpx must re-read the
-      // advertised options AFTER applying the model.
-      ladder: "per-model",
-      // I1 R8, and this is the cell that makes `opencode.canSetDepthLive` false
-      // today: at `session/new` with the default (non-reasoning) model the
-      // `effort` option is ABSENT, so acpx's gate — which reads that snapshot —
-      // is false and `--reasoning-effort` never applies. Flips to true when the
-      // apply path re-reads the advertised options after applying the model.
-      configOptionAdvertisedAtSessionNew: false,
-    },
-    credential: { tier: "box-provider", providers: ["openrouter"] }, // I1 R6 — OPENROUTER_API_KEY alone activates it
-    // I1 R4: `sessionCapabilities: {close, fork, list, resume}` — the full fork
-    // works today through acpx's generic path. But `--at-index N` is SILENTLY
-    // ignored: the probe recorded `forkedAtMessageIndex: 2` while OpenCode's own
-    // DB showed all 6 source messages copied. A truncation that did not happen.
-    fork: { supported: true, atIndex: "ignored" },
-    midTurnSteering: false, // src/acp/mid-turn-injection-support.ts:5-20 — not on the allow-list (I1 R3)
-    // I1 R9: `_meta.systemPrompt.append` is accepted and SILENTLY IGNORED. The
-    // working path is `opencode.json` `"instructions"` in a per-session config
-    // dir — which B3 now writes (src/acp/harness-config-dir.ts), so the primer
-    // reaches OpenCode in turn 1 and across a resume. THIS CELL IS THE GATE: only
-    // a `config-file` harness is given a config dir, which is what keeps claude /
-    // claude-pty / codex adapter environments untouched.
-    primerChannel: "config-file",
-    usageReporting: true, // I1 R12 — `usage_update` over ACP plus per-session cost/tokens in its store
-    promptImages: true, // I1 R11 — `promptCapabilities: {embeddedContext:true, image:true}`
-    // I1 R7: with no OpenRouter key the harness's own default is the Zen free
-    // tier (`opencode/big-pickle`); with the box key present the intended door
-    // is OpenRouter. acpx pins nothing, hence the `default` sentinel.
-    // NOT MEASURED. OpenCode has its own slash-command surface in its TUI, but over
-    // ACP acpx sends prompt text and nobody has checked whether the adapter routes
-    // `/clear` to it or passes it to the model as a message. I1 R3/R11 enumerated
-    // OpenCode's ACP surface (configOptions model/mode/effort) and no session-clear
-    // method appeared, which is an absence in an enumeration made for another
-    // question — not a probe of this one.
-    supportsSessionClear: false,
-    sessionClearBlockedReason:
-      "not measured: no probe has sent /clear as a prompt through the opencode ACP adapter to see whether OpenCode executes it as a slash command.",
-    // MEASURED, and it is a fact about the CREDENTIAL MECHANISM, not the name:
-    // OpenCode's credential is the BOX's provider key in the adapter's environment
-    // (`credential.tier: "box-provider"`, OPENROUTER_API_KEY alone activates it,
-    // I1 R6) — there is no per-session credential object for acpx to move. Two
-    // independent refusals confirm it: no `AuthMode` maps to this adapter at all
-    // (`adapterForAuthMode` is a closed switch over {claude, claude-pty, codex},
-    // src/config/profiles.ts:145-156, MAP §2.2 "a fourth harness cannot be given a
-    // credential today"), and `assertClaudeFamilySeam`
-    // (src/runtime/engine/account-seam.ts:111-120) refuses the record before any
-    // work. I1 D1 measured what happens when that gate is missing: a Claude
-    // account_switch written onto an OpenCode record makes the resume gate demand a
-    // Claude SDK transcript JSONL that OpenCode can never produce, and every turn
-    // after the first dies.
-    canSetCredentialLive: false,
-    credentialLiveBlockedReason:
-      "OpenCode authenticates from the box's provider key in the adapter environment, not from a per-session credential acpx can move; changing it means a new session on a box configured with the other key.",
-    // MEASURED at this commit: an OpenCode record never enters the failover engine,
-    // so the degrade cannot reach it. `selectedProfileId`
-    // (src/runtime/engine/failover.ts:520-554) returns undefined for a non-Claude
-    // adapter BEFORE reading any stored profile, so `currentProfile` is undefined
-    // and `failoverEnabledForRecord` (:582-590) is false. ⚠️ This is a POST-FIX
-    // claim: I1 D1 measured the opposite on an older acpx, where the codex-only
-    // carve-out had not been generalised and the registry-default Claude
-    // subscription leaked onto OpenCode records. Cite the commit, not the finding.
-    supportsModelDegrade: false,
-    modelDegradeBlockedReason:
-      "acpx's Fable→Opus degrade runs only inside the Claude-subscription failover engine, which a non-Claude adapter never enters.",
-    defaultModel: { source: "openrouter", id: "default" },
-    liveModelChangeBlockedReason:
-      "OpenCode selects its model through session/set_config_option, which acpx does not route yet. acpx's generic path persists a value it can never apply and leaves the session unrecoverable (FINDINGS-opencode D2).",
-  },
-
   pi: {
     id: "pi",
     measuredAgainst: {
@@ -1592,12 +1449,11 @@ export class ForkAtIndexUnsupportedError extends Error {
  * (Three `brick note`s on 276594c2, 2026-09-04, correcting that brick's own
  * stale title, which still says codex is unsupported.)
  *
- * - `'ignored'` — **OpenCode**. `sessions copy --at-index N` returns success and
- *   the adapter SILENTLY FULL-COPIES: I1 R4 measured acpx recording
- *   `forkedAtMessageIndex: 2` while OpenCode's own DB held all 6 source
- *   messages. A truncation that did not happen, displayed as if it had. Note the
- *   PLAIN fork is fine and stays available (`fork.supported` is true) — only the
- *   truncating variant lies.
+ * - `'ignored'` — **no harness today.** The branch exists for an adapter that
+ *   accepts `sessions copy --at-index N`, returns success, and SILENTLY
+ *   FULL-COPIES — a truncation that did not happen, displayed as if it had.
+ *   Such a harness's PLAIN fork stays available (`fork.supported` is true); only
+ *   the truncating variant lies, which is what the refusal below is scoped to.
  * - `'unsupported'` — **no harness today.** ⚠️ Pi occupied this branch while
  *   acpx launched UPSTREAM pi-acp, which advertises no fork capability at all
  *   (the string `fork` occurs zero times in 0.0.26 and 0.0.33, I2 R4). The
@@ -1690,17 +1546,9 @@ export function resolveHarnessCapabilities(
   const capabilities: HarnessCapabilities = { ...declared };
 
   // A config-option mechanism is only live if THIS session advertises the option
-  // it needs. OpenCode's `effort` is the load-bearing case: it is advertised
-  // only when the currently-selected model reasons, and it is absent at
-  // `session/new` with the default model (I1 R8).
-  if (
-    capabilities.canSetModelLive &&
-    HARNESS_FACTS[id].model.mechanism === "config-option" &&
-    !advertisesSelectableOption(options, "model")
-  ) {
-    capabilities.canSetModelLive = false;
-    capabilities.liveModelChangeReason = HARNESS_FACTS[id].liveModelChangeBlockedReason;
-  }
+  // it needs. A per-model `effort` ladder is the load-bearing case: it is
+  // advertised only when the currently-selected model reasons, so it is absent
+  // at `session/new` under a non-reasoning default.
   if (
     capabilities.canSetDepthLive &&
     HARNESS_FACTS[id].depth.mechanism === "config-option" &&
@@ -1725,11 +1573,11 @@ export function resolveHarnessCapabilities(
  * it had been ignored.
  *
  * ⚠️ Deliberately **not** `canSetDepthLive`. That answers a narrower question —
- * *can this SESSION change depth right now* — and is false for opencode purely
- * because the default (non-reasoning) model does not advertise `effort` at
- * `session/new`. Warning "ignored" on that basis would be wrong the moment a
- * reasoning model is pinned, which is exactly the contradiction being removed.
- * The question here is the mechanism's, not the session's.
+ * *can this SESSION change depth right now* — which a harness with a per-model
+ * ladder answers `false` purely because its default (non-reasoning) model does
+ * not advertise `effort` at `session/new`. Warning "ignored" on that basis would
+ * be wrong the moment a reasoning model is pinned. The question here is the
+ * mechanism's, not the session's.
  *
  * `false` for an id acpx cannot route: codex (`compose-into-id` — depth rides
  * inside the model id, so the depth CONTROL cannot move it) and pi (`mode` —
@@ -1797,8 +1645,8 @@ export function harnessIdForAgentCommand(agentCommand: string | undefined): Harn
  *
  * ⚠️ `undefined` means *"acpx cannot say"* and the caller must fall through to
  * the pre-existing generic path — NOT substitute a default mechanism. An
- * unrecognised adapter that got routed down OpenCode's config-option arm would
- * be handed a `session/set_config_option` it never advertised.
+ * unrecognised adapter that got routed down the config-option arm would be
+ * handed a `session/set_config_option` it never advertised.
  */
 export function modelMechanismForAgentCommand(
   agentCommand: string | undefined,

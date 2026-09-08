@@ -158,10 +158,10 @@ export async function setSessionModel(
   options: SessionSetModelOptions,
 ): Promise<SessionSetModelResult> {
   const record = await resolveSessionRecord(options.sessionId);
-  // ⚠️ ORDER IS THE FIX (FINDINGS-opencode D2, row `G1-OC-04`). This refusal runs
+  // ⚠️ ORDER IS THE FIX. This refusal runs
   // BEFORE `trySetModelOnRunningOwner` / `runSessionSetModelDirect`, so a harness
   // whose model mechanism acpx cannot route never gets a value persisted it can
-  // never apply — which is what made an OpenCode session unrecoverable, including
+  // never apply — which is what made such a session unrecoverable, including
   // by setting the model back. Do not move it below the apply.
   assertLiveModelChangeRoutable(record);
   assertRecordModelSupported({

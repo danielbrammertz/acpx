@@ -8,15 +8,13 @@ import { AcpClient } from "../src/acp/client.js";
 
 // F-10: the CLI verb's own path did not dispatch on mechanism.
 //
-// Measured on staging at the merged F-9 build, on a REAL OpenCode session:
-//   turn before : rc=0, 155 chars, ALPHA-OK   (control)
-//   set model   : rc=1, LOUD — "Agent rejected session/set_model … -32602"
-//   turn after  : rc=0,  87 chars, BETA-OK    (the authoritative half)
-//   record      : session_options.model ABSENT · current_model_id ABSENT
-//
-// F-9's floor held — the session was not bricked and nothing was persisted. But
-// the descriptor said `mechanism=config-option` while the error named
-// `session/set_model`: the GENERIC mechanism. The verb never dispatched.
+// ⚠️ THE ROW THAT PROVED THE DISPATCH IS GONE, AND SO IS THE DISPATCH. It needed
+// a harness whose model is a config option, and none is declared any more — the
+// arm was removed with the last one (brick://2b02ccd3). What survives here is the
+// GUARDRAIL below: `setSessionModel` must keep emitting `session/set_model` for
+// the harnesses that do use it. If a per-mechanism dispatch ever returns, it
+// belongs inside `setSessionModel` — never re-inlined into the callers, which is
+// the hand-maintained-list failure F-10 was.
 //
 // ⚠️ THE CALL IS THE DISCRIMINATOR; THE OUTCOME IS NOT. A test that only checks
 // "the next turn completes" PASSES ON THE BROKEN PATH TOO, because the loud
@@ -82,30 +80,10 @@ async function methodsFor(
   }
 }
 
-test("F-10: a config-option harness NEVER emits session/set_model from the verb path", async () => {
-  // The mock advertises whatever it advertises; what matters is that for an
-  // opencode-classified command the client does NOT reach for set_model.
-  const { seen, created } = await methodsFor("opencode-ai", async (client, sessionId) => {
-    await client.setSessionModel(sessionId, "definitely-not-advertised-zzz9");
-  });
-  // It must have REFUSED rather than sent set_model — and the refusal names the
-  // config-option mechanism, which is what proves the dispatch happened.
-  const outcome = seen[0] ?? "";
-  assert.match(outcome, /^THREW:/, `expected a refusal, got ${outcome}`);
-  assert.doesNotMatch(
-    outcome,
-    /session\/set_model/,
-    "the verb emitted session/set_model for a config-option harness — F-10 is back",
-  );
-  assert.match(outcome, /Nothing was written/, "the refusal must state the session is unchanged");
-  // CONTROL: the session was really created, so the row examined a live client
-  // rather than failing before it got anywhere.
-  assert.ok(created.sessionId, "no session was created — this row examined nothing");
-});
-
 test("F-10 GUARDRAIL: claude and codex still emit session/set_model", async () => {
-  // The positive control for the row above. If the dispatch were unconditional,
-  // "no set_model" would be true everywhere and the first row would prove nothing.
+  // The surviving half of F-10: the generic path must still reach the wire for
+  // every harness that uses it. If this ever goes quiet,  has
+  // grown a branch that swallows the call.
   for (const token of ["claude-agent-acp", "codex-acp"]) {
     const { seen, created } = await methodsFor(token, async (client, sessionId) => {
       await client.setSessionModel(sessionId, "some-model");

@@ -1011,7 +1011,7 @@ test("importSession accepts a pi archive whose command is the DEPLOYED /opt fork
 // deployed command AT ALL (they looked for `@agentclientprotocol/…`, absent from
 // the `/opt` path) — so a boundary-class widening would have fixed pi and left
 // these two exactly as broken. Table-driven so the fifth adapter cannot be
-// forgotten the way pi and opencode were.
+// forgotten the way pi was.
 for (const [agentName, expectedAgentCommand, deployedForkCommand] of [
   [
     "claude",
@@ -1024,7 +1024,7 @@ for (const [agentName, expectedAgentCommand, deployedForkCommand] of [
     "npx -y @agentclientprotocol/claude-pty-acp@^0.1.0",
     "node /opt/claude-pty-acp/dist/index.js",
   ],
-  ["opencode", "npx -y opencode-ai@1.18.28 acp", "node /opt/opencode-ai/dist/index.js"],
+  ["pi", "npx pi-acp@^0.0.33", "node /opt/pi-acp/dist/index.js"],
 ] as const) {
   test(`importSession accepts a ${agentName} archive whose command is the deployed /opt fork path`, async () => {
     await withTempHome("acpx-export-import-", async (homeDir) => {

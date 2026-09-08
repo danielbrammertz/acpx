@@ -146,7 +146,7 @@ test("0bac6a00 §4: the root resolves argument > env > tmpdir(), and the DEFAULT
 });
 
 test("0bac6a00 §4: a BLANK root is treated as absent, never as a relative path", () => {
-  // `join("", "acpx-opencode-x")` is RELATIVE — a sweep rooted wherever the CLI
+  // `join("", "acpx-pi-x")` is RELATIVE — a sweep rooted wherever the CLI
   // was invoked from. Blank must fall through to the default, not become "".
   assert.equal(resolveHarnessConfigDirRoot("   ", {}), tmpdir());
   assert.equal(
@@ -172,8 +172,8 @@ test("0bac6a00 §4: `sessions prune` sweeps the ISOLATED root and leaves an iden
       // it sits in. That is what makes this a scoping measurement rather than a
       // classification one.
       await seedClosedSession(homeDir, "0bac6a00-inside");
-      const inside = plantAgedConfigDir(isolated, "acpx-opencode-0bac6a00-inside");
-      const beyond = plantAgedConfigDir(outside, "acpx-opencode-0bac6a00-inside");
+      const inside = plantAgedConfigDir(isolated, "acpx-pi-0bac6a00-inside");
+      const beyond = plantAgedConfigDir(outside, "acpx-pi-0bac6a00-inside");
 
       const result = await runCliUnguarded(
         // ⚠️ THE VERB, NOT `prune`. `prune` DELETES the closed record first, and since
@@ -208,9 +208,9 @@ test("0bac6a00 §4: `--config-dir-root` reaches the sweep and OUTRANKS the envir
     const envRoot = isolatedHarnessConfigDirRoot();
     const flagRoot = mkdtempSync(join(tmpdir(), "acpx-0bac6a00-flag-root-"));
     try {
-      const viaEnv = plantAgedConfigDir(envRoot, "acpx-opencode-0bac6a00-env");
+      const viaEnv = plantAgedConfigDir(envRoot, "acpx-pi-0bac6a00-env");
       await seedClosedSession(homeDir, "0bac6a00-flag");
-      const viaFlag = plantAgedConfigDir(flagRoot, "acpx-opencode-0bac6a00-flag");
+      const viaFlag = plantAgedConfigDir(flagRoot, "acpx-pi-0bac6a00-flag");
 
       const result = await runCliUnguarded(
         // The VERB, not prune: prune deletes the record first and the dir then reads

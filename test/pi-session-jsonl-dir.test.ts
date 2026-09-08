@@ -192,10 +192,10 @@ test("ac86eb34: the mangling matches pi's, including the drive-colon case", () =
   }
 });
 
-test("ac86eb34 GUARDRAIL: opencode and the Claude family never gain the variable", () => {
+test("ac86eb34 GUARDRAIL: the Claude family and codex never gain the variable", () => {
   const { root, box, cwd } = fixture();
   try {
-    for (const id of ["claude", "claude-pty", "codex", "opencode"] as const) {
+    for (const id of ["claude", "claude-pty", "codex"] as const) {
       const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: box, HOME: root };
       applyHarnessConfigDir({
         env,

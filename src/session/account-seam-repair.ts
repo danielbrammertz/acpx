@@ -38,7 +38,7 @@ import { listSessions, sessionBaseDir, writeSessionRecord } from "./persistence.
  *   skipped rather than silently swept.
  * - **It does not clear `auto_failover`**, which CONCEPTION §5.5 also lists as
  *   Claude-family. That field currently carries the fleet's
- *   `set auto-failover off` workaround — the only thing keeping opencode and pi
+ *   `set auto-failover off` workaround — the only thing keeping pi
  *   sessions alive until this gate deploys — so clearing it would re-wedge
  *   exactly the sessions this sweep exists to free (WS-core, 2026-09-04).
  * - It does not clear `auto_subscription`, which was not observed on any record
@@ -71,7 +71,7 @@ export interface AccountSeamRepairEntry {
   /**
    * `auto_failover` was present and was DELIBERATELY LEFT. It is Claude-family
    * by §5.5, but the fleet's `acpx <agent> set auto-failover off` workaround is
-   * what keeps opencode and pi sessions alive until this fix ships — stripping it
+   * what keeps pi sessions alive until this fix ships — stripping it
    * would re-wedge the very sessions this sweep exists to free (WS-core,
    * 2026-09-04). It stops mattering once the gate is deployed; it is not this
    * sweep's job to decide that moment.
@@ -372,8 +372,8 @@ function formatFieldCounts(result: AccountSeamRepairResult): string[] {
   return [
     `  fields: ${cleared.join(", ")}`,
     `  auto_failover DELIBERATELY RETAINED on ${retainedFailover} record(s) — it is Claude-family ` +
-      `by CONCEPTION §5.5, but it is also the "set auto-failover off" workaround keeping opencode ` +
-      `and pi sessions alive; clearing it would re-wedge the sessions this sweep frees.`,
+      `by CONCEPTION §5.5, but it is also the "set auto-failover off" workaround keeping pi ` +
+      `sessions alive; clearing it would re-wedge the sessions this sweep frees.`,
     `  auto_subscription left alone on ${retainedSubscription} record(s) — not part of the measured ` +
       `wedged population; this sweep does not widen to fields nobody has seen.`,
   ];

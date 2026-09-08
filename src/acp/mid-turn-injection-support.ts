@@ -13,8 +13,8 @@ import { harnessIdForAgentCommand, HARNESS_FACTS } from "./harness-capabilities.
  * against each other for every harness.
  *
  * ⚠️ The ANSWERS ARE UNCHANGED, deliberately. claude / claude-pty / codex declare
- * `midTurnSteering: true` and opencode / pi declare `false` (I1 R3, I2 R3 — neither
- * adapter supports it). This is a change of SOURCE, not of behaviour: it must stay
+ * `midTurnSteering: true` and pi declares `false` (I2 R3 — its adapter does not
+ * support it). This is a change of SOURCE, not of behaviour: it must stay
  * that way, because widening steering to a harness that cannot absorb an injected
  * prompt is how a turn wedges open with no terminal response.
  *

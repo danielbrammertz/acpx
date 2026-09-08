@@ -534,9 +534,9 @@ test("validation is skipped for the raw --agent escape hatch and for unenumerate
 
 // ── brick a5eddb8d: the create-time pre-flight for PROVISIONING harnesses ─────
 //
-// For pi and opencode acpx WRITES the requested id into the harness's own
-// catalogue before `session/new` (`client.ts:998` → `harness-config-dir.ts`
-// `:1259-1266` / `:1355-1356`), so the harness advertises whatever was asked for
+// For a provisioning harness acpx WRITES the requested id into the harness's own
+// catalogue before `session/new` (`client.ts` → `harness-config-dir.ts`
+// `writePiConfigDir`), so the harness advertises whatever was asked for
 // and the wire check ends up validating acpx's own write. The cached OpenRouter
 // catalogue is therefore not a proxy for the advertised list — it is the only
 // authority, and this is the only place the question can be asked.
@@ -544,7 +544,6 @@ test("validation is skipped for the raw --agent escape hatch and for unenumerate
 /** Both launch forms, so the tests never depend on whether `/opt/pi-acp` exists on the box. */
 const PI_COMMAND = "node /opt/pi-acp/dist/index.js";
 const PI_COMMANDS = [PI_COMMAND, "npx pi-acp@^0.0.33"];
-const OPENCODE_COMMAND = "npx -y opencode-ai@1.18.28 acp";
 
 test("a provisioning harness resolves `openrouter/<id>` FOR THE LOOKUP — the form that actually works", () => {
   // ⚠️ THE REGRESSION THIS PINS. pi's wire form is `openrouter/<id>`. Without the
@@ -595,7 +594,7 @@ test("a bogus slug is REFUSED in BOTH forms — the residual brick a5eddb8d was 
 
 test("the `openrouter/` resolution is gated on the DESCRIPTOR — codex is untouched by it", () => {
   // The charter's trap in the other direction: `source + "/" + id` is right for pi
-  // and opencode and silently WRONG for codex, whose ids are bare `family[effort]`.
+  // and silently WRONG for codex, whose ids are bare `family[effort]`.
   // Nothing here may leak into a non-provisioning harness.
   const error = caught(() =>
     validateModelSelection(catalogueWith(), {
@@ -616,11 +615,11 @@ test("a provisioning harness is VALIDATED but NEVER SUBSTITUTED — the flag rea
   const previous = process.env.ACPX_STATE_HOME;
   process.env.ACPX_STATE_HOME = home;
   try {
-    for (const agentCommand of [...PI_COMMANDS, OPENCODE_COMMAND]) {
+    for (const agentCommand of PI_COMMANDS) {
       for (const model of ["moonshotai/kimi-k3", "openrouter/moonshotai/kimi-k3"]) {
         assert.equal(
           await validateSessionModelFlags({
-            agentName: agentCommand === OPENCODE_COMMAND ? "opencode" : "pi",
+            agentName: "pi",
             agentCommand,
             hasRawAgentOverride: false,
             model,
@@ -634,7 +633,7 @@ test("a provisioning harness is VALIDATED but NEVER SUBSTITUTED — the flag rea
       // `undefined`s above are a decision to leave the flag alone, not a no-op gate.
       await assert.rejects(
         validateSessionModelFlags({
-          agentName: agentCommand === OPENCODE_COMMAND ? "opencode" : "pi",
+          agentName: "pi",
           agentCommand,
           hasRawAgentOverride: false,
           model: "deepseek/zzq7-nope",
@@ -655,7 +654,7 @@ test("a provisioning harness is VALIDATED but NEVER SUBSTITUTED — the flag rea
 
 test("`--reasoning-effort` is NOT judged for a provisioning harness", async () => {
   // The OpenRouter row's ladder comes from its `supported_parameters`; whether that
-  // describes pi's and opencode's depth MECHANISM is UNMEASURED, so judging it there
+  // describes pi's depth MECHANISM is UNMEASURED, so judging it there
   // could only produce a false refusal on a create that works today. Named limitation
   // (brick a5eddb8d §7.3), pinned so it cannot be silently "tidied" into a refusal.
   const home = stateHome();
@@ -731,12 +730,12 @@ test("the validated set is PINNED against the capability table — a new harness
   const known = listHarnessCapabilities().map((harness) => harness.id);
   assert.deepEqual(
     known.filter((id) => !isModelValidatedAgent(id)).toSorted(),
-    ["opencode", "pi"],
+    ["pi"],
     "a harness acpx classifies is either native-row-validated by NAME or provisioning-validated by COMMAND",
   );
   // …and the two that are not validated by name ARE validated once their command is
   // given, so no harness in the table is left ungated.
-  for (const agentCommand of [...PI_COMMANDS, OPENCODE_COMMAND]) {
+  for (const agentCommand of PI_COMMANDS) {
     assert.equal(isModelValidatedAgent(undefined, agentCommand), true, agentCommand);
   }
   // NEGATIVE CONTROL: a command the descriptor does not classify stays ungated.

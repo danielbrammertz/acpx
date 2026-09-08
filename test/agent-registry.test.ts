@@ -152,7 +152,6 @@ test("listBuiltInAgents preserves the required example prefix and alphabetical t
     "kilocode",
     "kimi",
     "kiro",
-    "opencode",
     "qoder",
     "qwen",
     "trae",
@@ -241,13 +240,13 @@ test("82a18653: listAgentLaunchForms is BOX-INDEPENDENT — pi reports both arms
 test("82a18653: listAgentLaunchForms reports a single form for the constant entries", () => {
   assert.deepEqual(listAgentLaunchForms("codex"), ["node /opt/codex-acp/dist/index.js"]);
   assert.deepEqual(listAgentLaunchForms("claude"), ["node /opt/claude-agent-acp/dist/index.js"]);
-  assert.deepEqual(listAgentLaunchForms("opencode"), [AGENT_REGISTRY.opencode]);
+  assert.deepEqual(listAgentLaunchForms("pi"), [AGENT_REGISTRY.pi]);
   // ⚠️ The `/opt` three are enumerated from the SHIPPED constant, not from the
   // env seam, so an operator override cannot make the shipped pin table or the
   // shipped citations look wrong. `agentCommandEnvSeam` is how a caller learns
   // the override exists.
   assert.equal(agentCommandEnvSeam("codex"), "ACPX_CODEX_ACP_COMMAND");
-  assert.equal(agentCommandEnvSeam("opencode"), undefined);
+  assert.equal(agentCommandEnvSeam("pi"), undefined);
   // POPULATION / NEGATIVE: an unknown agent enumerates nothing rather than
   // inventing a form.
   assert.deepEqual(listAgentLaunchForms("no-such-agent"), []);

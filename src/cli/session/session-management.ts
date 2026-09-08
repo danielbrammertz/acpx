@@ -183,9 +183,9 @@ async function createSessionRecordWithClient(
   // "what does this session advertise?" must ask it of the advertisement that
   // exists AFTER the model was applied, never of the `session/new` snapshot.
   //
-  // OpenCode advertises the `effort` option ONLY when the currently-selected
-  // model reasons, and at `session/new` with the default model it is ABSENT
-  // (I1 R8). Read the snapshot and `--reasoning-effort` silently never fires —
+  // A per-model ladder advertises the `effort` option ONLY when the
+  // currently-selected model reasons, so at `session/new` under a non-reasoning
+  // default it is ABSENT. Read the snapshot and `--reasoning-effort` silently never fires —
   // and, because `session/set_config_option` answers with a refreshed
   // advertisement, the corrected reading costs no extra round-trip.
   //

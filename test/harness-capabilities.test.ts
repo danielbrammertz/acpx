@@ -35,7 +35,6 @@ const DEFAULT_AGENT_COMMANDS: Record<HarnessId, string> = {
   claude: "node /opt/claude-agent-acp/dist/index.js",
   "claude-pty": "node /opt/claude-pty-acp/dist/index.js",
   codex: "node /opt/codex-acp/dist/index.js",
-  opencode: AGENT_REGISTRY.opencode,
   pi: AGENT_REGISTRY.pi,
 };
 
@@ -50,13 +49,13 @@ function selectOption(id: string): SessionConfigOption {
   } as unknown as SessionConfigOption;
 }
 
-test("the table declares exactly the five program harnesses", () => {
-  assert.deepEqual([...HARNESS_IDS], ["claude", "claude-pty", "codex", "opencode", "pi"]);
+test("the table declares exactly the program harnesses", () => {
+  assert.deepEqual([...HARNESS_IDS], ["claude", "claude-pty", "codex", "pi"]);
   assert.deepEqual(
     listHarnessCapabilities().map((capability) => capability.id),
     [...HARNESS_IDS],
   );
-  assert.equal(isHarnessId("opencode"), true);
+  assert.equal(isHarnessId("pi"), true);
   assert.equal(isHarnessId("gemini"), false);
 });
 
@@ -69,9 +68,11 @@ test("the table declares exactly the five program harnesses", () => {
 // derivation from a literal.
 
 test("canSetModelLive flips with the routed-mechanism list, in both directions", () => {
-  // opencode's declared mechanism, with acpx NOT routing it -> false (today)
+  // a mechanism acpx does NOT route -> false. `config-option` is that mechanism
+  // today: acpx has no model-as-config-option apply path (brick://2b02ccd3).
   assert.equal(deriveCanSetModelLive("config-option", ["set-model"]), false);
-  // the same mechanism, with acpx routing it -> true (after B3, no table edit)
+  // the same mechanism, handed a list that DOES route it -> true, with no table
+  // edit. This is what proves the boolean is derived and not a literal.
   assert.equal(deriveCanSetModelLive("config-option", ["set-model", "config-option"]), true);
   // a mechanism that is not a live change at all stays false however it is routed
   assert.equal(deriveCanSetModelLive("none", ["none", "set-model"]), false);
@@ -80,10 +81,17 @@ test("canSetModelLive flips with the routed-mechanism list, in both directions",
 });
 
 test("canSetDepthLive flips with the routed list AND with the session/new advertisement", () => {
-  const openCodeShape = HARNESS_FACTS.opencode.depth;
-  assert.equal(deriveCanSetDepthLive(openCodeShape, ["config-option"]), false);
+  // A per-model ladder: `config-option` depth that is NOT advertised at
+  // `session/new` under a non-reasoning default.
+  const perModelShape = {
+    ...HARNESS_FACTS.claude.depth,
+    mechanism: "config-option",
+    ladder: "per-model",
+    configOptionAdvertisedAtSessionNew: false,
+  } as const;
+  assert.equal(deriveCanSetDepthLive(perModelShape, ["config-option"]), false);
   assert.equal(
-    deriveCanSetDepthLive({ ...openCodeShape, configOptionAdvertisedAtSessionNew: true }, [
+    deriveCanSetDepthLive({ ...perModelShape, configOptionAdvertisedAtSessionNew: true }, [
       "config-option",
     ]),
     true,
@@ -104,7 +112,7 @@ test("acceptsArbitraryModelIds: `provisioned` is answered PER HARNESS, every oth
   // single harness's measurement. Each harness has its own config format and its
   // own merge semantics, so it is one measurement per harness.
   assert.equal(deriveAcceptsArbitraryModelIds("provisioned", "pi", [], ["pi"]), true);
-  assert.equal(deriveAcceptsArbitraryModelIds("provisioned", "opencode", [], ["pi"]), false);
+  assert.equal(deriveAcceptsArbitraryModelIds("provisioned", "codex", [], ["pi"]), false);
   assert.equal(
     deriveAcceptsArbitraryModelIds("provisioned", undefined, [], ["pi"]),
     false,
@@ -163,10 +171,10 @@ const ADVERTISES_ACP_MODELS: Record<string, boolean> = {
 //
 // Before B3 it called `assertRequestedModelSupported` directly, which was then
 // the only gate. B3 gave `applyRequestedModelIfAdvertised` a `config-option` arm
-// that legitimately BYPASSES that assertion (OpenCode advertises no ACP `models`
-// array at all), so a probe aimed at the assertion would now report "not routed"
-// for a harness acpx routes perfectly well — a false RED produced by measuring a
-// neighbouring question. Call the entry point the product calls.
+// that legitimately BYPASSED that assertion for a harness advertising no ACP
+// `models` array at all, so a probe aimed at the assertion would report "not
+// routed" for a harness acpx routes perfectly well — a false RED produced by
+// measuring a neighbouring question. Call the entry point the product calls.
 async function acpxRoutesAModelFor(id: HarnessId): Promise<boolean> {
   const mechanism = HARNESS_FACTS[id].model.mechanism;
   const advertisesAcpModels = ADVERTISES_ACP_MODELS[mechanism];
@@ -240,25 +248,25 @@ test("acpx's real model gate agrees with MODEL_MECHANISMS_ROUTED_BY_ACPX for eve
 });
 
 test("the mechanism a harness needs and the mechanism acpx routes are separate facts", () => {
-  // OpenCode's HARNESS mechanism is config-option (I1 R5) — that is a measured
-  // property of OpenCode and must not be edited to make a boolean come out.
-  assert.equal(HARNESS_FACTS.opencode.model.mechanism, "config-option");
-  // B3 landed the apply branch, so acpx DOES route it now — and the capability
-  // followed on its own. Neither `HARNESS_FACTS` nor `deriveCanSetModelLive` was
-  // edited to achieve that; only the routing list gained an entry, in the same
-  // commit as the branch. That is the derivation doing its job.
-  assert.equal(MODEL_MECHANISMS_ROUTED_BY_ACPX.includes("config-option"), true);
-  const opencode = deriveHarnessCapabilities(HARNESS_FACTS.opencode);
-  assert.equal(opencode.canSetModelLive, true);
+  // pi's HARNESS mechanism is set-model (I2 R5) — a measured property of pi, and
+  // it must not be edited to make a boolean come out.
+  assert.equal(HARNESS_FACTS.pi.model.mechanism, "set-model");
+  assert.equal(MODEL_MECHANISMS_ROUTED_BY_ACPX.includes("set-model"), true);
+  const pi = deriveHarnessCapabilities(HARNESS_FACTS.pi);
+  assert.equal(pi.canSetModelLive, true);
   // A live capability must not carry a stale padlock reason.
-  assert.equal(opencode.liveModelChangeReason, null);
+  assert.equal(pi.liveModelChangeReason, null);
   // The reason is still THERE as a fact, ready if the routing is ever withdrawn —
   // it is suppressed by the derivation, not deleted from the table.
-  assert.match(HARNESS_FACTS.opencode.liveModelChangeBlockedReason, /set_config_option/);
-  assert.match(HARNESS_FACTS.opencode.liveModelChangeBlockedReason, /unrecoverable|D2/);
-  // And the derivation genuinely depends on the list: hand it a list without
-  // `config-option` and the answer flips back. This is what proves the boolean
-  // is DERIVED and not a literal that happens to read true today.
+  assert.ok(HARNESS_FACTS.pi.liveModelChangeBlockedReason.length > 0);
+  // ⚠️ `config-option` IS NOT ROUTED, and that is the load-bearing half: acpx has
+  // no model-as-config-option apply path, so the list must not claim one
+  // (brick://2b02ccd3 — re-adding the entry without the branch re-creates the
+  // silent-brick defect verbatim).
+  assert.equal(MODEL_MECHANISMS_ROUTED_BY_ACPX.includes("config-option"), false);
+  // And the derivation genuinely depends on the list: hand it a list WITH
+  // `config-option` and the answer flips. This is what proves the boolean is
+  // DERIVED and not a literal that happens to read as it does today.
   assert.equal(deriveCanSetModelLive("config-option", ["set-model"]), false);
   assert.equal(deriveCanSetModelLive("config-option", ["config-option"]), true);
 });
@@ -294,19 +302,10 @@ test("a live capability never carries a stale reason string", () => {
 // ── Per-harness cells that encode a measured fact ────────────────────────────
 
 test("per-harness mechanism cells match the findings they cite", () => {
-  // I1 R5/R11 — no ACP `models` array, no session/set_model; model is a config option
-  assert.equal(HARNESS_FACTS.opencode.model.mechanism, "config-option");
-  // I1 R8 — effort is a config option, per-model, absent at session/new
-  assert.equal(HARNESS_FACTS.opencode.depth.mechanism, "config-option");
-  assert.equal(HARNESS_FACTS.opencode.depth.ladder, "per-model");
-  assert.equal(HARNESS_FACTS.opencode.depth.configOptionAdvertisedAtSessionNew, false);
   // I2 R5 — live via session/set_model, proven three ways
   assert.equal(HARNESS_FACTS.pi.model.mechanism, "set-model");
   // I2 R8 — configOptions is null; depth rides the ACP mode selector
   assert.equal(HARNESS_FACTS.pi.depth.mechanism, "mode");
-  // I1 R4 — the fork silently full-copies while acpx records a truncation
-  assert.equal(HARNESS_FACTS.opencode.fork.atIndex, "ignored");
-  assert.equal(HARNESS_FACTS.opencode.fork.supported, true);
   // ⚠️ THREE PI CELLS FLIPPED WITH THE ADAPTER, AND THE CITATION IS WHAT MAKES
   // THAT LEGIBLE. I2 R4 measured `fork` occurring ZERO times in pi-acp 0.0.26 and
   // 0.0.33, and I2 R12 measured no usage over ACP — both true of UPSTREAM and
@@ -323,9 +322,8 @@ test("per-harness mechanism cells match the findings they cite", () => {
   // MAP §3.1 — codex has zero outputStyle references
   assert.equal(HARNESS_FACTS.codex.supportsOutputStyles, false);
   // MAP §2.2 — no AuthMode maps to a fourth harness
-  assert.equal(HARNESS_FACTS.opencode.supportsProfiles, false);
   assert.equal(HARNESS_FACTS.pi.supportsProfiles, false);
-  assert.equal(HARNESS_FACTS.opencode.credential.tier, "box-provider");
+  assert.equal(HARNESS_FACTS.pi.credential.tier, "box-provider");
   assert.deepEqual(HARNESS_FACTS.pi.credential.providers, ["openrouter"]);
 });
 
@@ -343,10 +341,9 @@ test("primerChannel agrees with the channel acpx actually resolves", () => {
   // ⚠️ THESE TWO ANSWER DIFFERENT QUESTIONS, and B3 is where they stop coinciding.
   //
   //  - `resolvePrimerChannel` answers "which ACP `_meta` channel carries the
-  //    primer?" — `none` for opencode and pi is CORRECT and permanent: neither
-  //    adapter has a `_meta` primer channel to bind to (I1 R9 measured
-  //    `_meta.systemPrompt.append` accepted and SILENTLY IGNORED; pi-acp handles
-  //    `_meta` only for `terminal-auth` and `piAcp.queueDepth`).
+  //    primer?" — `none` for pi is CORRECT and permanent: its adapter has no
+  //    `_meta` primer channel to bind to (pi-acp handles `_meta` only for
+  //    `terminal-auth` and `piAcp.queueDepth`).
   //  - the descriptor cell answers "how does acpx DELIVER the primer?" — which
   //    for those two is now `config-file`, because B3 writes it there.
   //
@@ -381,7 +378,7 @@ test("the config-file cell is the GATE on adapter env, so its population is pinn
   // adding a harness here hands its adapter new env entries.
   assert.deepEqual(
     HARNESS_IDS.filter((id) => HARNESS_FACTS[id].primerChannel === "config-file"),
-    ["opencode", "pi"],
+    ["pi"],
   );
   // And the three the program requires untouched are NOT in it.
   for (const id of ["claude", "claude-pty", "codex"] as const) {
@@ -474,8 +471,10 @@ test("resolveForkLandingIndex answers where a fork will actually land", () => {
   assert.equal(resolveForkLandingIndex(HARNESS_FACTS.claude.fork, 7), 7);
   // pi: `exact` too, since the fork implements a real index truncation.
   assert.equal(resolveForkLandingIndex(HARNESS_FACTS.pi.fork, 7), 7);
-  // opencode ignores the index: the question has no answer there.
-  assert.equal(resolveForkLandingIndex(HARNESS_FACTS.opencode.fork, 7), undefined);
+  // An `ignored` harness cannot answer the question at all. No harness declares
+  // that today (see `ForkAtIndexSupport`), so the branch is driven by the shape
+  // itself — which is what `resolveForkLandingIndex` takes as its parameter.
+  assert.equal(resolveForkLandingIndex({ supported: true, atIndex: "ignored" }, 7), undefined);
 });
 
 test("resolveForkLandingIndex boundaries: 0 is a landing index, not an absent answer", () => {
@@ -494,12 +493,14 @@ test("resolveForkLandingIndex boundaries: 0 is a landing index, not an absent an
   assert.equal(resolveForkLandingIndex(codex, 999), 998);
   assert.equal(resolveForkLandingIndex(HARNESS_FACTS.claude.fork, 999), 999);
   assert.equal(resolveForkLandingIndex(HARNESS_FACTS.pi.fork, 0), 0);
-  // The no-answer harness stays undefined at every boundary, never 0. ⚠️ pi used
-  // to provide a second one and no longer does — one `ignored` harness is the
-  // whole population for this arm now, so losing opencode's row would leave it
-  // asserting nothing.
+  // The no-answer shape stays undefined at every boundary, never 0. ⚠️ NO harness
+  // declares `ignored` today, so this arm is driven by the shape rather than by a
+  // table row — otherwise the boundary case would silently assert nothing.
   for (const requested of [0, 1, 999]) {
-    assert.equal(resolveForkLandingIndex(HARNESS_FACTS.opencode.fork, requested), undefined);
+    assert.equal(
+      resolveForkLandingIndex({ supported: true, atIndex: "ignored" }, requested),
+      undefined,
+    );
   }
 });
 
@@ -551,25 +552,19 @@ test("the routed lists are the ones the shipped code has branches for", () => {
   //
   //   - `ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX` (harness-capabilities.ts:337)
   //     stays empty by design; its own comment at :338-350 carries the argument.
-  //   - `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR = ["pi", "opencode"]` is a
-  //     SECOND, per-harness constant added beside it, and is what actually says
-  //     which harnesses acpx provisions for.
+  //   - `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR = ["pi"]` is a SECOND,
+  //     per-harness constant added beside it, and is what actually says which
+  //     harnesses acpx provisions for.
   //   - the derivation at :421-423 consults that second list, so the question is
   //     answered per harness rather than per kind.
   //
   // ⚠️ WHY THE SPLIT EXISTS AT ALL, since it is what a future reader would
   // "simplify": each harness has its own config format and its own merge
   // semantics. pi's `models-store.json` is MEASURED to merge by id (brick
-  // ef5999ca); OpenCode's `provider.openrouter.models.<slug>` is SEPARATELY
-  // measured to deep-merge (brick 4c7a38b2). Listing the KIND would have
-  // switched BOTH on from whichever measurement landed first, and one harness's
-  // picker would then have offered a band acpx does not provision for. That is
-  // the bug the split corrected.
-  //
-  // ⚠️ BOTH ANSWERS NOW BEING `merge` IS EXACTLY WHEN THIS GUARD LOOKS
-  // REDUNDANT, AND IT IS NOT. The next harness to declare `provisioned` would be
-  // switched on by a measurement taken against a config format it does not share.
-  // Two agreeing data points do not retire the seam.
+  // ef5999ca); the next harness's format is a SEPARATE question with a separate
+  // answer. Listing the KIND would switch it on from pi's measurement, and its
+  // picker would then offer a band acpx does not provision for. That is the bug
+  // the split corrected.
   //
   // ⚠️ `via-shim` IS LISTED AND `provisioned` IS STILL NOT — and that asymmetry
   // is the whole point of the split, not an inconsistency. `via-shim` is a KIND
@@ -586,7 +581,7 @@ test("the SHIPPED per-harness provisioning list is what the derivation defaults 
   // thoroughly, in both directions — but it INJECTS its lists on every call. So
   // nothing exercised the SHIPPED defaults: a change to
   // `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR` itself moved no assertion, because
-  // every existing row supplies its own list. Adding `"opencode"` to the real
+  // every existing row supplies its own list. Adding a harness to the real
   // constant left the suite green.
   //
   // That matters because the constant is the one the product actually runs on:
@@ -594,16 +589,14 @@ test("the SHIPPED per-harness provisioning list is what the derivation defaults 
   // is what reaches the picker. This row calls that same two-argument form.
   //
   // ⚠️ THE BUG IT GUARDS HAS ALREADY BEEN MADE ONCE HERE: a KIND-keyed list
-  // switching opencode on from a PI measurement. B5 corrected it by splitting the
-  // answer per harness; leaving the replacement list unpinned made the corrected
-  // bug re-enterable by hand.
+  // switching a second harness on from PI's measurement. B5 corrected it by
+  // splitting the answer per harness; leaving the replacement list unpinned made
+  // the corrected bug re-enterable by hand.
   assert.equal(deriveAcceptsArbitraryModelIds("provisioned", "pi"), true);
-  assert.equal(deriveAcceptsArbitraryModelIds("provisioned", "opencode"), true);
-  // ⚠️ THE NEGATIVE DIRECTION MOVED, IT WAS NOT DROPPED. `opencode` used to be
-  // this row's `false`; now that it is provisioned, a harness that is genuinely
-  // NOT on the list has to carry that half, or the row becomes one-sided and
-  // "everything is true" would pass it. `codex` is on no provisioning list and
-  // is not going to be — its ids are `family[effort]` against a fixed backend.
+  // ⚠️ THE NEGATIVE DIRECTION IS NOT OPTIONAL. Without it the row becomes
+  // one-sided and "everything is true" would pass it. `codex` is on no
+  // provisioning list and is not going to be — its ids are `family[effort]`
+  // against a fixed backend.
   assert.equal(
     deriveAcceptsArbitraryModelIds("provisioned", "codex"),
     false,
@@ -614,7 +607,7 @@ test("the SHIPPED per-harness provisioning list is what the derivation defaults 
     false,
     "the kind alone is never enough — that is the whole point of the split",
   );
-  assert.deepEqual([...ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR], ["pi", "opencode"]);
+  assert.deepEqual([...ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR], ["pi"]);
 
   // ⚠️⚠️ THIS GUARD NAMES ITS OWN EXIT CONDITION, ON PURPOSE, so it reads as a
   // CONTRACT rather than an obstacle — and so it cannot go stale the way the
@@ -624,25 +617,12 @@ test("the SHIPPED per-harness provisioning list is what the derivation defaults 
   // (brick ef5999ca): same id replaces, new id appends, and `writePiModelsStore`
   // copies the box's catalogue forward before upserting.
   //
-  // opencode is listed because J2's MERGE-VS-REPLACE QUESTION IS ANSWERED, and
-  // the answer is MERGE — brick 4c7a38b2, measured 2026-09-06 against OpenCode
-  // 1.18.28 on a scratch rig, both layers with their own controls:
-  //
-  //   - over OpenCode's own catalogue entry, an empty
-  //     `provider.openrouter.models.<slug>: {}` preserved
-  //     `capabilities.reasoning: true` — the support the `effort` option is
-  //     advertised from, and the loss this row used to guard against — plus name,
-  //     family, cost and limit; removing the config again restored the baseline;
-  //   - over a pre-existing PROJECT-level entry, a user-set `name` SURVIVED the
-  //     same declaration, so a spawn does not clobber a user's provider config;
-  //   - and the REPLACE outcome was rendered, not merely asserted to be
-  //     reachable: the same empty `{}` on a slug OpenCode does not know produces
-  //     a visible stub (`reasoning: false`, cost 0, `limit.context` 0).
-  //
-  // ⇒ **THE EXIT CONDITION STILL STANDS FOR THE NEXT HARNESS.** This list is
-  // narrow on purpose; an entry added without its own measurement re-creates the
-  // bug B5 fixed, and the fact that two harnesses in a row answered `merge` is
-  // not evidence about a third.
+  // ⇒ **THE EXIT CONDITION FOR THE NEXT HARNESS.** A second entry belongs here
+  // only once ITS OWN merge-vs-replace question is answered against ITS OWN
+  // config format, with both layers controlled: over the harness's own catalogue
+  // entry, and over a pre-existing user entry. This list is narrow on purpose; an
+  // entry added without that measurement re-creates the bug B5 fixed, and pi's
+  // answer is not evidence about anyone else's format.
 });
 
 // ── brick 82a2aafd (discharges 29b8ce8a): the three fields acpx-ui decided by NAME ─
@@ -650,7 +630,7 @@ test("the SHIPPED per-harness provisioning list is what the derivation defaults 
 // Context for whoever reads a red here: before this block, acpx-ui answered
 // `supportsSessionClear` / `canSetCredentialLive` / `supportsModelDegrade` with
 // `agentType === "claude"`-shaped checks while taking the descriptor and ignoring
-// it — so pi's and opencode's values were measured against NO adapter and no
+// it — so pi's values were measured against NO adapter and no
 // adapter swap could ever change them. ZERO test files asserted these three;
 // `canSetModelLive` was asserted in two, as the control. These tests are what
 // makes the six keys a contract rather than a claim.
@@ -862,7 +842,7 @@ test("canSetCredentialLive agrees with the seam acpx actually enforces, per ADAP
   // Control on the predicate itself, so a stubbed-out `isClaudeFamilyAgent`
   // returning a constant cannot make the loop pass.
   assert.equal(isClaudeFamilyAgent(DEFAULT_AGENT_COMMANDS.claude), true);
-  assert.equal(isClaudeFamilyAgent(DEFAULT_AGENT_COMMANDS.opencode), false);
+  assert.equal(isClaudeFamilyAgent(DEFAULT_AGENT_COMMANDS.pi), false);
 });
 
 test("canSetCredentialLive is NOT supportsProfiles — codex is the discriminator", () => {
@@ -921,7 +901,6 @@ test("the three cells are per-harness FACTS, not one answer repeated", () => {
       ["claude", true], // Claude Code 2.1.251 defines the `/clear` slash command
       ["claude-pty", false], // not measured: prompt→TUI slash execution unprobed
       ["codex", false], // not measured
-      ["opencode", false], // not measured
       ["pi", false], // not measured, and fork-vs-upstream dependent
     ],
   );
@@ -931,7 +910,6 @@ test("the three cells are per-harness FACTS, not one answer repeated", () => {
       ["claude", true], // Claude-family seam + subscription anchor
       ["claude-pty", true], // Claude-family seam + claude-home anchor
       ["codex", false], // seam refuses; chatgpt has no transcript anchor
-      ["opencode", false], // box-provider credential; no AuthMode maps to it
       ["pi", false], // box-provider credential; no AuthMode maps to it
     ],
   );
@@ -941,7 +919,6 @@ test("the three cells are per-harness FACTS, not one answer repeated", () => {
       ["claude", true], // brick://4d517be2, the harness the path was built for
       ["claude-pty", false], // not measured: gate admits it, trigger looks unreachable
       ["codex", false], // chatgpt profile never enters the failover engine
-      ["opencode", false], // non-Claude adapter never enters the failover engine
       ["pi", false], // non-Claude adapter never enters the failover engine
     ],
   );
@@ -950,10 +927,7 @@ test("the three cells are per-harness FACTS, not one answer repeated", () => {
 test("the reason-key NAMING RULE holds, and its one legacy exception is still the only one", () => {
   // The rule: strip the capability prefix (`supports` / `canSet`), add `Reason`.
   // Written as a test so the NEXT field answers itself instead of being guessed.
-  const row = deriveHarnessCapabilities(HARNESS_FACTS.opencode) as unknown as Record<
-    string,
-    unknown
-  >;
+  const row = deriveHarnessCapabilities(HARNESS_FACTS.pi) as unknown as Record<string, unknown>;
   for (const [booleanKey, reasonKey] of CAPABILITY_REASON_PAIRS) {
     const stripped = booleanKey.replace(/^(supports|canSet)/, "");
     const expected = `${stripped.charAt(0).toLowerCase()}${stripped.slice(1)}Reason`;

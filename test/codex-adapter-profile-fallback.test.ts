@@ -125,7 +125,7 @@ test("a stored CLAUDE-SUBSCRIPTION profile on a codex record no longer wins (B0.
       // profile. `assertCodexProfileCompatibility` (src/acp/auth-env.ts) throws
       // for exactly that combination — "profile ... cannot be used with the codex
       // adapter" — so such a record is already refused at spawn. 56 of them were
-      // measured on devbox on 2026-09-04 (53 codex, 2 opencode, 1 pi); they are
+      // measured on devbox on 2026-09-04 (53 codex, 1 pi); they are
       // the wedged population `acpx sessions repair-account-seam` exists to free.
       // Answering "yes, failover is enabled" for a record that can never take a
       // turn is not a capability, it is the corruption being believed.

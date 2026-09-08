@@ -48,19 +48,16 @@ test("acpAdapterKind returns undefined for a raw/unknown command (strict escape 
 //
 // ⚠️ WHY BOTH SHAPES, EVERY ADAPTER, IN ONE TABLE. pi shipped broken because it
 // was simultaneously (a) on the strictest matcher and (b) the only adapter never
-// shown a path-embedded command — pi and opencode were added later and got only
-// their then-current registry shapes. That asymmetry is invisible when each
+// shown a path-embedded command — pi was added later and got only
+// its then-current registry shape. That asymmetry is invisible when each
 // adapter's cases live apart. A table that must stay rectangular makes the next
 // adapter that moves to `/opt` impossible to add without a row here.
 //
 // ⚠️ `/opt` rows measured against the box, not assumed: pi, codex, claude and
-// claude-pty ARE `/opt` forks (`ls -d /opt/*acp*`, 2026-09-06). **opencode is
-// not** — it has no `/opt` directory and no `ACPX_OPENCODE_ACP_COMMAND` seam, so
-// its DEPLOYED form IS the npx shape. Its `/opt` row uses the fork-naming
-// convention the other four follow — the fork dir is the package's unscoped name
-// (`pi-acp`→`/opt/pi-acp`, `@agentclientprotocol/codex-acp`→`/opt/codex-acp`),
-// which for `opencode-ai` gives `/opt/opencode-ai`. That row is forward-looking
-// and passes today; it is NOT a claim that such a deploy exists.
+// claude-pty ARE `/opt` forks (`ls -d /opt/*acp*`, 2026-09-06). The fork-naming
+// convention all four follow is that the fork dir is the package's unscoped name
+// (`pi-acp`→`/opt/pi-acp`, `@agentclientprotocol/codex-acp`→`/opt/codex-acp`), so
+// a new adapter's `/opt` row is derivable rather than guessed.
 const ADAPTER_COMMAND_SHAPES: ReadonlyArray<[string, string, string]> = [
   // [expected kind, deployed /opt fork form, npx / registry form]
   ["pi", "node /opt/pi-acp/dist/index.js", "npx pi-acp@^0.0.33"],
@@ -75,10 +72,9 @@ const ADAPTER_COMMAND_SHAPES: ReadonlyArray<[string, string, string]> = [
     "node /opt/claude-pty-acp/dist/index.js",
     "npx -y @agentclientprotocol/claude-pty-acp@^0.1.0",
   ],
-  ["opencode", "node /opt/opencode-ai/dist/index.js", "npx -y opencode-ai@1.18.28 acp"],
 ];
 
-test("acpAdapterKind classifies all five adapters under BOTH the deployed /opt fork and the npx shape", () => {
+test("acpAdapterKind classifies every adapter under BOTH the deployed /opt fork and the npx shape", () => {
   const observed: Record<string, { opt: string | undefined; npx: string | undefined }> = {};
   for (const [kind, optForm, npxForm] of ADAPTER_COMMAND_SHAPES) {
     observed[kind] = { opt: acpAdapterKind(optForm), npx: acpAdapterKind(npxForm) };

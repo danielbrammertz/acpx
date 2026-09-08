@@ -534,9 +534,9 @@ test("createSession (claude): the brick block STILL rides the stream leg after t
 // ⚠️ THE DISJOINTNESS IS WHAT MAKES THE SHARED COMPOSER SAFE, AND NOTHING
 // ENFORCED IT. Folding the brick block into both legs can only avoid
 // double-injecting because the two legs are mutually exclusive per harness:
-// `resolvePrimerChannel` answers `none` for opencode and pi, and
+// `resolvePrimerChannel` answers `none` for pi, and
 // `applyHarnessConfigDirEnv` fires only for `primerChannel === "config-file"`,
-// which only opencode and pi declare. That is a property of TWO INDEPENDENT
+// which only pi declares. That is a property of TWO INDEPENDENT
 // FUNCTIONS AGREEING — an agreement that held by construction and by nobody's
 // assertion. A sixth harness declared `config-file` while also matching a stream
 // detector would receive the primer TWICE, and no existing row would notice.

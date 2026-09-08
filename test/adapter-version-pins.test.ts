@@ -10,12 +10,12 @@ import {
 
 // 0ededc52 — every npx-launched adapter names a version.
 //
-// ⚠️ THE DEFECT. `opencode` was `npx -y opencode-ai acp` — no version — so it
-// resolved `latest` FROM THE REGISTRY, AT SPAWN, ON EVERY BOX INDEPENDENTLY. Two
-// boxes could be running different OpenCode builds while every descriptor claim
-// about OpenCode read identically. That is the same class of fact as the pi-acp
-// `session/set_model` cell that was true at 0.0.26 and false at 0.0.33: a claim
-// with no version cannot be shown to have expired, so it cannot be checked.
+// ⚠️ THE DEFECT. An unpinned `npx -y <pkg> acp` resolves `latest` FROM THE
+// REGISTRY, AT SPAWN, ON EVERY BOX INDEPENDENTLY. Two boxes can then be running
+// different adapter builds while every descriptor claim about that harness reads
+// identically. That is the same class of fact as the pi-acp `session/set_model`
+// cell that was true at 0.0.26 and false at 0.0.33: a claim with no version
+// cannot be shown to have expired, so it cannot be checked.
 //
 // ⚠️ AND THE TRAP THAT CAUGHT ME WHILE FIXING IT. The table's own doc said "read
 // `^` as `==`", which is TRUE for its `0.0.x` rows — npm treats `0.0.x` as fully
@@ -67,31 +67,15 @@ function npxPins(): { agent: string; pkg: string; spec: string }[] {
   return found;
 }
 
-test("0ededc52: opencode's adapter is pinned, and the pin is BARE (not a caret)", () => {
-  const command = AGENT_REGISTRY.opencode;
-  assert.match(
-    command,
-    /opencode-ai@\d+\.\d+\.\d+\s/,
-    `opencode is not version-pinned: ${command}`,
-  );
-  // ⚠️ THE POINT OF THE ROW. A caret on a 1.x package is a RANGE. If someone
-  // "tidies" this to match pi's `^0.0.33`, the pin silently stops being one.
-  assert.doesNotMatch(
-    command,
-    /opencode-ai@\^/,
-    "opencode-ai is a 1.x package — a caret here is a RANGE, not a pin",
-  );
-});
-
 test("0ededc52: every DESCRIBED harness's npx adapter names a version", () => {
   // ⚠️ SCOPED TO THE DESCRIPTOR'S HARNESSES, AND THE SCOPE IS THE ARGUMENT, not
   // a convenience. The rule being enforced is "a capability claim must name the
   // build it was proven on"; claims exist only for the five harnesses in
   // `HARNESS_IDS`, so those are the rows that must be pinned.
   //
-  // ⚠️ THIS ROW FOUND A SECOND UNPINNED ADAPTER, AND IT IS DELIBERATELY NOT
-  // PINNED: `kilocode: npx -y @kilocode/cli acp` resolves `latest` at spawn
-  // exactly as opencode did. It carries no descriptor claims, nobody has measured
+  // ⚠️ THIS ROW FOUND AN UNPINNED ADAPTER, AND IT IS DELIBERATELY NOT PINNED:
+  // `kilocode: npx -y @kilocode/cli acp` resolves `latest` at spawn. It carries
+  // no descriptor claims, nobody has measured
   // it, and pinning it would freeze a harness outside this programme at whatever
   // version happens to be latest today — a behaviour decision belonging to
   // whoever owns it. Reported rather than silently taken (brick 0ededc52).
@@ -194,11 +178,4 @@ test("0ededc52: the launch-form enumeration answers to THIS box, not only to its
     [],
     `the enumeration does not cover what this box resolves:\n${missing.join("\n")}`,
   );
-});
-
-test("0ededc52: the pinned opencode version is the one the descriptor claims were measured on", () => {
-  // The pin and the citation must not drift apart: part 2 of this block cites
-  // OpenCode capability claims against this exact version, and a bump that moved
-  // one without the other would leave the citations quietly wrong.
-  assert.match(AGENT_REGISTRY.opencode, /opencode-ai@1\.18\.28\s/);
 });

@@ -59,6 +59,11 @@ function effortOption(values: string[]): SessionConfigOption {
   } as unknown as SessionConfigOption;
 }
 
+/** An adapter the descriptor does not classify — `depthMechanismForAgentCommand`
+ *  returns undefined, so it takes the generic config-option arm, and it is not
+ *  Claude-family, so the `depth_projection` breadcrumb applies. */
+const UNCLASSIFIED_ADAPTER = "some-unknown-adapter --acp";
+
 const PI_MODES = {
   currentModeId: "medium",
   availableModes: ["off", "minimal", "low", "medium", "high", "xhigh"].map((id) => ({
@@ -104,18 +109,24 @@ test("BEFORE B3 THIS WAS THE SILENT DROP: pi with configOptions null did nothing
 });
 
 test("an unavailable depth request is RECORDED, not silently dropped", async () => {
-  // opencode whose current model does not reason: no `effort` advertised. The
-  // early return is still correct — there is nothing to send — but it must no
-  // longer be SILENT.
+  // A non-Claude session whose current model does not reason: no `effort`
+  // advertised. The early return is still correct — there is nothing to send —
+  // but it must no longer be SILENT.
+  //
+  // ⚠️ THE SUBJECT IS AN UNCLASSIFIED ADAPTER ON PURPOSE. It is the real
+  // production shape for the generic config-option arm: `mechanism === undefined`
+  // falls through to it, and being non-Claude-family is what earns the
+  // `depth_projection` breadcrumb. Using a named harness here would tie the row
+  // to a table entry rather than to the branch it is testing.
   const c = client();
-  const record = recordFor(AGENT_REGISTRY.opencode);
+  const record = recordFor(UNCLASSIFIED_ADAPTER);
   await persistAndApplyRequestedEffort({
     client: c,
-    sessionId: "ses_oc",
+    sessionId: "ses_generic",
     record,
     reasoningEffort: "high",
     advertised: [], // the non-reasoning default model advertises no effort
-    agentCommand: AGENT_REGISTRY.opencode,
+    agentCommand: UNCLASSIFIED_ADAPTER,
   });
   assert.deepEqual(c.configCalls, [], "nothing can be sent — there is no option");
   assert.equal(
@@ -127,19 +138,19 @@ test("an unavailable depth request is RECORDED, not silently dropped", async () 
   assert.ok(record.acpx?.depth_projection?.reason, "an unavailable outcome must say why");
 });
 
-test("opencode WITH an advertised effort takes the config-option arm and applies", async () => {
-  // The positive control for the row above: the same harness, the same call, one
+test("an advertised effort takes the config-option arm and applies", async () => {
+  // The positive control for the row above: the same subject, the same call, one
   // difference — the option is advertised. Without this, "recorded unavailable"
-  // could be what happens on every opencode session.
+  // could be what happens on every such session.
   const c = client();
-  const record = recordFor(AGENT_REGISTRY.opencode);
+  const record = recordFor(UNCLASSIFIED_ADAPTER);
   await persistAndApplyRequestedEffort({
     client: c,
-    sessionId: "ses_oc",
+    sessionId: "ses_generic",
     record,
     reasoningEffort: "high",
     advertised: [effortOption(["low", "high", "max"])],
-    agentCommand: AGENT_REGISTRY.opencode,
+    agentCommand: UNCLASSIFIED_ADAPTER,
   });
   assert.deepEqual(c.configCalls, [{ configId: "effort", value: "high" }]);
   assert.deepEqual(c.modeCalls, [], "the config-option arm must not touch the mode wire");
@@ -190,7 +201,7 @@ test("GUARDRAIL: codex depth is a no-op and acpx adds no bracket parsing", async
 });
 
 test("no depth requested -> nothing happens anywhere, on every harness", async () => {
-  for (const id of ["claude", "claude-pty", "codex", "opencode", "pi"] as const) {
+  for (const id of ["claude", "claude-pty", "codex", "pi"] as const) {
     const c = client();
     const record = recordFor(AGENT_REGISTRY[id]);
     const before = JSON.stringify(record);
@@ -210,22 +221,22 @@ test("no depth requested -> nothing happens anywhere, on every harness", async (
 });
 
 test("B3-04: the depth outcome IS recorded on the config-option SUCCESS arm", async () => {
-  // ⚠️ MEASURED ABSENT ON A REAL OPENCODE TURN by hp-te2 (B3-04 FAIL): the key
-  // was missing after a turn that demonstrably ran, and B3-07's negative control
-  // passed VACUOUSLY — 0 paths in both arms — which is what made the red real.
+  // ⚠️ MEASURED ABSENT ON A REAL TURN by hp-te2 (B3-04 FAIL): the key was missing
+  // after a turn that demonstrably ran, and B3-07's negative control passed
+  // VACUOUSLY — 0 paths in both arms — which is what made the red real.
   //
   // Cause: only the NOT-ADVERTISED arm recorded. The success arm applied the
   // level and recorded nothing, so `depth_projection` was absent on exactly the
-  // two harnesses the field was built for.
+  // sessions the field was built for.
   const c = client();
-  const record = recordFor(AGENT_REGISTRY.opencode);
+  const record = recordFor(UNCLASSIFIED_ADAPTER);
   await persistAndApplyRequestedEffort({
     client: c,
-    sessionId: "ses_oc",
+    sessionId: "ses_generic",
     record,
     reasoningEffort: "high",
     advertised: [effortOption(["low", "high", "max"])],
-    agentCommand: AGENT_REGISTRY.opencode,
+    agentCommand: UNCLASSIFIED_ADAPTER,
   });
   assert.deepEqual(c.configCalls, [{ configId: "effort", value: "high" }]);
   assert.equal(record.acpx?.depth_projection?.outcome, "exact");
@@ -237,14 +248,14 @@ test("B3-04: a level the model does not support is recorded, not silently normal
   // The other way this arm could drop a request while looking like success:
   // `applyConfigOptionIfAdvertised` sends a NORMALIZED level, or skips entirely.
   const c = client();
-  const record = recordFor(AGENT_REGISTRY.opencode);
+  const record = recordFor(UNCLASSIFIED_ADAPTER);
   await persistAndApplyRequestedEffort({
     client: c,
-    sessionId: "ses_oc",
+    sessionId: "ses_generic",
     record,
-    reasoningEffort: "xhigh", // not on this model's measured ladder (I1 R8)
+    reasoningEffort: "xhigh", // not on this model's ladder
     advertised: [effortOption(["low", "high"])],
-    agentCommand: AGENT_REGISTRY.opencode,
+    agentCommand: UNCLASSIFIED_ADAPTER,
   });
   const projection = record.acpx?.depth_projection;
   assert.ok(projection, "the request vanished with no record of it");

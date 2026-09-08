@@ -91,20 +91,6 @@ export function isCopilotAcpCommand(command: string, args: readonly string[]): b
 }
 
 /**
- * OpenCode's ACP adapter, launched as `npx -y opencode-ai@<exact pin> acp`
- * (`ACP_ADAPTER_PACKAGE_RANGES.opencode`). Matches on the package name so the
- * pin can move without this detector following it. A local install spells it
- * `opencode acp`.
- */
-export function isOpenCodeAcpCommand(command: string, args: readonly string[]): boolean {
-  const parts = [command, ...args];
-  return (
-    parts.some((part) => part.includes("opencode-ai")) ||
-    (basenameToken(command) === "opencode" && args.includes("acp"))
-  );
-}
-
-/**
  * Pi's ACP adapter, `pi-acp` — launched as `npx pi-acp@<exact pin>`
  * (`ACP_ADAPTER_PACKAGE_RANGES.pi`) or, where the Nativai fork is installed, as
  * `node /opt/pi-acp/dist/index.js`. Matches on the package name so the pin can
@@ -163,10 +149,10 @@ export function resolvePrimerChannel(agentCommand: string): PrimerChannel {
  * PTY check stays first so a future spelling that satisfies both cannot silently
  * resolve to the SDK adapter, whose per-adapter handling is different.
  *
- * `opencode` and `pi` were added by B0.2 so ONE classifier answers for all five
- * harnesses the capability descriptor declares. Widening this table can only
- * make the copy/fork agent-lock MORE permissive, and only between two spellings
- * of the SAME adapter — precisely what that guard exists to allow.
+ * `pi` was added by B0.2 so ONE classifier answers for every harness the
+ * capability descriptor declares. Widening this table can only make the
+ * copy/fork agent-lock MORE permissive, and only between two spellings of the
+ * SAME adapter — precisely what that guard exists to allow.
  */
 const ADAPTER_KIND_DETECTORS: ReadonlyArray<
   [string, (command: string, args: readonly string[]) => boolean]
@@ -176,7 +162,6 @@ const ADAPTER_KIND_DETECTORS: ReadonlyArray<
   ["codex", isCodexAcpCommand],
   ["gemini", isGeminiAcpCommand],
   ["copilot", isCopilotAcpCommand],
-  ["opencode", isOpenCodeAcpCommand],
   ["pi", isPiAcpCommand],
 ];
 
@@ -303,14 +288,14 @@ export function buildPrimerSessionMeta(
  *    whose primer rides an ACP `_meta` channel (claude, claude-pty, codex);
  *  - the CONFIG-DIR leg: `applyHarnessConfigDirEnv` in `src/acp/client.ts`,
  *    for the harnesses whose only working primer path is a file in a per-session
- *    config dir (opencode, pi — `primerChannel === "config-file"`).
+ *    config dir (pi — `primerChannel === "config-file"`).
  *
  * ⚠️ The config-dir leg shipped WITHOUT this join, and nothing caught it: the
  * agents.md render arrived complete, `ACPX_BRICK` was correctly set in the
  * adapter env, and only the brick BLOCK was missing from the primer text — so a
- * brick-linked opencode/pi agent was never told its brick and had to
- * reconstruct the frame itself. Measured on the production evidence run: claude
- * 37,803 ch with the block, pi and opencode 32,999 ch with zero brick tokens.
+ * brick-linked pi agent was never told its brick and had to reconstruct the
+ * frame itself. Measured on the production evidence run: claude 37,803 ch with
+ * the block, pi 32,999 ch with zero brick tokens.
  * A composer that only one caller uses is how that recurs, which is why this is
  * a shared function and not a second copy of the wording.
  *

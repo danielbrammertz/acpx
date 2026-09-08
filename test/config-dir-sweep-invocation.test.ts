@@ -236,7 +236,7 @@ test("0bac6a00 A: `sessions sweep-config-dirs` reaps a directory and prints its 
   await withTempHomeFixture("acpx-0bac6a00-verb-", async (homeDir) => {
     const root = process.env[HARNESS_CONFIG_DIR_ROOT_ENV] as string;
     await seedClosedSession(homeDir, "verb-orphan");
-    const dir = plantAged(root, "acpx-opencode-verb-orphan");
+    const dir = plantAged(root, "acpx-pi-verb-orphan");
 
     const result = await runCliUnguarded(["claude", "sessions", "sweep-config-dirs"], homeDir);
 
@@ -253,7 +253,7 @@ test("0bac6a00 A: `sessions sweep-config-dirs --dry-run` previews and removes no
   await withTempHomeFixture("acpx-0bac6a00-verbdry-", async (homeDir) => {
     const root = process.env[HARNESS_CONFIG_DIR_ROOT_ENV] as string;
     await seedClosedSession(homeDir, "verb-preview");
-    const dir = plantAged(root, "acpx-opencode-verb-preview");
+    const dir = plantAged(root, "acpx-pi-verb-preview");
 
     const result = await runCliUnguarded(
       ["claude", "sessions", "sweep-config-dirs", "--dry-run"],
@@ -274,7 +274,7 @@ test("0bac6a00 A: the verb NEVER deletes a session record or its transcript — 
   // to destroying transcripts, and the fleet's answer was to forbid the command.
   await withTempHomeFixture("acpx-0bac6a00-preserve-", async (homeDir) => {
     const root = process.env[HARNESS_CONFIG_DIR_ROOT_ENV] as string;
-    plantAged(root, "acpx-opencode-preserve-orphan");
+    plantAged(root, "acpx-pi-preserve-orphan");
     const sessionsDir = join(homeDir, ".acpx", "sessions");
     mkdirSync(sessionsDir, { recursive: true });
     // Two files a prune WOULD take: a closed record and its messages sidecar.
@@ -318,7 +318,7 @@ test("0bac6a00 C: a PROMPT triggers the sweep, and does so before the session lo
   await withTempHomeFixture("acpx-0bac6a00-trigger-", async (homeDir) => {
     const root = process.env[HARNESS_CONFIG_DIR_ROOT_ENV] as string;
     await seedClosedSession(homeDir, "trigger-orphan");
-    const dir = plantAged(root, "acpx-opencode-trigger-orphan");
+    const dir = plantAged(root, "acpx-pi-trigger-orphan");
 
     const result = await runCliUnguarded(
       ["claude", "prompt", "--session", "no-such-session-zz", "hello"],
@@ -372,7 +372,7 @@ test("0bac6a00 C: the prompt trigger NEVER closes a session record", async () =>
   // A reap that runs on someone else's turn may READ state. It may not WRITE it.
   await withTempHomeFixture("acpx-0bac6a00-noclose-", async (homeDir) => {
     const root = process.env[HARNESS_CONFIG_DIR_ROOT_ENV] as string;
-    plantAged(root, "acpx-opencode-noclose-orphan");
+    plantAged(root, "acpx-pi-noclose-orphan");
     await seedIdleOpenSession(homeDir, "idle-open");
 
     await runCliUnguarded(["claude", "prompt", "--session", "no-such-session-zz", "hi"], homeDir);

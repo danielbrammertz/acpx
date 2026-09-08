@@ -165,7 +165,7 @@ function reportDepth(verbose: boolean | undefined, message: string | undefined):
  * goes through the existing generic path, unchanged.
  *
  * ⚠️ `readLastServedModel` returns undefined for any non-Claude agent
- * (`:234-237`), so for OpenCode and Pi there is no second writer at all and this
+ * (`:234-237`), so for Pi there is no second writer at all and this
  * stamp is durable. Verified before relying on it.
  */
 export function recordDepthOutcome(record: SessionRecord, projection: DepthProjection): void {

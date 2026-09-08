@@ -26,7 +26,7 @@ function expiryPhrase(status: BoxProviderStatus): string {
   }
   const phrase = `expires in ${status.expiresInDays}d (${status.expiresAt})`;
   // The two-week warning. When a box key expires with nothing renewing it, every
-  // OpenCode and Pi session on the box fails at the provider with a 401 that
+  // Pi session on the box fails at the provider with a 401 that
   // surfaces as an unhelpful `UnknownError` — this line is what makes that a
   // warning instead of a fleet-wide surprise.
   return status.expiringSoon ? `⚠ ${phrase} — RENEW` : phrase;

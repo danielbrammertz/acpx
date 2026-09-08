@@ -186,24 +186,24 @@ export type ValidationInput = {
    */
   assertBracketAsEffort?: boolean;
   /**
-   * Set for a harness acpx PROVISIONS the model catalogue for (pi, opencode —
+   * Set for a harness acpx PROVISIONS the model catalogue for (pi —
    * `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR`). It resolves `openrouter/<id>` to
    * the catalogue row `<id>` FOR THE LOOKUP ONLY.
    *
-   * ⚠️ WITHOUT IT THE GATE IS BACKWARDS FOR THESE TWO HARNESSES, AND THAT IS THE
+   * ⚠️ WITHOUT IT THE GATE IS BACKWARDS FOR SUCH A HARNESS, AND THAT IS THE
    * WHOLE REASON THIS FLAG EXISTS (brick a5eddb8d §7.2). MEASURED at 11cadc6e
    * against the real cache: `openrouter/moonshotai/kimi-k2-thinking` — pi's
    * ACTUAL wire form — is refused `MODEL_SLUG_UNKNOWN`, while the bare
    * `moonshotai/kimi-k2-thinking` it admits is the form measured to die at apply
-   * with a 502. So admitting pi/opencode to {@link MODEL_VALIDATED_AGENTS}
+   * with a 502. So admitting pi to {@link MODEL_VALIDATED_AGENTS}
    * without this flag would refuse working creates and wave broken ones through.
    *
    * ⚠️ IT RESOLVES THE LOOKUP, NEVER THE ID THAT IS SENT. `raw` is untouched, so
    * every error still names what the caller typed; and
    * {@link validateSessionModelFlags} returns `undefined` for such a harness so
    * the flag reaches the spawn byte-identical. Rewriting a bare id INTO the
-   * prefixed form is the picker's `source + "/" + id` trap — correct for pi and
-   * opencode, silently wrong for codex — and is deliberately not done anywhere
+   * prefixed form is the picker's `source + "/" + id` trap — correct for pi,
+   * silently wrong for codex — and is deliberately not done anywhere
    * here.
    */
   provisionsModelCatalogue?: boolean;
@@ -215,7 +215,7 @@ export type ValidationInput = {
  *
  * The rule is not re-implemented: {@link stripProviderPrefix} is imported from
  * `src/acp/harness-config-dir.ts`, which is where provisioning uses it
- * (`:1259-1266` opencode, `:1355-1356` pi). One rule in one place is what stops
+ * (`writePiConfigDir`). One rule in one place is what stops
  * the gate and the write from ever disagreeing about the same string.
  *
  * Pinning `source` is not cosmetic: an id the caller explicitly prefixed with
@@ -546,22 +546,21 @@ const NATIVE_MODEL_LIST_AGENTS = new Set(["claude", "claude-pty", "codex"]);
  *
  * 1. **A native-row harness** ({@link NATIVE_MODEL_LIST_AGENTS}) — judged against
  *    acpx's transcribed rows, with the per-seat caveat above.
- * 2. **A harness acpx PROVISIONS the catalogue for** (pi, opencode) — asked of
+ * 2. **A harness acpx PROVISIONS the catalogue for** (pi) — asked of
  *    the DESCRIPTOR, never of the agent name, because it is the same predicate
  *    `client.ts:998` routes the provisioning write on.
  *
  * ⚠️ ARM 2 IS NOT A WEAKER VERSION OF ARM 1 — IT IS THE ONLY AUTHORITY THERE IS.
  * For a provisioning harness acpx WRITES the requested id into the harness's own
- * catalogue before `session/new` (`harness-config-dir.ts:1259-1266` opencode,
- * `:1355-1356` pi), so the harness advertises whatever was asked for and
+ * catalogue before `session/new` (`harness-config-dir.ts`, `writePiConfigDir`),
+ * so the harness advertises whatever was asked for and
  * `assertRequestedModelSupported` ends up checking acpx's own write. That is why
  * a bogus id was accepted at create and died only at turn time — the wire check
  * is structurally incapable of catching it, and deferring to it is not an option.
  * MEASURED 2026-09-06 at 11cadc6e on the box's real cache: of 430 OpenRouter rows,
- * 293 carry `availability.pi.ok === true` and 293 `availability.opencode.ok ===
- * true` (0 for claude / claude-pty / codex), and all 430 carry an entry for each —
- * so the catalogue does answer for these two, and an empty-map false negative is
- * excluded.
+ * 293 carry `availability.pi.ok === true` (0 for claude / claude-pty / codex), and
+ * all 430 carry an entry for each — so the catalogue does answer for pi, and an
+ * empty-map false negative is excluded.
  *
  * Anything acpx does not enumerate (gemini; the raw `--agent` escape hatch)
  * stands aside: it cannot tell an unknown slug from one it does not know, and
@@ -687,12 +686,12 @@ function assertBracketInLadder(model: CatalogueModel, ref: ParsedModelRef): void
  * MEASURED to die at apply with a 502. Refusing to substitute is what keeps the
  * flag byte-identical to what the caller wrote; naming a better form is
  * `availability.<agent>.modelId`'s job (brick c4da2ff2), and GUESSING one here is
- * the picker's `source + "/" + id` trap — right for pi and opencode, silently
+ * the picker's `source + "/" + id` trap — right for pi, silently
  * wrong for codex.
  *
  * ⚠️ `--reasoning-effort` is deliberately NOT judged for such a harness. The
  * OpenRouter row's `depth` ladder comes from the model's `supported_parameters`,
- * and whether that describes pi's and opencode's depth MECHANISM is unmeasured —
+ * and whether that describes pi's depth MECHANISM is unmeasured —
  * so judging it there could only produce a false refusal on a create that works
  * today. Named limitation, recorded in brick a5eddb8d §7.3; it is the depth
  * lane's to close, not a gap to paper over here.

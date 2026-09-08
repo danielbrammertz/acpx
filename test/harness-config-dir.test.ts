@@ -145,7 +145,7 @@ test("the gate is the descriptor cell, not a hardcoded harness list", () => {
   const gated = HARNESS_IDS.filter(
     (id) => HARNESS_FACTS[id].primerChannel === "config-file",
   ).toSorted();
-  assert.deepEqual(gated, ["opencode", "pi"]);
+  assert.deepEqual(gated, ["pi"]);
   withTempRoot((root) => {
     for (const id of HARNESS_IDS) {
       const env: NodeJS.ProcessEnv = {};
@@ -180,68 +180,12 @@ test("an agent command the descriptor cannot classify gets nothing", () => {
   });
 });
 
-// ── OpenCode ─────────────────────────────────────────────────────────────────
-
-test("opencode gets XDG_CONFIG_HOME, OPENCODE_CONFIG_DIR and XDG_DATA_HOME", () => {
-  // ⚠️ The first two, together. OpenCode MERGES config from both, so setting only
-  // OPENCODE_CONFIG_DIR does not isolate the session — I1's first negative
-  // control failed for exactly this reason.
-  //
-  // ⚠️ AND THE THIRD, WHICH ANSWERS A DIFFERENT QUESTION (brick 6c94af4a). The
-  // config pair decides what OpenCode READS; `XDG_DATA_HOME` decides where it
-  // keeps the CONVERSATION. This row pins that all three are applied; that the
-  // data dir actually SURVIVES losing the fallback path is a separate row, in
-  // `opencode-data-dir-durability.test.ts` — presence here, survival there,
-  // because asserting the variable exists would not have caught this defect.
-  withTempRoot((root) => {
-    const env: NodeJS.ProcessEnv = {};
-    const plan = applyHarnessConfigDir({
-      env,
-      agentCommand: AGENT_REGISTRY.opencode,
-      sessionId: "ses_1",
-      primer: "NV-PRIMER-MARKER",
-      model: "openrouter/z-ai/glm-5.3-flash",
-      provisionModelId: "openrouter/z-ai/glm-5.3-flash",
-      rootDir: root,
-    });
-    assert.ok(plan);
-    assert.deepEqual(plan.envNames.toSorted(), [
-      "OPENCODE_CONFIG_DIR",
-      "XDG_CONFIG_HOME",
-      "XDG_DATA_HOME",
-    ]);
-    assert.ok(env.XDG_CONFIG_HOME, "XDG_CONFIG_HOME unset — the session is NOT isolated");
-    assert.ok(env.OPENCODE_CONFIG_DIR, "OPENCODE_CONFIG_DIR unset");
-    assert.ok(
-      env.XDG_DATA_HOME,
-      "XDG_DATA_HOME unset — OpenCode would keep the conversation under $HOME/.local/share",
-    );
-    assert.equal(env.OPENCODE_CONFIG_DIR, join(env.XDG_CONFIG_HOME, "opencode"));
-
-    const config = JSON.parse(
-      readFileSync(join(env.OPENCODE_CONFIG_DIR, "opencode.json"), "utf8"),
-    ) as Record<string, unknown>;
-
-    // 1. the primer, by ABSOLUTE path (I1 R9 — repo-independent)
-    const instructions = config.instructions as string[];
-    assert.equal(instructions.length, 1);
-    assert.ok(instructions[0].startsWith("/"), "instructions path must be absolute");
-    assert.equal(readFileSync(instructions[0], "utf8"), "NV-PRIMER-MARKER");
-    // 2. the model pin
-    assert.equal(config.model, "openrouter/z-ai/glm-5.3-flash");
-    // 3. the catalogue fragment — keyed on the BARE slug, provider-prefix stripped
-    assert.deepEqual(config.provider, {
-      openrouter: { models: { "z-ai/glm-5.3-flash": {} } },
-    });
-  });
-});
-
 test("the catalogue key strips the provider prefix — a prefixed key is never looked up", () => {
   withTempRoot((root) => {
-    const env: NodeJS.ProcessEnv = {};
+    const env = piIsolatedEnv(root, { piKnows: [] });
     applyHarnessConfigDir({
       env,
-      agentCommand: AGENT_REGISTRY.opencode,
+      agentCommand: AGENT_REGISTRY.pi,
       sessionId: "ses_2",
       provisionModelId: "openrouter/anthropic/claude-haiku-4.5",
       rootDir: root,
@@ -249,14 +193,14 @@ test("the catalogue key strips the provider prefix — a prefixed key is never l
     // Assert the var EXISTS before reading through it: without this the probe
     // could throw on undefined and read as a broken test rather than a missing
     // config dir.
-    assert.ok(env.OPENCODE_CONFIG_DIR, "OPENCODE_CONFIG_DIR unset — nothing to inspect");
-    const config = JSON.parse(
-      readFileSync(join(env.OPENCODE_CONFIG_DIR, "opencode.json"), "utf8"),
-    ) as { provider: { openrouter: { models: Record<string, unknown> } } };
-    const keys = Object.keys(config.provider.openrouter.models);
+    assert.ok(env.PI_CODING_AGENT_DIR, "PI_CODING_AGENT_DIR unset — nothing to inspect");
+    const store = JSON.parse(
+      readFileSync(join(env.PI_CODING_AGENT_DIR, "models-store.json"), "utf8"),
+    ) as { openrouter: { models: { id: string }[] } };
+    const keys = store.openrouter.models.map((m) => m.id);
     assert.deepEqual(keys, ["anthropic/claude-haiku-4.5"]);
-    // The failure this pins: `provider.openrouter.models.openrouter/...` is never
-    // looked up, and the resulting local "model not found" reads exactly like the
+    // The failure this pins: an entry keyed `openrouter/...` is never looked up,
+    // and the resulting local "model not found" reads exactly like the
     // un-provisioned case it was meant to fix.
     assert.equal(
       keys.some((key) => key.startsWith("openrouter/")),
@@ -378,7 +322,10 @@ test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR insi
       primer: "P",
       rootDir: root,
     });
-    assert.ok(env.PI_CODING_AGENT_DIR, "PI_CODING_AGENT_DIR unset — the read below would be of nothing");
+    assert.ok(
+      env.PI_CODING_AGENT_DIR,
+      "PI_CODING_AGENT_DIR unset — the read below would be of nothing",
+    );
 
     const settings = JSON.parse(
       readFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"),
@@ -590,37 +537,30 @@ test("provisioning COPIES the box catalogue forward and repairs the Anthropic ba
   });
 });
 
-test("pi's AND opencode's arbitrary-model support are ROUTED — but still PER HARNESS", () => {
+test("pi's arbitrary-model support is ROUTED — but still PER HARNESS, never by KIND", () => {
   // The descriptor consequence of the rows above, asserted rather than assumed.
   //
-  // ⚠️ THIS ROW IS WHY A NAME-BASED SWEEP IS NOT A PROPERTY SWEEP. Routing
-  // opencode (brick 4c7a38b2) was done after grepping for
+  // ⚠️ THIS ROW IS WHY A NAME-BASED SWEEP IS NOT A PROPERTY SWEEP. Routing a
+  // harness here has been done by grepping for
   // `ARBITRARY_MODEL_PROVISIONING_ROUTED_FOR` and `harnessProvisionsModelCatalogue`
-  // across src/ and test/. That found two files. It did NOT find this one, because
+  // across src/ and test/. That finds two files. It does NOT find this one, because
   // this row asserts the DERIVED PROPERTY and never names the constant — so it
-  // went red in the gate rather than in the edit. Keep it that way: a guard that
+  // goes red in the gate rather than in the edit. Keep it that way: a guard that
   // is only reachable by running it is doing work the greps cannot.
   //
-  // ⚠️ BOTH ARE NOW true, WHICH IS EXACTLY WHEN THE TWO-SIDEDNESS LOOKS
-  // REDUNDANT. It is not. Both harnesses declare `arbitraryModelSupport:
-  // "provisioned"`, and the original defect was routing the KIND — which switched
-  // BOTH on from ONE harness's measurement. Today both are on from TWO separate
-  // measurements taken against two different config formats:
-  //   - pi: `models-store.json` merges BY ID (brick ef5999ca);
-  //   - opencode: `provider.openrouter.models.<slug>: {}` DEEP-MERGES, over its own
-  //     catalogue entry and over a pre-existing user entry alike (brick 4c7a38b2).
-  // Agreement between two independent answers is not one answer. The final
-  // assertion is what still separates "provisioned is enough" from "this harness
-  // was measured": with a list naming only pi, opencode's identical KIND derives
-  // false. Delete that and the row can no longer tell the two apart.
+  // ⚠️ THE SECOND ASSERTION IS THE LOAD-BEARING ONE. The original defect was
+  // routing the KIND: `arbitraryModelSupport: "provisioned"` switching a harness
+  // on from a DIFFERENT harness's measurement, taken against a config format it
+  // does not share. So the row hands the derivation a harness that declares the
+  // same KIND while the provisioned list names only pi, and requires `false`.
+  // Delete that and the row can no longer tell "provisioned is enough" from
+  // "this harness was measured".
   assert.equal(HARNESS_FACTS.pi.arbitraryModelSupport, "provisioned");
-  assert.equal(HARNESS_FACTS.opencode.arbitraryModelSupport, "provisioned");
   assert.equal(deriveHarnessCapabilities(HARNESS_FACTS.pi).acceptsArbitraryModelIds, true);
-  assert.equal(deriveHarnessCapabilities(HARNESS_FACTS.opencode).acceptsArbitraryModelIds, true);
   assert.equal(
-    deriveAcceptsArbitraryModelIds("provisioned", "opencode", [], ["pi"]),
+    deriveAcceptsArbitraryModelIds("provisioned", "codex", [], ["pi"]),
     false,
-    "the KIND alone must never decide it — with only pi provisioned, opencode's identical kind is false",
+    "the KIND alone must never decide it — with only pi provisioned, an identical kind on another harness is false",
   );
 });
 
@@ -628,23 +568,26 @@ test("pi's AND opencode's arbitrary-model support are ROUTED — but still PER H
 
 test("no primer and no model still yields a dir and the env vars", () => {
   // The dir is the isolation boundary as well as the primer carrier: without the
-  // env vars OpenCode falls back to /home/node and writes global state there
-  // (measured twice by I1 during its own cleanup).
+  // env vars the harness falls back to /home/node and writes global state there
+  // (measured twice during I1's own cleanup).
   withTempRoot((root) => {
-    const env: NodeJS.ProcessEnv = {};
+    const env = piIsolatedEnv(root, { piKnows: [] });
     const plan = applyHarnessConfigDir({
       env,
-      agentCommand: AGENT_REGISTRY.opencode,
+      agentCommand: AGENT_REGISTRY.pi,
       sessionId: "ses_3",
       rootDir: root,
     });
     assert.ok(plan);
-    assert.ok(env.XDG_CONFIG_HOME);
-    assert.ok(env.OPENCODE_CONFIG_DIR);
-    const config = JSON.parse(
-      readFileSync(join(env.OPENCODE_CONFIG_DIR, "opencode.json"), "utf8"),
-    ) as Record<string, unknown>;
-    assert.deepEqual(config, {});
+    assert.ok(env.PI_CODING_AGENT_DIR);
+    // No primer and no model ⇒ no APPEND_SYSTEM.md and no models-store.json; the
+    // stall policy is unconditional, so `settings.json` is the whole content.
+    assert.deepEqual(
+      readdirSync(env.PI_CODING_AGENT_DIR)
+        .filter((entry) => !entry.startsWith("."))
+        .toSorted(),
+      ["settings.json"],
+    );
   });
 });
 
@@ -654,17 +597,17 @@ test("two sessions get two different directories", () => {
     const b: NodeJS.ProcessEnv = {};
     applyHarnessConfigDir({
       env: a,
-      agentCommand: AGENT_REGISTRY.opencode,
+      agentCommand: AGENT_REGISTRY.pi,
       sessionId: "ses_a",
       rootDir: root,
     });
     applyHarnessConfigDir({
       env: b,
-      agentCommand: AGENT_REGISTRY.opencode,
+      agentCommand: AGENT_REGISTRY.pi,
       sessionId: "ses_b",
       rootDir: root,
     });
-    assert.notEqual(a.XDG_CONFIG_HOME, b.XDG_CONFIG_HOME);
+    assert.notEqual(a.PI_CODING_AGENT_DIR, b.PI_CODING_AGENT_DIR);
   });
 });
 
@@ -682,7 +625,7 @@ test("a BLANK session id is REFUSED — no dir, no env, no shared literal", () =
   // A fallback that silently de-isolates is worse than an error, so there is no
   // fallback: a blank id refuses.
   withTempRoot((root) => {
-    for (const id of ["opencode", "pi"] as const) {
+    for (const id of ["pi"] as const) {
       for (const blank of ["", "   "]) {
         const env: NodeJS.ProcessEnv = {};
         const plan = applyHarnessConfigDir({
@@ -710,7 +653,7 @@ test("two spawns of the SAME session id share a dir; different ids never do", ()
     const mk = (env: NodeJS.ProcessEnv, sessionId: string) =>
       applyHarnessConfigDir({
         env,
-        agentCommand: AGENT_REGISTRY.opencode,
+        agentCommand: AGENT_REGISTRY.pi,
         sessionId,
         primer: "P",
         rootDir: root,
@@ -755,8 +698,8 @@ test("removeHarnessConfigDir deletes a config dir and REFUSES anything else", ()
 test("the orphan sweep removes dead dirs, RETAINS live ones, and prints its population", () => {
   withTempRoot((root) => {
     for (const [harness, id] of [
-      ["opencode", "live-1"],
-      ["opencode", "dead-1"],
+      ["pi", "live-1"],
+      ["pi", "dead-1"],
       ["pi", "dead-2"],
     ] as const) {
       applyHarnessConfigDir({
@@ -830,7 +773,7 @@ test("the sweep on an unreadable root reports scanned=0 — NOT RUN, not clean",
 
 test("RS-14: setHarnessConfigDir leaves a no-config-dir record COMPLETELY untouched", () => {
   // ⚠️ ABSENT — not null, not {}. This runs with `undefined` on EVERY claude /
-  // claude-pty / codex spawn, because only opencode and pi get a config dir. An
+  // claude-pty / codex spawn, because only pi gets a config dir. An
   // unconditional `record.acpx = clone ?? {}` would give a record whose `acpx`
   // was previously absent an empty object, changing the record SHAPE for three
   // harnesses the programme requires untouched — and record shape is consumed by
@@ -846,7 +789,7 @@ test("RS-14: setHarnessConfigDir leaves a no-config-dir record COMPLETELY untouc
   setHarnessConfigDir(record, undefined);
   assert.equal(pathsContainKey(record, "harness_config_dir"), 0);
   // PLANTED CONTROL, same scanner: it CAN see the key when it is there.
-  setHarnessConfigDir(record, "/tmp/acpx-opencode-planted");
+  setHarnessConfigDir(record, "/tmp/acpx-pi-planted");
   assert.equal(pathsContainKey(record, "harness_config_dir"), 1, "the scanner is blind");
 });
 
@@ -854,8 +797,8 @@ test("RS-14: a spawn that writes no dir CLEARS a stale recorded path", () => {
   // A stale path that still resolves is a silent WRONG answer — worse than a
   // miss — so it must not survive a spawn that produced no directory.
   const record = { agentCommand: CLAUDE } as unknown as SessionRecord;
-  setHarnessConfigDir(record, "/tmp/acpx-opencode-old");
-  assert.equal(record.acpx?.harness_config_dir, "/tmp/acpx-opencode-old");
+  setHarnessConfigDir(record, "/tmp/acpx-pi-old");
+  assert.equal(record.acpx?.harness_config_dir, "/tmp/acpx-pi-old");
   setHarnessConfigDir(record, undefined);
   assert.equal(record.acpx?.harness_config_dir, undefined);
   assert.equal(pathsContainKey(record, "harness_config_dir"), 0);
@@ -866,10 +809,10 @@ test("RS-14: the recorded path SURVIVES the per-turn acpx-state clone", () => {
   // the turn path re-bases `record.acpx` off, so a field it does not name is
   // dropped on EVERY REAL TURN — silently, with typecheck and the unit suite
   // green. Asserted as a PROPERTY, not as a source-text presence check.
-  const record = { agentCommand: AGENT_REGISTRY.opencode } as unknown as SessionRecord;
-  setHarnessConfigDir(record, "/tmp/acpx-opencode-survives");
+  const record = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(record, "/tmp/acpx-pi-survives");
   const cloned = cloneSessionAcpxState(record.acpx);
-  assert.equal(cloned?.harness_config_dir, "/tmp/acpx-opencode-survives");
+  assert.equal(cloned?.harness_config_dir, "/tmp/acpx-pi-survives");
 });
 
 /** Count paths whose final key is `key`, at ANY depth — the `paths(..)` scan a
@@ -893,47 +836,6 @@ function pathsContainKey(value: unknown, key: string): number {
 }
 
 // ── F-12 (brick 2dc93747): the live flag REFINED per session ────────────────
-
-test("F-12: canSetModelLive is REFINED per session, not the static table", () => {
-  // ⚠️ THE OVER-CLAIM THIS FIXES. Staging served opencode with
-  // `canSetModelLive: true` while its adapter had advertised NO selectable
-  // `model` option — so the UI would offer a live model change that can only
-  // ever refuse. Daniel's requirement is "declared in acpx, REFINED by what the
-  // adapter advertises at runtime"; only the first half reached a consumer.
-  const withModelOption = {
-    acpxRecordId: "rec-f12-a",
-    agentCommand: AGENT_REGISTRY.opencode,
-    acpx: {
-      config_options: [
-        { id: "model", name: "Model", type: "select", currentValue: "a", options: [] },
-      ],
-    },
-  } as unknown as SessionRecord;
-  const withoutModelOption = {
-    acpxRecordId: "rec-f12-b",
-    agentCommand: AGENT_REGISTRY.opencode,
-    acpx: {
-      config_options: [
-        { id: "mode", name: "Mode", type: "select", currentValue: "build", options: [] },
-      ],
-    },
-  } as unknown as SessionRecord;
-
-  const a = toSessionIndexEntry(withModelOption, "rec-f12-a.json");
-  const b = toSessionIndexEntry(withoutModelOption, "rec-f12-b.json");
-
-  // TWO-SIDED, on the SAME harness: the only difference is the advertisement.
-  // Without both arms, "false" could come from opencode being disabled outright.
-  assert.equal(a.canSetModelLive, true, "a session that DOES advertise `model` must stay live");
-  assert.equal(
-    b.canSetModelLive,
-    false,
-    "a session with no selectable `model` option must NOT be offered a live change",
-  );
-  // And the static table still says true — proving the narrowing is the
-  // refinement rather than a change to the declared descriptor.
-  assert.equal(deriveHarnessCapabilities(HARNESS_FACTS.opencode).canSetModelLive, true);
-});
 
 test("F-12: an unclassifiable agent gets NO claim, not a false one", () => {
   const unknown = {

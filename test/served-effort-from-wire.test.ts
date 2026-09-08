@@ -21,14 +21,16 @@ import type { SessionRecord } from "../src/types.js";
 // AFTER a path that writes the record — the same self-comparison, one layer up.
 // So each row below names the WIRE fact it is judging, never the record alone.
 //
-// ⚠️ SCOPE, MEASURED — THESE ROWS ARE ABOUT opencode, NOT pi. pi's depth
+// ⚠️ SCOPE, MEASURED — THESE ROWS ARE ABOUT THE CONFIG-OPTION DEPTH ARM, NOT pi. pi's depth
 // mechanism is `mode` (`harness-capabilities.ts` → `pi.depth.mechanism`), so
 // `persistAndApplyRequestedEffort` returns from its mode arm and NEVER reaches
 // this code; pi's config option is `thought_level`, not `effort`, besides. The
 // pi rows in the brick were written by `projectDepthOntoLadder` against pi's
 // ADVERTISED 6-rung ladder, which is a separate defect and not this one.
 
-const OPENCODE = AGENT_REGISTRY.opencode;
+// An adapter the descriptor does not classify takes the generic config-option
+// depth arm, and being non-Claude-family is what earns the recorded outcome.
+const CONFIG_OPTION_DEPTH_AGENT = "some-unknown-adapter --acp";
 
 /** An advertised `effort` option — `levels` is the ladder the agent claims. */
 function effortOption(currentValue: string, levels: string[]): SessionConfigOption {
@@ -43,7 +45,7 @@ function effortOption(currentValue: string, levels: string[]): SessionConfigOpti
 }
 
 function record(): SessionRecord {
-  return { agentCommand: OPENCODE, acpx: {} } as unknown as SessionRecord;
+  return { agentCommand: CONFIG_OPTION_DEPTH_AGENT, acpx: {} } as unknown as SessionRecord;
 }
 
 type Wire = { configId: string; value: string };
@@ -91,7 +93,7 @@ async function applyEffort(
     record: rec,
     reasoningEffort,
     advertised,
-    agentCommand: OPENCODE,
+    agentCommand: CONFIG_OPTION_DEPTH_AGENT,
   });
 }
 

@@ -245,7 +245,7 @@ test("F-14/mode: a projection is never UPGRADED, even when the collapse lands on
 
 test("F-14/mode ORACLE: every recorded served value is one the AGENT declared", async () => {
   // The per-rung regression, with the ADVERTISEMENT as the oracle — the same
-  // shape as the opencode oracle, against the writer that actually ran for pi,
+  // shape as the recorded oracle, against the writer that actually ran for pi,
   // and now against a source that cannot go stale the way a frozen table did.
   const declared = new Set<string>(["none", ...Object.values(COLLAPSING).map((v) => v ?? "none")]);
   const rungs = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -302,7 +302,7 @@ test("F-14/mode GUARDRAIL: pi's `_meta` vocabulary is NOT read for another harne
     sessionId: "s1",
     requested: "minimal",
     modes: modes("high", COLLAPSING),
-    harness: "opencode",
+    harness: "pi",
   });
   assert.equal(p.kind, "exact", "pi's advertised collapse was applied to a different harness");
   assert.equal(p.value, "minimal");

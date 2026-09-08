@@ -32,9 +32,12 @@ import { AcpClient } from "../src/acp/client.js";
 
 const MOCK_AGENT_PATH = fileURLToPath(new URL("./mock-agent.js", import.meta.url));
 
-async function spawnOpenCodeClient() {
+async function spawnConfigDirClient() {
   const scratchDir = await fs.mkdtemp(path.join(os.tmpdir(), "hp-b3-lifetime-"));
-  const linkDir = path.join(scratchDir, "opencode-ai");
+  // The directory name is what `isPiAcpCommand` classifies on — `pi-acp` on a
+  // token boundary inside the command path. Rename it and this whole file stops
+  // exercising the config-dir leg at all, silently.
+  const linkDir = path.join(scratchDir, "pi-acp");
   await fs.mkdir(linkDir, { recursive: true });
   const mockLink = path.join(linkDir, "mock-agent.js");
   await fs.symlink(MOCK_AGENT_PATH, mockLink);
@@ -60,7 +63,7 @@ async function spawnOpenCodeClient() {
 test("a REAL spawn creates the config dir, and its FILES, while the adapter is alive", async () => {
   // The bar, stated as the staging probe stated it: not "a name was set" — the
   // artifact the harness actually reads must be on disk for the adapter's life.
-  const s = await spawnOpenCodeClient();
+  const s = await spawnConfigDirClient();
   try {
     assert.ok(s.dir, "no config dir was created by a real spawn");
     assert.equal(
@@ -71,10 +74,10 @@ test("a REAL spawn creates the config dir, and its FILES, while the adapter is a
 
     // The FILES, not just the directory. An empty directory would satisfy an
     // existence check while the harness read no primer and no pin.
-    const configPath = path.join(s.dir, "opencode", "opencode.json");
+    const configPath = path.join(s.dir, "settings.json");
     assert.equal(existsSync(configPath), true, `missing ${configPath}`);
     const config = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
-    assert.ok(config, "opencode.json did not parse");
+    assert.ok(config, "settings.json did not parse");
 
     // Still there after a real ACP round-trip — not merely at the instant of spawn.
     await client_roundTrip(s.client, s.session.sessionId);
@@ -88,7 +91,7 @@ test("the recorded path points at the dir that actually exists", async () => {
   // The channel acpx-ui reads. A recorded path that does not resolve is the
   // failure mode `fa2e54ec` exists to make visible, so it is worth pinning that
   // the two agree for a real spawn rather than assuming they do.
-  const s = await spawnOpenCodeClient();
+  const s = await spawnConfigDirClient();
   try {
     assert.ok(s.dir, `no config dir was planned; ${await describeTmpState(undefined)}`);
     assert.equal(
@@ -98,7 +101,7 @@ test("the recorded path points at the dir that actually exists", async () => {
     );
     // CONTROL: the path is not merely non-empty — it is under tmp and carries the
     // harness prefix, so a stray value could not satisfy this vacuously.
-    assert.match(path.basename(s.dir), /^acpx-opencode-/);
+    assert.match(path.basename(s.dir), /^acpx-pi-/);
   } finally {
     await s.cleanup();
   }
@@ -108,7 +111,7 @@ test("close removes the dir it created — the fast path still works", async () 
   // The other direction: if creation were fixed by never removing anything, the
   // leak `433f6bf8` addresses would return. Remove-on-close is the fast path; the
   // `sessions prune` sweep remains the guarantee for the cases close never runs.
-  const s = await spawnOpenCodeClient();
+  const s = await spawnConfigDirClient();
   assert.ok(s.dir);
   assert.equal(existsSync(s.dir), true, "control: the dir must exist before close");
   await s.client.close();
@@ -144,8 +147,8 @@ async function describeTmpState(dir: string | undefined): Promise<string> {
     }
   }
   try {
-    const siblings = (await fs.readdir(os.tmpdir())).filter((e) => e.startsWith("acpx-opencode-"));
-    parts.push(`tmp acpx-opencode-* population=${siblings.length}`);
+    const siblings = (await fs.readdir(os.tmpdir())).filter((e) => e.startsWith("acpx-pi-"));
+    parts.push(`tmp acpx-pi-* population=${siblings.length}`);
     parts.push(`sample=${JSON.stringify(siblings.slice(0, 5))}`);
   } catch {
     parts.push("tmp listing unavailable — NOT MEASURED");

@@ -12,9 +12,9 @@ import { fileURLToPath } from "node:url";
  * later 1.x** — `^1.18.28` would accept `1.19.0`. So:
  *
  *   - `0.0.x` entries carry `^` and are exact. Read `^` as `==` for THOSE rows.
- *   - **`1.x` entries carry a BARE version and no caret** (`opencode` below).
- *     Adding a caret there silently converts the pin into a range while the row
- *     still looks like its neighbours.
+ *   - **a `1.x` entry must carry a BARE version and no caret.** Adding a caret
+ *     there silently converts the pin into a range while the row still looks
+ *     like its neighbours.
  *
  * A version here therefore tracks nothing and every bump is a deliberate code
  * change.
@@ -46,20 +46,6 @@ export const ACP_ADAPTER_PACKAGE_RANGES = {
   // ⚠️ THIS TABLE IS FOR npx-LAUNCHED ADAPTERS ONLY. claude, claude-pty and codex
   // are `/opt` builds and must not gain rows here; a row for one of them would
   // read as a pin while governing nothing, which is how this entry arose.
-  /**
-   * ⚠️ BARE, NOT `^1.18.28` — see the caret rule above. opencode-ai is a 1.x
-   * package, so a caret here would accept every later 1.x and the row would read
-   * as a pin while behaving as a range.
-   *
-   * Pinned at the version the registry was ALREADY serving as `latest` on
-   * 2026-09-04, and which both npx caches on this box already held, so the pin
-   * FREEZES today's behaviour rather than moving it. Before this, the entry was
-   * `npx -y opencode-ai acp` with no version at all: every box resolved
-   * `latest` independently, at spawn, so two boxes could run different OpenCode
-   * builds while every descriptor claim about OpenCode read identically
-   * (brick 0ededc52).
-   */
-  opencode: "1.18.28",
 } as const;
 
 type BuiltInAgentPackageSpec = {
@@ -147,7 +133,6 @@ export const AGENT_REGISTRY: Record<string, string> = {
   kilocode: "npx -y @kilocode/cli acp",
   kimi: "kimi acp",
   kiro: "kiro-cli-chat acp",
-  opencode: `npx -y opencode-ai@${ACP_ADAPTER_PACKAGE_RANGES.opencode} acp`,
   qoder: "qodercli --acp",
   qwen: "qwen --acp",
   trae: "traecli acp serve",

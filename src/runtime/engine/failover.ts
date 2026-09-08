@@ -537,9 +537,9 @@ function selectedProfileId(
   // *subscription* profile, so any profile-less record fell through to it and the
   // pre-turn selector then treated the session as subscription-backed and
   // persisted an incompatible profile. For codex that was measured killing every
-  // turn in ~13 ms (brick://792ad0a4). For OpenCode and Pi it is the same defect
+  // turn in ~13 ms (brick://792ad0a4). For Pi it is the same defect
   // with a worse ending: the persisted `account_switch` makes the resume gate
-  // demand a Claude SDK transcript JSONL those harnesses can never produce, so
+  // demand a Claude SDK transcript JSONL that harness can never produce, so
   // the session is not merely failing — it is unusable for good (I1 D1 / I2 §5,
   // CONCEPTION §5.5). One predicate, one place, every non-Claude adapter.
   if (!isClaudeFamilyAgent(record.agentCommand)) {

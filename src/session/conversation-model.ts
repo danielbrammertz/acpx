@@ -941,8 +941,8 @@ export type RecordSessionUpdateOptions = {
 /**
  * An `agent_message_chunk` that arrives before any prompt has been submitted is
  * a WRONG-CHANNEL emission: it is content on the model-output channel that no
- * model produced. Measured on devbox 2026-09-06 (brick 56d3532d) across all five
- * adapters we launch: of `pi`, `codex`, `claude`, `claude-pty` and `opencode`,
+ * model produced. Measured on devbox 2026-09-06 (brick 56d3532d) across every
+ * adapter we launch: of `pi`, `codex`, `claude` and `claude-pty`,
  * only `pi` does it — its `session/new` prelude pushes its startup banner (`pi
  * vX.Y.Z` plus an npm update notice) as a chunk via `setTimeout(…, 0)`
  * (`pi-acp` `agent.ts:397`), outside any turn.

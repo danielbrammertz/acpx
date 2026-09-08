@@ -1,9 +1,7 @@
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 import type { SessionCreateResult } from "../acp/client.js";
 import {
-  acpxRoutesModelMechanism,
   harnessIdForAgentCommand,
-  modelMechanismForAgentCommand,
   resolveHarnessCapabilities,
 } from "../acp/harness-capabilities.js";
 import {
@@ -12,11 +10,7 @@ import {
 } from "../acp/model-support.js";
 import { withTimeout } from "../async-control.js";
 import type { SessionRecord } from "../types.js";
-import { selectableConfigOptionValues } from "./config-option-application.js";
 import { guardServedModel } from "./model-guard.js";
-
-/** The ACP config-option id a `config-option` harness carries its model on (I1 R5). */
-export const MODEL_CONFIG_OPTION_ID = "model";
 
 /**
  * Whether acpx itself is serving this exact model OUTSIDE the ACP wire — today
@@ -74,9 +68,10 @@ export interface ModelApplyClient {
  * What applying a model produced.
  *
  * `refreshedConfigOptions` is **the post-model re-read** (CONCEPTION §5.2 —
- * "the single easiest thing in the whole program to get subtly wrong"). OpenCode
- * advertises the `effort` option **only when the currently-selected model
- * reasons**, and at `session/new` with the default model it is absent (I1 R8).
+ * "the single easiest thing in the whole program to get subtly wrong"). A
+ * harness with a per-model depth ladder advertises the `effort` option **only
+ * when the currently-selected model reasons**, so at `session/new` under a
+ * non-reasoning default it is absent.
  * `session/set_config_option` answers with a REFRESHED advertisement, so the
  * options that describe the session after the model change come back on this
  * field for free — no second round-trip, and no snapshot to go stale.
@@ -105,8 +100,8 @@ interface ModelApplyParams {
   /**
    * The session's advertised config options. Required only by the
    * `config-option` arm, which validates the requested id against the advertised
-   * `model` option before sending anything — the guard that keeps FINDINGS-opencode
-   * D2 (a stored value acpx can never apply) from returning by a new door.
+   * `model` option before sending anything — the guard that keeps a stored value
+   * acpx can never apply from returning by a new door.
    */
   advertisedConfigOptions?: SessionConfigOption[];
   /**
@@ -115,8 +110,8 @@ interface ModelApplyParams {
    *
    * ⚠️ THIS PARAMETER EXISTS BECAUSE APPLY AND REPLAY DIVERGED ONCE AND IT COST A
    * SILENT BRICK (F-9). B3 gave the APPLY path a config-option arm and left the
-   * REPLAY path on the generic check, so `acpx opencode set model` reported
-   * success, persisted the pin, and then every later turn died in
+   * REPLAY path on the generic check, so `set model` on a config-option harness
+   * reported success, persisted the pin, and then every later turn died in
    * `assertRequestedModelSupported` — WITH rc=0, so only the empty content showed
    * it. Two code paths asking the same question two ways is what made that
    * possible; they are ONE function now so they cannot answer differently again.
@@ -130,16 +125,15 @@ interface ModelApplyParams {
  *
  * Before B3 this function assumed `set-model`: it called
  * `assertRequestedModelSupported` unconditionally, which throws when `models` is
- * undefined — OpenCode's exact shape (no ACP `models` array, no
- * `session/set_model`; the model is a config option, I1 R5/R11). That is why
- * `acpx opencode set model` reported success and then bricked the session
- * unrecoverably (FINDINGS-opencode D2): acpx persisted a value it replays on
- * every reconnect through a path that can never apply it.
+ * undefined — the exact shape of a harness that exposes no ACP `models` array
+ * and no `session/set_model`, and carries the model as a config option instead.
+ * That is why `set model` on such a harness reported success and then bricked
+ * the session unrecoverably: acpx persisted a value it replays on every
+ * reconnect through a path that can never apply it.
  *
  * The `config-option` arm routes to `session/set_config_option` — **the path
- * `mode` already takes successfully today** (`acpx opencode set mode plan`
- * works, D2's own contrast). It is not a new mechanism; it is the existing one,
- * reached for the axis that needed it.
+ * `mode` already takes successfully today**. It is not a new mechanism; it is
+ * the existing one, reached for the axis that needed it.
  *
  * ⚠️ An agent command the descriptor does not classify keeps the generic
  * `set-model` path. Answering with a neighbouring harness's mechanism would send
@@ -181,24 +175,10 @@ export async function applyRequestedModelIfAdvertised(
   });
   const requestedModel = guarded.model ?? rawRequested;
 
-  if (routesModelAsConfigOption(params.agentCommand)) {
-    return await applyModelAsConfigOption(params, requestedModel);
-  }
   return await applyModelAsSetModel(params, requestedModel, guarded.forced);
 }
 
-/**
- * Whether this agent command's model reaches the harness as a config option AND
- * acpx routes that mechanism. Both terms are required: the descriptor states
- * what the harness needs, the routing list states what acpx has a branch for,
- * and the derived capability is their AND.
- */
-function routesModelAsConfigOption(agentCommand: string | undefined): boolean {
-  const mechanism = modelMechanismForAgentCommand(agentCommand);
-  return mechanism === "config-option" && acpxRoutesModelMechanism(mechanism);
-}
-
-/** The pre-B3 generic path, unchanged: claude, claude-pty, codex and pi. */
+/** The generic path: claude, claude-pty, codex and pi. */
 async function applyModelAsSetModel(
   params: ModelApplyParams,
   requestedModel: string,
@@ -243,71 +223,11 @@ export function advertisedAfterModelApply(
 }
 
 /**
- * The `config-option` arm: validate against the advertised `model` option, then
- * `session/set_config_option`, and hand the refreshed advertisement back.
+ * THE LOUD-FAILURE GATE for a live model change acpx cannot apply (B0.2).
  *
- * ⚠️ The validation is the load-bearing half, not the send. OpenCode resolves a
- * model against ITS OWN catalogue and rejects an unknown slug **locally, without
- * ever putting the request on the wire to the provider** (I1 R6) — so an
- * unvalidated send fails at the adapter with an unusable error
- * (`{"name":"UnknownError"}`, the real cause only in its debug log, I1 "Useless
- * user-facing errors"), and acpx would already have persisted the value. Refusing
- * here means nothing is written and the session stays usable, which is the whole
- * point of D2's fix.
- *
- * ⚠️ **THAT CATALOGUE IS NOT BUNDLED — OpenCode FETCHES IT LIVE from models.dev
- * at runtime and caches it** (`src/acp/harness-config-dir.ts`,
- * `composeOverBoxConfig` rule 1). It is the REJECTION that is local, not the
- * roster's provenance: the set of resolvable ids is a property of the version AND
- * the moment, and it churns between runs — which is why a row COUNT is not a
- * valid control for anything measured through it.
- *
- * An id that is genuinely wanted but not in that catalogue is reached by
- * PROVISIONING it — `provider.openrouter.models.<id>` in the per-session
- * `opencode.json` — after which it IS advertised and this check passes. The
- * check is therefore not a ceiling on "any OpenRouter model"; it is the thing
- * that makes an unprovisioned slug fail honestly instead of silently.
- */
-async function applyModelAsConfigOption(
-  params: ModelApplyParams,
-  requestedModel: string,
-): Promise<ModelApplyOutcome> {
-  const option = (params.advertisedConfigOptions ?? []).find(
-    (entry) => entry.id === MODEL_CONFIG_OPTION_ID,
-  );
-  if (!option || option.type !== "select") {
-    throw new RequestedModelUnsupportedError(
-      `Cannot apply --model "${requestedModel}": this agent selects its model through ` +
-        `session/set_config_option, but it advertised no selectable "${MODEL_CONFIG_OPTION_ID}" ` +
-        `config option for this session. Nothing was written — the session is unchanged.`,
-    );
-  }
-  const advertised = selectableConfigOptionValues(option);
-  if (!advertised.has(requestedModel)) {
-    throw new RequestedModelUnsupportedError(
-      `Cannot apply --model "${requestedModel}": the agent did not advertise that model ` +
-        `(${advertised.size} advertised). This harness resolves models against its own ` +
-        `catalogue and rejects an unknown id locally, so acpx refuses before persisting one it ` +
-        `could never apply. Nothing was written — the session is unchanged.`,
-    );
-  }
-  if (option.currentValue === requestedModel) {
-    return { applied: true };
-  }
-  const response = await withTimeout(
-    params.client.setSessionConfigOption(params.sessionId, MODEL_CONFIG_OPTION_ID, requestedModel),
-    params.timeoutMs,
-  );
-  return { applied: true, refreshedConfigOptions: response.configOptions };
-}
-
-/**
- * THE LOUD-FAILURE GATE for a live model change acpx cannot apply (B0.2;
- * FINDINGS-opencode **D2**, row `G1-OC-04`).
- *
- * It runs BEFORE anything is persisted, and the ordering is the entire fix. On
- * OpenCode the model is an ACP **config option** (`session/set_config_option`,
- * I1 R5/R11) — there is no `models` array and no `session/set_model` — so acpx's
+ * It runs BEFORE anything is persisted, and the ordering is the entire fix. On a
+ * harness whose model is an ACP **config option** (`session/set_config_option`)
+ * there is no `models` array and no `session/set_model`, so acpx's
  * generic path stored a `session_options.model` it could never apply, and the
  * session then became **unrecoverable**: every later connect replayed the bad
  * stored value first, so even setting the model *back* failed. A success message
@@ -352,15 +272,6 @@ export function assertRecordModelSupported(params: {
   requestedModel: string;
   context?: "apply" | "replay";
 }): void {
-  // A config-option harness carries no ACP `models` array at all, so the
-  // advertised-models check below is not the gate for it — its gate is the
-  // advertised `model` config option, checked inside the apply arm against a
-  // LIVE advertisement. Re-checking here against `acpx.available_models` (which
-  // a config-option session never populates) could only ever produce a false
-  // refusal on replay, which is D2's failure mode wearing the fix's clothes.
-  if (modelMechanismForAgentCommand(params.record.agentCommand) === "config-option") {
-    return;
-  }
   const availableModels = params.record.acpx?.available_models;
   if (!availableModels || availableModels.length === 0) {
     return;

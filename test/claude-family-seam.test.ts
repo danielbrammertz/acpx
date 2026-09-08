@@ -21,7 +21,7 @@ import { makeSessionRecord } from "./runtime-test-helpers.js";
 const CLAUDE = "node /opt/claude-agent-acp/dist/index.js";
 const CLAUDE_PTY = "node /opt/claude-pty-acp/dist/index.js";
 const CODEX = "node /opt/codex-acp/dist/index.js";
-const OPENCODE = AGENT_REGISTRY.opencode;
+const PI_CMD = AGENT_REGISTRY.pi;
 const PI = AGENT_REGISTRY.pi;
 
 function recordFor(
@@ -47,13 +47,13 @@ test("isClaudeFamilyAgent classifies EVERY harness this fleet launches, from the
   assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY.claude), true);
   assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY["claude-pty"]), true);
   assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY.codex), false);
-  assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY.opencode), false);
+  assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY.pi), false);
   assert.equal(isClaudeFamilyAgent(AGENT_REGISTRY.pi), false);
 
   // And the descriptor's five harness ids are exactly the five the seam has to
   // answer for — if a sixth is declared, this test names it rather than letting
   // it fall silently into whichever branch the predicate happens to take.
-  assert.deepEqual([...HARNESS_IDS], ["claude", "claude-pty", "codex", "opencode", "pi"]);
+  assert.deepEqual([...HARNESS_IDS], ["claude", "claude-pty", "codex", "pi"]);
 });
 
 test("isClaudeFamilyAgent recognises a dev-override claude command, not just the /opt one", () => {
@@ -90,7 +90,7 @@ test("an unrecognised or absent agent command is NOT Claude family — the fail-
 // ── The writer end ───────────────────────────────────────────────────────────
 
 test("switchSessionAccount REFUSES on a non-Claude record — before any transcript work", async () => {
-  for (const agentCommand of [CODEX, OPENCODE, PI]) {
+  for (const agentCommand of [CODEX, PI]) {
     const record = recordFor("rec-writer", agentCommand);
     await assert.rejects(
       () => switchSessionAccount(record, "subB", "failover"),
@@ -147,9 +147,9 @@ async function seedRecordFile(storeDir: string, record: SessionRecord): Promise<
 test("the sweep clears profile/account_switch/subscription from non-Claude records, backs each up, and is idempotent", async () => {
   await withSweepFixture(async (fixture) => {
     const wedgedCodex = recordFor("rec-codex", CODEX, { ...WEDGED_OPTIONS });
-    // The opencode record carries the live `set auto-failover off` workaround — the
+    // This record carries the live `set auto-failover off` workaround — the
     // exact shape the carve-out must preserve.
-    const wedgedOpencode = recordFor("rec-oc", OPENCODE, {
+    const wedgedPi = recordFor("rec-pi-wedged", PI_CMD, {
       ...WEDGED_OPTIONS,
       auto_failover: false,
     });
@@ -157,7 +157,7 @@ test("the sweep clears profile/account_switch/subscription from non-Claude recor
     const cleanPi = recordFor("rec-pi", PI, { auto_failover: false });
     const subagent = recordFor("rec-subagent", "", { ...WEDGED_OPTIONS });
     subagent.agentCommand = "";
-    const records = [wedgedCodex, wedgedOpencode, healthyClaude, cleanPi, subagent];
+    const records = [wedgedCodex, wedgedPi, healthyClaude, cleanPi, subagent];
     for (const record of records) {
       await seedRecordFile(fixture.storeDir, record);
     }
@@ -207,10 +207,10 @@ test("the sweep clears profile/account_switch/subscription from non-Claude recor
     // ⚠️ THE CARVE-OUT, pinned rather than trusted: `auto_failover` is
     // Claude-family by CONCEPTION 5.5 and is DELIBERATELY RETAINED. It carries the
     // fleet's `set auto-failover off` workaround, which is the only thing keeping
-    // opencode and pi sessions alive until this gate deploys — clearing it would
+    // pi sessions alive until this gate deploys — clearing it would
     // re-wedge exactly the sessions the sweep exists to free (WS-core, 2026-09-04).
     assert.equal(
-      wedgedOpencode.acpx?.session_options?.auto_failover,
+      wedgedPi.acpx?.session_options?.auto_failover,
       false,
       "auto_failover must survive the sweep",
     );
@@ -258,7 +258,7 @@ test("the sweep refuses a record whose backup cannot be taken, and keeps going",
     // NOT be rewritten (an unbacked-up repair is the one thing forbidden), the
     // failure must be reported, and the sweep must continue to the next record.
     const unbacked = recordFor("rec-missing-file", CODEX, { ...WEDGED_OPTIONS });
-    const repairable = recordFor("rec-ok", OPENCODE, { ...WEDGED_OPTIONS });
+    const repairable = recordFor("rec-ok", PI_CMD, { ...WEDGED_OPTIONS });
     await seedRecordFile(fixture.storeDir, repairable);
 
     const saved: string[] = [];

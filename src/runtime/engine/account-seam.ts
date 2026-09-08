@@ -95,9 +95,9 @@ function requireAnchor(profile: ProfileEntry, role: string): string {
  * non-Claude record can never acquire `session_options.profile` /
  * `session_options.account_switch`. Those two fields are what
  * `ensurePendingSwitchTranscript` (the resume end, `reconnect.ts`) then reads to
- * demand a Claude SDK transcript JSONL that an OpenCode or Pi session can never
- * have — the defect that kills every one of their sessions after turn 1
- * (I1 D1 / I2 §5).
+ * demand a Claude SDK transcript JSONL that a Pi session can never
+ * have — the defect that kills every one of its sessions after turn 1
+ * (I2 §5).
  *
  * ⚠️ This throws rather than no-opping ON PURPOSE. A silent no-op would let
  * `switchSessionAccount` return a `SwitchSessionAccountResult` naming a switch
