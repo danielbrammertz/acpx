@@ -188,6 +188,32 @@ test("🛑 the probe NEVER throws on the failure path, whatever the network does
   }
 });
 
+test("🛑 an ABSENT is_byok must not become the claim 'no own key'", () => {
+  // SECOND GAP FOUND BY MUTATION PROBE: coercing `is_byok` to `value === true`
+  // produced zero reds, yet `isByok === false` is what prints "using OpenRouter's
+  // shared pool (no own key)" — a factual claim about OUR configuration. Asserting it
+  // from a missing field is the same mis-attribution this module exists to end, aimed
+  // at ourselves instead of at pi.
+  const absent = refusalFromBody({ error: { metadata: { raw: "throttled" } } });
+  assert.ok(absent);
+  assert.equal(absent.isByok, undefined, "absent on the wire ⇒ absent here, never false");
+  assert.doesNotMatch(
+    formatRefusalMessage("Request timed out.", absent),
+    /no own key/,
+    "a missing is_byok must not produce a claim about our credentials",
+  );
+
+  // …and the real thing still does, because that is the actionable case.
+  const present = refusalFromBody({ error: { metadata: { raw: "throttled", is_byok: false } } });
+  assert.equal(present?.isByok, false);
+  assert.match(formatRefusalMessage("Request timed out.", present), /no own key/);
+
+  // A genuine `true` must not print it either — we DO have our own key then.
+  const byok = refusalFromBody({ error: { metadata: { raw: "throttled", is_byok: true } } });
+  assert.equal(byok?.isByok, true);
+  assert.doesNotMatch(formatRefusalMessage("Request timed out.", byok), /no own key/);
+});
+
 test("🛑 ONLY a 429 is a refusal — a 500 carrying the same body is NOT", async () => {
   // GAP FOUND BY A MUTATION PROBE: deleting the `status !== 429` check produced ZERO
   // reds, because every other row's non-429 arm used a body with no `raw` and so

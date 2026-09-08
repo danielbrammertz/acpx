@@ -119,27 +119,44 @@ const asString = (value: unknown): string | undefined =>
  * against a REAL captured body (`evidence/429-body-specimen.json`) rather than a
  * shape invented here.
  */
+/** Set an optional string field only when the wire actually carried one, so an absent
+ *  field never becomes an empty string in the message a human reads. */
+function assignText(
+  target: OpenRouterRefusal,
+  key: "provider" | "limitSource" | "remedyHint",
+  value: unknown,
+): void {
+  const text = asString(value);
+  if (text !== undefined) {
+    target[key] = text;
+  }
+}
+
+/** `is_byok` is the one non-string field, and `false` is its actionable value — so it
+ *  gets its own assigner rather than being inlined as another branch. */
+function assignByok(target: OpenRouterRefusal, value: unknown): void {
+  if (typeof value === "boolean") {
+    target.isByok = value;
+  }
+}
+
 export function refusalFromBody(body: unknown): OpenRouterRefusal | undefined {
-  const metadata = (body as ErrorBody)?.error?.metadata;
-  const raw = asString(metadata?.raw);
+  // Resolved to `{}` ONCE. Repeating `metadata?.x` five times read as five separate
+  // branches to the complexity rule; with the spreads that reached 16 against a
+  // ceiling of 8, and this is the same logic with the branching factored out.
+  const metadata = (body as ErrorBody)?.error?.metadata ?? {};
+  const raw = asString(metadata.raw);
   if (raw === undefined) {
     // No provider sentence ⇒ nothing worth quoting. Returning a hand-written
     // substitute here would be inventing a reason, which is the defect, inverted.
     return undefined;
   }
-  return {
-    raw,
-    ...(asString(metadata?.provider_name) !== undefined
-      ? { provider: asString(metadata?.provider_name) as string }
-      : {}),
-    ...(asString(metadata?.limit_source) !== undefined
-      ? { limitSource: asString(metadata?.limit_source) as string }
-      : {}),
-    ...(typeof metadata?.is_byok === "boolean" ? { isByok: metadata.is_byok } : {}),
-    ...(asString(metadata?.remedy_hint) !== undefined
-      ? { remedyHint: asString(metadata?.remedy_hint) as string }
-      : {}),
-  };
+  const refusal: OpenRouterRefusal = { raw };
+  assignText(refusal, "provider", metadata.provider_name);
+  assignText(refusal, "limitSource", metadata.limit_source);
+  assignText(refusal, "remedyHint", metadata.remedy_hint);
+  assignByok(refusal, metadata.is_byok);
+  return refusal;
 }
 
 /**
