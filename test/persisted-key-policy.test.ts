@@ -135,23 +135,38 @@ test("persisted key policy allows pinned account_switch seam keys", () => {
  * `fs.writeFile` directly; while the assert sat in `repository.ts` they wrote
  * shapes production could never persist, and the suite stayed green.
  */
+/**
+ * ⚠️ THE SYNTHETIC FIELD NAME IS LOAD-BEARING — DO NOT SWAP IT FOR A REAL ONE.
+ *
+ * These two rows simulate "a field some future author adds", so they must not be
+ * anchored to a field that actually exists: the moment another branch gives that
+ * field a real element type, the row stops COMPILING and takes the whole suite
+ * with it. That is not hypothetical — this pair originally used `cost_units`, and
+ * brick://5026423b (which types it as `CostUnit[]`) broke it. Neither branch fails
+ * alone; only the merge does, and `pnpm run typecheck` cannot see it because
+ * `tsconfig.json` excludes `test/` while `tsconfig.test.json` includes it.
+ */
 test("serializeSessionRecordForDisk itself throws on a camelCase acpx key", () => {
   const record = makeRecord();
-  // The shape an unguarded change produces: SessionAcpxState does not admit it,
-  // which is the point — this simulates the field a future author adds.
-  record.acpx = { ...record.acpx, cost_units: [{ cacheRead: 512 }] } as SessionRecord["acpx"];
+  record.acpx = {
+    ...record.acpx,
+    future_block: { camelKey: 1 },
+  } as unknown as SessionRecord["acpx"];
 
   assert.throws(() => {
     serializeSessionRecordForDisk(record);
-  }, /acpx\.cost_units\.cacheRead/);
+  }, /acpx\.future_block\.camelKey/);
 });
 
 test("serializeSessionRecordForDisk accepts the same record once the key is snake_case", () => {
   const record = makeRecord();
-  record.acpx = { ...record.acpx, cost_units: [{ cache_read: 512 }] } as SessionRecord["acpx"];
+  record.acpx = {
+    ...record.acpx,
+    future_block: { camel_key: 1 },
+  } as unknown as SessionRecord["acpx"];
 
   // CONTROL for the test above: the rejection must be about the KEY NAME, not
-  // about `cost_units` being unknown to the policy.
+  // about `future_block` being unknown to the policy.
   assert.deepEqual(findPersistedKeyPolicyViolations(serializeSessionRecordForDisk(record)), []);
 });
 
