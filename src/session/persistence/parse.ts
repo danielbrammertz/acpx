@@ -360,12 +360,7 @@ function parseAcpxState(raw: unknown): SessionAcpxState | undefined {
   // a cold reload, or a resumed session's cost restarts from zero. Lenient
   // passthrough, matching `config_options` above: acpx authored these and the READ
   // boundary is not where a malformed acpx write should be re-litigated.
-  if (record.cost !== undefined && record.cost !== null) {
-    state.cost = record.cost as SessionAcpxState["cost"];
-  }
-  if (Array.isArray(record.cost_units)) {
-    state.cost_units = record.cost_units as SessionAcpxState["cost_units"];
-  }
+  assignCostState(state, record.cost, record.cost_units);
 
   // brick://07dd62c9: the live served block + floor breadcrumbs MUST round-trip on
   // a cold disk reload (mirror context_window_size), or every queue-owner delivery
@@ -389,6 +384,21 @@ function parseAcpxState(raw: unknown): SessionAcpxState | undefined {
   assignStringState(state, "model_set_unsupported_for", record.model_set_unsupported_for);
 
   return state;
+}
+
+/**
+ * brick://5026423b — the persisted cost figure and its units, round-tripped on a
+ * cold reload. Extracted into its own helper so `parseAcpxState` stays under the
+ * complexity ceiling: a leg that pushes it over gets refactored under pressure,
+ * and this file's history is one of legs going missing.
+ */
+function assignCostState(state: SessionAcpxState, cost: unknown, units: unknown): void {
+  if (cost !== undefined && cost !== null) {
+    state.cost = cost as SessionAcpxState["cost"];
+  }
+  if (Array.isArray(units)) {
+    state.cost_units = units as SessionAcpxState["cost_units"];
+  }
 }
 
 // Copy the optional string fields of the live served block. Best-effort passthrough

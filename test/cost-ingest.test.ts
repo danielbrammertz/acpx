@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { UnitRates } from "../src/models/cost-provenance.js";
-import { rememberSessionCost } from "../src/session/cost-ingest.js";
 import { cloneSessionAcpxState } from "../src/session/conversation-model.js";
+import { rememberSessionCost } from "../src/session/cost-ingest.js";
 import type { SessionAcpxState } from "../src/types.js";
 
 // brick://5026423b — the ingest caller `cost-provenance.ts` shipped without.
@@ -13,18 +13,18 @@ import type { SessionAcpxState } from "../src/types.js";
 // re-tested here.
 
 const PRICED: UnitRates = {
-  inPerM: 0.95,
-  outPerM: 4,
-  cacheReadPerM: 0.16,
-  cacheWritePerM: 0,
-  measuredFree: false,
+  in_per_m: 0.95,
+  out_per_m: 4,
+  cache_read_per_m: 0.16,
+  cache_write_per_m: 0,
+  measured_free: false,
 };
 const FREE: UnitRates = {
-  inPerM: 0,
-  outPerM: 0,
-  cacheReadPerM: 0,
-  cacheWritePerM: 0,
-  measuredFree: true,
+  in_per_m: 0,
+  out_per_m: 0,
+  cache_read_per_m: 0,
+  cache_write_per_m: 0,
+  measured_free: true,
 };
 
 function state(modelId = "openrouter/moonshotai/kimi-k2.6"): SessionAcpxState {
@@ -82,7 +82,13 @@ test("5026423b: `reported` is admitted for a NON-ZERO adapter figure with no uni
   // (claude / claude-pty). Without this the rule above would read as "never
   // trust the adapter", which is not what it says.
   const acpx = state();
-  rememberSessionCost(acpx, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reportedAmount: 6.44 });
+  rememberSessionCost(acpx, {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reportedAmount: 6.44,
+  });
   assert.equal(acpx.cost?.provenance, "reported");
   assert.equal(acpx.cost?.amount, 6.44);
   assert.equal(acpx.cost?.coverage, null, "no units ⇒ not decomposable by construction");
@@ -102,11 +108,23 @@ test("5026423b: a mid-session model switch prices each unit at ITS OWN rates", (
   // Why the unit is `message` and not `model`: a cumulative counter summed across
   // a switch attributes one model's tokens to the other.
   const acpx = state();
-  rememberSessionCost(acpx, { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, () => PRICED);
+  rememberSessionCost(
+    acpx,
+    { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+  );
   const afterFirst = acpx.cost?.amount ?? 0;
-  rememberSessionCost(acpx, { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, () => FREE);
+  rememberSessionCost(
+    acpx,
+    { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 },
+    () => FREE,
+  );
   assert.equal(afterFirst, 0.95, "first unit priced at the priced model's rate");
-  assert.equal(acpx.cost?.amount, 0.95, "the free unit added nothing — it was not re-priced at 0.95");
+  assert.equal(
+    acpx.cost?.amount,
+    0.95,
+    "the free unit added nothing — it was not re-priced at 0.95",
+  );
   assert.equal(acpx.cost?.provenance, "computed", "a partial free must NOT collapse to `free`");
 });
 
@@ -124,7 +142,11 @@ test("5026423b ⚠️ THE ALLOWLIST LEG: cost and cost_units survive cloneSessio
 
   const cloned = cloneSessionAcpxState(acpx);
   assert.deepEqual(cloned?.cost, acpx.cost, "the cost figure did not survive the per-turn clone");
-  assert.deepEqual(cloned?.cost_units, acpx.cost_units, "the units did not survive the per-turn clone");
+  assert.deepEqual(
+    cloned?.cost_units,
+    acpx.cost_units,
+    "the units did not survive the per-turn clone",
+  );
 
   // And it is a COPY, not a shared reference — a later mutation of the clone must
   // not reach back into the record the turn path is still holding.
@@ -145,9 +167,8 @@ test("5026423b ⚠️ THE ALLOWLIST LEG: cost and cost_units survive cloneSessio
 // ---------------------------------------------------------------------------
 
 test("5026423b THE WIRE: a REAL pi usage_update envelope lands a cost through recordSessionUpdate", async () => {
-  const { createSessionConversation, recordSessionUpdate } = await import(
-    "../src/session/conversation-model.js"
-  );
+  const { createSessionConversation, recordSessionUpdate } =
+    await import("../src/session/conversation-model.js");
   const conversation = createSessionConversation();
   const acpx = { current_model_id: "openrouter/moonshotai/kimi-k2.6" } as SessionAcpxState;
 
@@ -179,10 +200,19 @@ test("5026423b THE WIRE: a REAL pi usage_update envelope lands a cost through re
     promptEverSubmitted: true,
   });
 
-  assert.equal(out.cost_units?.length, 1, "the real envelope produced no unit — the extraction is wrong or unwired");
+  assert.equal(
+    out.cost_units?.length,
+    1,
+    "the real envelope produced no unit — the extraction is wrong or unwired",
+  );
   const unit = out.cost_units![0];
   assert.deepEqual(
-    { input: unit.input, output: unit.output, cacheRead: unit.cacheRead, cacheWrite: unit.cacheWrite },
+    {
+      input: unit.input,
+      output: unit.output,
+      cacheRead: unit.cache_read,
+      cacheWrite: unit.cache_write,
+    },
     { input: 3161, output: 26, cacheRead: 4740, cacheWrite: 0 },
     "the per-message deltas were not read off `_meta.piAcp.message`",
   );
@@ -196,19 +226,19 @@ test("5026423b THE WIRE: a REAL pi usage_update envelope lands a cost through re
 });
 
 test("5026423b DRIFT PIN: the leaf rate derivation agrees with `deriveBilling` on real rows", async () => {
-  // 🛑 `cost-ingest.ts` derives rates itself instead of importing `deriveBilling`,
-  // because that import put `acp/harness-capabilities` on the `usage_update` hot
-  // path and, in the BUNDLED build, silently killed the whole update (see the
-  // comment on `ratesFromPricing`). The duplication is the price of that; THIS row
-  // is what stops it becoming drift.
+  // 🛑 `cost-ingest.ts` derives rates itself instead of importing `deriveBilling`.
+  // The reason originally recorded here — that the import killed the update in the
+  // bundled build — was measured and DISPROVEN (brick://48aca560; the real cause
+  // was camelCase keys in the persisted payload). The duplication stays because it
+  // is cheap and pinned, not because the import is forbidden; THIS row is what
+  // stops it becoming drift, whichever way that choice later goes.
   //
   // Driven off the box's real catalogue rows rather than invented pricing, so it
   // covers the shapes that actually occur — including `-1` (variable) and rows
   // quoting zero.
   const { deriveBilling } = await import("../src/models/catalogue.js");
-  const { readOpenRouterCacheSync, defaultCatalogueCachePath } = await import(
-    "../src/models/openrouter-catalogue.js"
-  );
+  const { readOpenRouterCacheSync, defaultCatalogueCachePath } =
+    await import("../src/models/openrouter-catalogue.js");
   const { lookupUnitRates } = await import("../src/session/cost-ingest.js");
 
   const snapshot = readOpenRouterCacheSync(defaultCatalogueCachePath());
@@ -224,12 +254,29 @@ test("5026423b DRIFT PIN: the leaf rate derivation agrees with `deriveBilling` o
     const mine = lookupUnitRates(row.id);
     assert.ok(mine, `${row.id}: the leaf lookup found no row for a model the cache holds`);
     assert.deepEqual(
-      { i: mine.inPerM, o: mine.outPerM, cr: mine.cacheReadPerM, cw: mine.cacheWritePerM },
-      { i: billing.inPerM, o: billing.outPerM, cr: billing.cacheReadPerM, cw: billing.cacheWritePerM },
+      {
+        i: mine.in_per_m,
+        o: mine.out_per_m,
+        cr: mine.cache_read_per_m,
+        cw: mine.cache_write_per_m,
+      },
+      {
+        i: billing.inPerM,
+        o: billing.outPerM,
+        cr: billing.cacheReadPerM,
+        cw: billing.cacheWritePerM,
+      },
       `${row.id}: leaf rates disagree with deriveBilling`,
     );
-    assert.equal(mine.measuredFree, billing.kind === "free", `${row.id}: measuredFree disagrees with deriveBilling's free kind`);
+    assert.equal(
+      mine.measured_free,
+      billing.kind === "free",
+      `${row.id}: measuredFree disagrees with deriveBilling's free kind`,
+    );
     compared += 1;
   }
-  assert.ok(compared > 50, `population control: only ${compared} rows compared — this row proved little`);
+  assert.ok(
+    compared > 50,
+    `population control: only ${compared} rows compared — this row proved little`,
+  );
 });
