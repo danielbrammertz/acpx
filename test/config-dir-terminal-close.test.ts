@@ -8,6 +8,21 @@ import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp/client.js";
 import { applyHarnessConfigDir, releaseHarnessConfigDir } from "../src/acp/harness-config-dir.js";
 import { AGENT_REGISTRY } from "../src/agent-registry.js";
+import { withTempHome } from "./queue-test-helpers.js";
+import { makeSessionRecord, writeSessionRecordFile } from "./runtime-test-helpers.js";
+
+/** A pid that is provably not running, so `dropStaleHolders` must drop its holder.
+ *  Chosen by probing rather than assumed: a hardcoded "dead" pid can be recycled. */
+const DEAD_PID = (() => {
+  for (let candidate = 4_194_300; candidate > 4_000_000; candidate -= 7) {
+    try {
+      process.kill(candidate, 0);
+    } catch {
+      return candidate;
+    }
+  }
+  throw new Error("could not find a dead pid to build the fixture with");
+})();
 
 // 4a6fdda0 — removal on close belongs to the session's TERMINAL close.
 //
@@ -183,4 +198,118 @@ test("4a6fdda0 REAL SPAWN: the dir survives client A's close AND client B's TURN
     }
     await fs.rm(scratch, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 433f6bf8 — `closeSession` IS A CLOSE PATH, AND IT DID NOT RELEASE ANYTHING.
+//
+// ⚠️ WHY THE ROWS ABOVE COULD ALL PASS WHILE THE LEAK RAN. Every one of them
+// closes an `AcpClient`, and `AcpClient.close()` has released since 4a6fdda0.
+// The sessions that actually leak have NO CLIENT LEFT TO CLOSE: an owner
+// released for idleness, a `kill -9`, a pod eviction. `acpx sessions close`
+// then terminalises a record whose client is already gone, and nothing on that
+// path ever looked at `harness_config_dir`.
+//
+// MEASURED on the deployed build 2026-09-08, before this fix: eight
+// `/tmp/acpx-pi-<id>` directories, ~320 KB each, EVERY record `closed:true`
+// carrying the correct `harness_config_dir`, and EVERY holder pid dead. They had
+// survived ~16 h and more than two six-hour sweep intervals.
+//
+// 🛑 THE SUBJECT HERE IS `closeSession`, NOT `releaseHarnessConfigDir`. The
+// release primitive was already correct and already tested — the defect was that
+// the close path never CALLED it. A row that exercised the primitive again would
+// pass on the unfixed build and prove nothing.
+// ---------------------------------------------------------------------------
+
+test("433f6bf8: a TERMINAL closeSession releases the dir when no LIVE holder remains", async () => {
+  await withTempHome(async (homeDir) => {
+    const { closeSession } = await import("../src/cli/session/session-control.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-433f6bf8-dead-"));
+    try {
+      // A dir shaped exactly like a real one, held by a pid that is GONE — the
+      // measured state of all eight leaked directories.
+      const dir = path.join(root, "acpx-pi-rec-433-dead");
+      await fs.mkdir(path.join(dir, ".acpx-holders"), { recursive: true });
+      await fs.writeFile(path.join(dir, "settings.json"), "{}");
+      await fs.writeFile(path.join(dir, ".acpx-holders", `${DEAD_PID}-deadbeef`), "");
+
+      const record = makeSessionRecord({
+        acpxRecordId: "rec-433-dead",
+        acpSessionId: "ses-433-dead",
+        agentCommand: AGENT_REGISTRY.pi,
+        cwd: homeDir,
+      });
+      record.acpx = { ...record.acpx, harness_config_dir: dir };
+      await writeSessionRecordFile(homeDir, record);
+
+      assert.equal(existsSync(dir), true, "control: the dir must exist before the close");
+
+      await closeSession("rec-433-dead");
+
+      assert.equal(
+        existsSync(dir),
+        false,
+        "THE DEFECT: the terminal close left the config dir behind. Every leaked directory " +
+          "measured on the box was in exactly this state — closed record, dead holder, dir on disk.",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("433f6bf8 CONTROL: a LIVE holder keeps the dir — a close never deletes under a live client", async () => {
+  // The two-sidedness that stops the row above from being satisfied by an
+  // unconditional delete, which is the regression 4a6fdda0 exists to prevent.
+  // Same close, same shape, ONE difference: the holder's pid is this very
+  // process, so it is provably alive.
+  await withTempHome(async (homeDir) => {
+    const { closeSession } = await import("../src/cli/session/session-control.js");
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-433f6bf8-live-"));
+    try {
+      const dir = path.join(root, "acpx-pi-rec-433-live");
+      await fs.mkdir(path.join(dir, ".acpx-holders"), { recursive: true });
+      await fs.writeFile(path.join(dir, "settings.json"), "{}");
+      await fs.writeFile(path.join(dir, ".acpx-holders", `${process.pid}-liveheld`), "");
+
+      const record = makeSessionRecord({
+        acpxRecordId: "rec-433-live",
+        acpSessionId: "ses-433-live",
+        agentCommand: AGENT_REGISTRY.pi,
+        cwd: homeDir,
+      });
+      record.acpx = { ...record.acpx, harness_config_dir: dir };
+      await writeSessionRecordFile(homeDir, record);
+
+      await closeSession("rec-433-live");
+
+      assert.equal(
+        existsSync(dir),
+        true,
+        "a live holder's directory was deleted by a close — this is the 4a6fdda0 regression, " +
+          "and it is worse than the leak it would be fixing",
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("433f6bf8: a record with NO recorded config dir closes cleanly and touches nothing", async () => {
+  // The population's third case. Most sessions are claude/codex and never get a
+  // config dir at all; the release must be a no-op for them rather than an error
+  // on a close path that must not fail.
+  await withTempHome(async (homeDir) => {
+    const { closeSession } = await import("../src/cli/session/session-control.js");
+    const record = makeSessionRecord({
+      acpxRecordId: "rec-433-none",
+      acpSessionId: "ses-433-none",
+      agentCommand: AGENT_REGISTRY.claude,
+      cwd: homeDir,
+    });
+    await writeSessionRecordFile(homeDir, record);
+
+    const result = await closeSession("rec-433-none");
+    assert.equal(result.record.closed, true, "the close itself must still succeed");
+  });
 });

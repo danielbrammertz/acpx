@@ -3818,9 +3818,33 @@ async function maybeSweepHarnessConfigDirsOnPrompt(verbose: boolean): Promise<vo
     // comment: closing records from the prompt path delivered a prompt the CLI
     // was supposed to refuse.
     await sweepOrphanHarnessConfigDirs(session, false, verbose, undefined, false);
-  } catch {
-    // Deliberately silent: this is opportunistic tidy-up on someone else's turn,
-    // and the census the sweep itself prints is where its outcome is reported.
+  } catch (error) {
+    // ⚠️ THIS CATCH USED TO BE SILENT, AND THE SILENCE COST A DIAGNOSIS (brick
+    // 433f6bf8). The claim is written BEFORE the work — deliberately, so two
+    // prompts in the same second cannot both sweep — so anything that throws
+    // between the claim and the census consumes the whole interval and leaves NO
+    // TRACE. A failed sweep was byte-identical to a successful one, six hours of
+    // blindness at a time.
+    //
+    // Measured consequence: eight leaked config dirs survived >16 h across more
+    // than two intervals, and the stamp showed a claim 31 minutes after the last
+    // of them closed. **It was not possible to determine, after the fact, whether
+    // that claim swept and failed or never swept at all** — the code had made the
+    // question unanswerable. That is what this line fixes.
+    //
+    // ⚠️ THE CLAIM IS STILL CONSUMED, ON PURPOSE. Rolling it back on failure
+    // would turn "silently does nothing for six hours" into "silently retries on
+    // every prompt, box-wide, forever" — quieter and worse under load. The
+    // interval IS the back-off; what was missing was the report, not the retry.
+    //
+    // Note the inner `sweepOrphanHarnessConfigDirs` already reports its own
+    // failures with a census. This catch covers the gap AROUND it — the claim and
+    // `loadSessionModule()` — which is precisely where a throw was invisible.
+    process.stderr.write(
+      `[acpx] harness config dir sweep did not run: ` +
+        `${error instanceof Error ? error.message : String(error)} ` +
+        `(the sweep interval has been consumed; the next attempt is one interval away)\n`,
+    );
   }
 }
 
