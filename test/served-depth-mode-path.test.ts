@@ -297,12 +297,15 @@ test("F-14/mode GUARDRAIL: pi's `_meta` vocabulary is NOT read for another harne
   // `_meta.piAcp` is pi-acp's own namespace. Reading it from another agent's
   // advertisement would attribute pi's semantics to something that never agreed
   // to them — and it would look exactly like a correct record.
+  // ⚠️ THE HARNESS HERE MUST NOT BE `pi` — that is the whole row. Naming pi makes
+  // the collapse apply, the assertion below flips, and the guardrail silently
+  // becomes a restatement of the ORACLE row above.
   const p = await applyDepthAsMode({
     client: client(),
     sessionId: "s1",
     requested: "minimal",
     modes: modes("high", COLLAPSING),
-    harness: "pi",
+    harness: "codex",
   });
   assert.equal(p.kind, "exact", "pi's advertised collapse was applied to a different harness");
   assert.equal(p.value, "minimal");

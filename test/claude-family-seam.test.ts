@@ -180,7 +180,7 @@ test("the sweep clears profile/account_switch/subscription from non-Claude recor
     assert.equal(preview.dryRun, true);
     assert.deepEqual(preview.repaired.map((entry) => entry.acpxRecordId).toSorted(), [
       "rec-codex",
-      "rec-oc",
+      "rec-pi-wedged",
     ]);
     assert.equal(saved.length, 0, "a dry run must not write");
     assert.equal(wedgedCodex.acpx?.session_options?.profile, "sub7", "a dry run must not mutate");
@@ -193,7 +193,7 @@ test("the sweep clears profile/account_switch/subscription from non-Claude recor
     assert.equal(result.skippedUnknownAgent, 1, "a subagent (no agent command) is NOT swept");
     assert.equal(result.alreadyClean, 1, "the pi record carried no cleared field");
     assert.equal(result.skippedBusy.length, 0);
-    assert.deepEqual(saved.toSorted(), ["rec-codex", "rec-oc"]);
+    assert.deepEqual(saved.toSorted(), ["rec-codex", "rec-pi-wedged"]);
 
     // The three Claude-family fields are gone.
     assert.equal(wedgedCodex.acpx?.session_options?.profile, undefined);
@@ -226,7 +226,7 @@ test("the sweep clears profile/account_switch/subscription from non-Claude recor
 
     // (c) THE BACKUP EXISTS AND HAS CONTENT — this is the whole safety claim.
     const backups = (await fs.readdir(backupDir)).toSorted();
-    assert.deepEqual(backups, ["rec-codex.json", "rec-oc.json"]);
+    assert.deepEqual(backups, ["rec-codex.json", "rec-pi-wedged.json"]);
     for (const name of backups) {
       const payload = await fs.readFile(path.join(backupDir, name), "utf8");
       assert.ok(payload.trim().length > 0, `${name} backup must not be empty`);

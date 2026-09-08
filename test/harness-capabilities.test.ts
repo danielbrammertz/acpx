@@ -395,7 +395,7 @@ test("no descriptor entry carries a permission field — asserted on a populated
   // POSITIVE CONTROL, in the same assertion: the object under test is populated
   // and a field that MUST be present parses out. Without this, an instrument
   // pointed at [] or null would report "no permission field" and pass.
-  assert.ok(capabilities.length >= 5);
+  assert.ok(capabilities.length >= 4);
   for (const capability of capabilities) {
     assert.ok(
       typeof capability.fork.atIndex === "string" && capability.fork.atIndex.length > 0,
@@ -524,13 +524,15 @@ test("the routed lists are the ones the shipped code has branches for", () => {
   // Pinned literally so a widening is a deliberate, visible change reviewed
   // alongside the apply-path branch that justifies it. The behavioural
   // agreement with the real gate is asserted above.
-  // B3 widened both, each in the same commit as the apply-path branch behind it:
-  // `config-option` for the model (applyModelAsConfigOption -> session/set_config_option)
-  // and `mode` for depth (applyDepthAsMode -> session/set_mode).
-  assert.deepEqual(
-    [...MODEL_MECHANISMS_ROUTED_BY_ACPX],
-    ["set-model", "compose-into-id", "config-option"],
-  );
+  // B3 widened depth with `mode` (applyDepthAsMode -> session/set_mode), in the
+  // same commit as the arm behind it.
+  //
+  // ⚠️ `config-option` IS ABSENT FROM THE MODEL LIST AND MUST STAY ABSENT UNTIL AN
+  // APPLY PATH EXISTS. acpx has no model-as-config-option branch; adding the entry
+  // alone re-creates the silent-brick defect verbatim (brick://2b02ccd3). It IS on
+  // the DEPTH list, and the two are different questions — do not copy one to the
+  // other for symmetry.
+  assert.deepEqual([...MODEL_MECHANISMS_ROUTED_BY_ACPX], ["set-model", "compose-into-id"]);
   assert.deepEqual([...DEPTH_MECHANISMS_ROUTED_BY_ACPX], ["config-option", "mode"]);
   // ⚠️ THIS LIST IS A GUARD, NOT A SNAPSHOT — pinned literally so an entry can
   // only arrive with the branch that serves it, reviewed in the same commit.
@@ -653,7 +655,7 @@ test("all six keys are PRESENT on all five blocks, and every boolean is a real b
   // POSITIVE CONTROL, in the same assertion and in the same shape as the
   // permission-field test above: an instrument pointed at [] or at rows missing
   // their populated cells would report "all present" while examining nothing.
-  assert.equal(capabilities.length, 5);
+  assert.equal(capabilities.length, 4);
   for (const capability of capabilities) {
     assert.ok(
       typeof capability.label === "string" && capability.label.length > 0,

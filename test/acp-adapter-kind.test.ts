@@ -90,9 +90,10 @@ test("acpAdapterKind classifies every adapter under BOTH the deployed /opt fork 
     );
     assert.equal(acpAdapterKind(npxForm), kind, `npx form must classify as ${kind}: ${npxForm}`);
   }
-  // The table must stay rectangular — five adapters, both shapes, no gaps. A row
-  // silently dropped would take its coverage with it and nothing else would say so.
-  assert.equal(ADAPTER_COMMAND_SHAPES.length, 5);
+  // The table must stay rectangular — every adapter, both shapes, no gaps. A row
+  // silently dropped would take its coverage with it and nothing else would say
+  // so, which is why the count is pinned rather than inferred from the loop.
+  assert.equal(ADAPTER_COMMAND_SHAPES.length, 4);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
