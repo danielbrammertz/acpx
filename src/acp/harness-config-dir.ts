@@ -1307,17 +1307,24 @@ function writePiModelProvisioning(
   modelId: string | undefined,
   files: string[],
 ): void {
-  if (modelId === undefined) {
-    // Return BEFORE `readPiAdvertisedModelIds`, which is a ~539 ms `spawnSync` on
-    // a cold cache. A session that named no model must not pay it to learn that
-    // it has nothing to look up.
-    writePiModelsConfig(dir, undefined, files);
-    return;
-  }
   // The box's catalogue is parsed fresh from disk on every call, so mutating the
   // entries here cannot reach anything else.
   const boxModels = readBoxPiOpenRouterModels(env);
   repairAnthropicBaseUrls(boxModels);
+
+  if (modelId === undefined) {
+    // Return BEFORE `readPiAdvertisedModelIds`, which is a ~539 ms `spawnSync` on
+    // a cold cache. A session that named no model must not pay it to learn that
+    // it has nothing to look up. `readBoxPiOpenRouterModels` above is a plain
+    // `readFileSync`, not that spawn, so hoisting it costs this branch nothing.
+    //
+    // ⚠️ AND THE CAP IS NOT GATED ON `modelId`, for exactly the reason the
+    // Anthropic `baseUrl` repair is not (see the call site): a session created
+    // without `--model` can still `session/set_model` onto any model pi offers,
+    // and would then be the one case this brick's fix did not cover.
+    writePiModelsConfig(dir, undefined, boxModels, files);
+    return;
+  }
 
   // ⚠️ THE GUARD ASKS ABOUT **PI'S** KNOWLEDGE, NOT THE OVERLAY'S (brick 6253611b).
   // The overlay alone was the wrong question: 333 of the 374 models pi advertises
@@ -1338,7 +1345,7 @@ function writePiModelProvisioning(
   // means "pi has a better entry than anything acpx could write".
   const provisioned = alreadyKnown ? undefined : buildPiCatalogueEntry(modelId, env);
 
-  writePiModelsConfig(dir, provisioned, files);
+  writePiModelsConfig(dir, provisioned, boxModels, files);
   writePiModelsStore(dir, boxModels, provisioned, files);
 }
 
@@ -1379,19 +1386,128 @@ function writePiModelProvisioning(
 function writePiModelsConfig(
   dir: string,
   provisioned: PiCatalogueModel | undefined,
+  boxModels: PiCatalogueModel[],
   files: string[],
 ): void {
-  const openrouter: { baseUrl: string; models?: PiCatalogueModel[] } = {
+  const openrouter: {
+    baseUrl: string;
+    models?: PiCatalogueModel[];
+    modelOverrides?: Record<string, { maxTokens: number }>;
+  } = {
     baseUrl: OPENROUTER_API_BASE,
   };
   if (provisioned) {
     openrouter.models = [piModelDefinition(provisioned)];
+  }
+  const overrides = buildPiMaxTokensOverrides(
+    provisioned ? [...boxModels, provisioned] : boxModels,
+  );
+  if (Object.keys(overrides).length > 0) {
+    openrouter.modelOverrides = overrides;
   }
   const configPath = join(dir, "models.json");
   writeFileSync(configPath, `${JSON.stringify({ providers: { openrouter } }, null, 2)}\n`, {
     mode: 0o600,
   });
   files.push(configPath);
+}
+
+/**
+ * A per-turn output budget, so pi cannot ask a provider for more than it will
+ * actually serve (brick 0095b715).
+ *
+ * ## What goes wrong without it
+ *
+ * pi requests `min(maxTokens, contextWindow − prompt − 4096)` on EVERY turn
+ * (`clampMaxTokensToContext`, pi 0.84.4 `dist/bundle/chunks/chunk-AXIIZGTV.js`)
+ * — i.e. it asks for the entire remaining context as *output*, every time. On
+ * `moonshotai/kimi-k2-thinking` that is 227 044 tokens, and the turn dies:
+ *
+ *     400 — "Requested maximum tokens of 227044 exceeds the maximum output
+ *            tokens limit: 102400."
+ *
+ * ## Why the catalogue cannot be repaired instead
+ *
+ * The obvious fix — write a *correct* `maxTokens` — is not available, and that
+ * is the whole finding. **A provider's advertised `max_completion_tokens` is not
+ * what it enforces.** OpenRouter clamps the request down to the advertised
+ * figure before forwarding (measured: `meta-llama/llama-3.3-70b-instruct` asked
+ * for 16 384 pinned to Together, which advertises 2 048 → **HTTP 200**), so
+ * over-advertising is harmless — but a provider that advertises MORE than it
+ * enforces makes the clamp land above its real limit and the request 400s.
+ * Measured 2026-09-08, from the providers' own words: Google advertises 235 929
+ * on kimi-k2-thinking and enforces 102 400; Novita advertises 100 352 and
+ * enforces 98 304; Google advertises 115 200 on llama-3.3-70b and enforces
+ * 8 193. **No catalogue field anywhere predicts this** — a structural pass over
+ * OpenRouter's own per-provider `/endpoints` data called 3 of the 5 observed
+ * live failures "safe". The enforced ceiling is knowable only by being refused.
+ * ⇒ asking for less is the only sound lever.
+ *
+ * ## Why 32 768
+ *
+ * The knee of the measured curve. Across pi's 363-entry catalogue, probing every
+ * one of the 1 109 (model, provider-endpoint) pairs live at the value pi would
+ * send: no cap leaves **7 unusable / 24 flaky**; 65 536 leaves 6/10; **32 768
+ * leaves 6/6**; and 16 384 and 8 192 buy nothing further while halving the
+ * output headroom again. Both models that were genuinely unusable
+ * (`kimi-k2-thinking`, `kimi-k2-0905`) are fixed here, confirmed by a paired
+ * live probe — refused at the uncapped value, ACCEPTED at 32 768. The 6 that
+ * remain are models whose context window is smaller than pi's own prompt, which
+ * no output cap can fix.
+ *
+ * 32 768 is far above any real coding turn (pi's own largest thinking budget is
+ * 16 384, leaving as much again for the answer), so this bounds a request pi
+ * never actually needed, not a response a user was going to get.
+ *
+ * ⚠️ **THE FIVE "LYING" PROVIDERS ARE A FLOOR, NOT A CENSUS.** They are what
+ * refused one box's key in one hour on 2026-09-08. **A 400 proves a lie; an
+ * acceptance does not prove honesty** — an endpoint was only ever asked for the
+ * one value pi computes for it, so every model whose request sits far below the
+ * advertised cap was never stressed and could still be lying. Do not quote the
+ * number as complete, and do not conclude from "only 5" that the residue is
+ * closed: {@link explainPiTurnError} exists precisely because this list cannot
+ * be finite or fresh.
+ */
+const PI_MAX_OUTPUT_TOKENS = 32_768;
+
+/**
+ * `models.json` `modelOverrides`, capping each id's `maxTokens`.
+ *
+ * `modelOverrides` is the right instrument and the only one: it is a MERGE over
+ * pi's own resolved model (`applyModelOverride` — `maxTokens: override.maxTokens
+ * ?? model.maxTokens`, everything else preserved), it is the topmost layer and
+ * applies after custom-model upserts and extension replacement, and it lives in
+ * `models.json` — **the layer a catalogue refresh cannot reach**. The same cap
+ * written into `models-store.json` would be erased the moment pi refreshes its
+ * own cache (brick 626f56f5).
+ *
+ * ⚠️ **NEVER RAISE — `applyModelOverride` REPLACES, it does not take a minimum.**
+ * An override of 32 768 on a model whose real ceiling is 4 096 would make pi ask
+ * for eight times what the model can serve, i.e. re-create this very bug in a
+ * new place. So the cap is `min(entry's own maxTokens, budget)` and an entry
+ * with no usable `maxTokens` gets NO override at all — pi's own value stands.
+ * Sourcing from the same entries acpx writes into `models-store.json` is what
+ * makes that sound by construction: the value capped here is the value pi will
+ * hold.
+ */
+function buildPiMaxTokensOverrides(
+  models: PiCatalogueModel[],
+): Record<string, { maxTokens: number }> {
+  const overrides: Record<string, { maxTokens: number }> = {};
+  for (const model of models) {
+    const id = model.id;
+    const maxTokens = (model as { maxTokens?: unknown }).maxTokens;
+    if (typeof id !== "string" || id.length === 0) {
+      continue;
+    }
+    // Not "falsy": a 0 or negative maxTokens is pi's own invalid-value territory
+    // (`modelFromJson` throws on it), and we have no basis to invent one here.
+    if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0) {
+      continue;
+    }
+    overrides[id] = { maxTokens: Math.min(maxTokens, PI_MAX_OUTPUT_TOKENS) };
+  }
+  return overrides;
 }
 
 /**

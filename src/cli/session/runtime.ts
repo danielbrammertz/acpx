@@ -14,6 +14,7 @@ import {
   injectionReturnsTerminalResponse,
 } from "../../acp/mid-turn-injection-support.js";
 import { assertRequestedModelSupported } from "../../acp/model-support.js";
+import { explainPiTurnError } from "../../acp/pi-turn-error.js";
 import { InterruptedError, withInterrupt, withTimeout } from "../../async-control.js";
 import { tailClaudeSubagentJsonl } from "../../claude-jsonl.js";
 import { transcriptCwdHash } from "../../config/subscription-transcript.js";
@@ -347,6 +348,36 @@ function deliveryPhaseForStopReason(
   stopReason: RunPromptResult["stopReason"],
 ): Exclude<DeliveryPhase, "accepted"> {
   return stopReason === "cancelled" ? "cancelled" : "done";
+}
+
+/**
+ * The failure note the delivery terminal carries, or `undefined` for a turn that
+ * did not fail.
+ *
+ * Two rules, and neither is tidiness:
+ *
+ *  - **A cancelled turn reports nothing** (brick 4ec33f59). `buildDeliveryEvent`
+ *    substitutes `EMPTY_DELIVERY_ERROR` whenever `error` is absent, and acpx-ui
+ *    treats a NON-EMPTY message as the failure note — so widening this would
+ *    stamp "the turn reported an error" onto successful turns app-wide.
+ *  - **An unexplained error passes through UNCHANGED** (brick 0095b715). A
+ *    token-ceiling refusal reaches the user as the raw provider payload — JSON
+ *    inside JSON, newlines escaped, naming no model — so it reads as "acpx is
+ *    broken" rather than "this one model cannot serve a turn".
+ *    `explainPiTurnError` authors acpx's own account of the causes it actually
+ *    understands and keeps the provider's text verbatim beneath it; for anything
+ *    else it returns `undefined` and the adapter's own wording survives, because
+ *    burying it under acpx boilerplate is the same harm in the other direction.
+ */
+function turnErrorForDeliveryTerminal(
+  terminalStopReason: RunPromptResult["stopReason"],
+  turnError: string | undefined,
+  currentModelId: string | undefined,
+): string | undefined {
+  if (terminalStopReason === "cancelled" || turnError === undefined) {
+    return undefined;
+  }
+  return explainPiTurnError(turnError, currentModelId) ?? turnError;
 }
 
 /**
@@ -2882,8 +2913,11 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
         // guard looks like defensive clutter; the reason lives in acpx-ui, whose
         // control `4ec33f59 CONTROL: a clean 'done' invents no note` goes red the
         // moment this widens. The acpx-side control below pins the same property.
-        const turnErrorForTerminal =
-          terminalStopReason === "cancelled" ? undefined : response.turnError;
+        const turnErrorForTerminal = turnErrorForDeliveryTerminal(
+          terminalStopReason,
+          response.turnError,
+          record.acpx?.current_model_id,
+        );
         await appendDeliveryTerminal(
           mainDeliveryContext,
           deliveryPhaseForStopReason(terminalStopReason),
