@@ -46,6 +46,7 @@ import { findModelsById, loadCatalogue } from "../models/catalogue.js";
 import { nativeAgentTypesForSource } from "../models/harness-models.js";
 import { parseModelRef } from "../models/model-slug-validation.js";
 import type { ModelCatalogue } from "../models/types.js";
+import type { SessionRecord } from "../types.js";
 import type { ArbitraryModelSupport, HarnessId } from "./harness-capabilities.js";
 import {
   ARBITRARY_MODEL_SUPPORT_ROUTED_BY_ACPX,
@@ -310,6 +311,56 @@ export async function resolveOpenRouterRoute(params: {
   // The key is OMITTED rather than set to `undefined`: a no-profile picker route
   // must stay deep-equal to what it was before this field existed.
   return { kind: "picker", model: routeModel, ...(profileBypass ? { profileBypass } : {}) };
+}
+
+/**
+ * Is THIS SESSION'S MODEL served by OpenRouter rather than by a Claude account?
+ *
+ * 🔑 THE AXIS THE CLAUDE-FAMILY GATE CANNOT SEE, AND THE ONE THAT WEDGED A USER.
+ * `isClaudeFamilyAgent` asks about the HARNESS. A picker-route session is
+ * Claude-family by harness and OpenRouter-served by MODEL: this module's header
+ * says it outright — *"a Claude subscription cannot serve an OpenRouter model at
+ * all"* — and `startPickerShim` runs it on the BOX key, deliberately never
+ * applying the profile's auth. So the profile on such a record pays for nothing,
+ * the adapter runs under the shim's own isolated `CLAUDE_CONFIG_DIR`, and **no
+ * Claude SDK transcript is ever written under any subscription anchor.**
+ *
+ * That is what makes a Claude account switch on such a session unrecoverable
+ * rather than merely pointless: `ensurePendingSwitchTranscript` (the resume end)
+ * then demands a transcript JSONL that cannot come into existence, and refuses
+ * the session at EVERY subsequent turn. Measured on devbox-staging 2026-09-08 —
+ * Daniel's session `9bbccf9a` took `sub5 -> sub7` with reason `selection` on its
+ * second message and died there; a search for its adapter session id found **zero
+ * transcript files** under sub7, sub5, any sibling, or `~/.claude`.
+ *
+ * ⚠️ ONLY THE PICKER ROUTE IS EXPOSED, AND THAT IS WHY THIS ASKS ABOUT THE MODEL.
+ * The LEGACY profile route is already safe by a different mechanism: its profile
+ * has `authMode: "openrouter"`, so every subscription-only path
+ * (`selectSubscriptionBeforeTurn`, `enforceSubscriptionLockBeforeTurn`) already
+ * bails on `authMode !== "subscription"`, and `transcriptAnchorDir` withholds
+ * failover. The picker route is the ONE configuration that pairs an
+ * OpenRouter-served session with a `subscription`-authMode profile — which is
+ * exactly the pairing the seam mistakes for a Claude account.
+ *
+ * ⚠️ NEVER THROWS, AND A COLD CACHE ANSWERS `false`. It delegates to
+ * {@link resolveOpenRouterRouteModel}, whose `undefined` is the documented
+ * stand-aside answer, rather than to {@link resolveOpenRouterRoute}, which throws
+ * on the two-OpenRouter-accounts conflict. Both properties are load-bearing here:
+ * a gate must not turn a cold third-party catalogue into a failed turn, and
+ * standing aside means *"treat it exactly as acpx did before"* — the same
+ * resolver on the same inputs the spawn used, so **the seam and the spawn cannot
+ * disagree about which credential is serving this session**, cold cache included.
+ */
+export async function recordIsOpenRouterServed(
+  record: Pick<SessionRecord, "agentCommand" | "acpx">,
+  options?: OpenRouterRouteOptions,
+): Promise<boolean> {
+  const routeModel = await resolveOpenRouterRouteModel({
+    agentCommand: record.agentCommand,
+    model: record.acpx?.session_options?.model,
+    ...(options ? { options } : {}),
+  });
+  return routeModel !== undefined;
 }
 
 /**

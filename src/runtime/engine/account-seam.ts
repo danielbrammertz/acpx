@@ -1,4 +1,5 @@
 import { isClaudeFamilyAgent } from "../../acp/agent-command.js";
+import { recordIsOpenRouterServed } from "../../acp/openrouter-routing.js";
 import {
   isSubscriptionProfileLocked,
   loadProfileRegistry,
@@ -119,6 +120,39 @@ function assertClaudeFamilySeam(record: SessionRecord): void {
   );
 }
 
+/**
+ * THE SAME SEAM, ON THE AXIS THE HARNESS PREDICATE ABOVE CANNOT SEE.
+ *
+ * A picker-route session is Claude-family by HARNESS and OpenRouter-served by
+ * MODEL, so {@link assertClaudeFamilySeam} admits it: the credential that pays is
+ * the box OpenRouter key, `startPickerShim` never applies the profile's auth, and
+ * the adapter runs under the shim's own isolated `CLAUDE_CONFIG_DIR` — so there
+ * is no Claude account to switch BETWEEN and no transcript to port. Wedged
+ * Daniel's session on devbox-staging 2026-09-08.
+ *
+ * ⚠️ THIS IS THE MANUAL PATH'S HALF OF A TWO-PART GATE, AND IT MUST NOT BE THE
+ * ONLY HALF. Throwing is right for `acpx <agent> set profile …` — a user asking
+ * for something impossible should be told so. It would be WRONG for the automatic
+ * callers (`selection` / `locked` / `failover`), which would then fail the turn
+ * instead of wedging it: a different bad outcome, not a fix. Those never arrive
+ * here because `selectedProfileId` (`failover.ts`) withholds the profile for an
+ * OpenRouter-served record, exactly as it does for a non-Claude one. If that
+ * withholding is ever removed, this throw becomes a turn-killer — the two are one
+ * mechanism and must be read together.
+ */
+async function assertClaudeAccountServesSession(record: SessionRecord): Promise<void> {
+  if (!(await recordIsOpenRouterServed(record))) {
+    return;
+  }
+  throw new AccountSwitchError(
+    `session ${record.acpxRecordId} is served by OpenRouter (model ` +
+      `"${record.acpx?.session_options?.model ?? "<unset>"}"), not by a Claude account: its turns are ` +
+      `paid for by this box's OpenRouter provider key, so there is no Claude subscription to switch ` +
+      `and no Claude transcript to port. Change the session's model to a Claude-native one first if ` +
+      `you want it on a subscription.`,
+  );
+}
+
 function recordAccountSwitch(
   record: SessionRecord,
   fromProfile: ProfileEntry,
@@ -185,6 +219,7 @@ export async function switchSessionAccount(
   loadOpts?: SubscriptionLookupOptions,
 ): Promise<SwitchSessionAccountResult> {
   assertClaudeFamilySeam(record);
+  await assertClaudeAccountServesSession(record);
   const targetId = toProfileId.trim();
   if (!targetId) {
     throw new AccountSwitchError("target profile id is empty");

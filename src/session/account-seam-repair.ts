@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { isClaudeFamilyAgent } from "../acp/agent-command.js";
+import { recordIsOpenRouterServed } from "../acp/openrouter-routing.js";
 import type { SessionRecord } from "../types.js";
 import { listSessions, sessionBaseDir, writeSessionRecord } from "./persistence.js";
 
@@ -46,7 +47,14 @@ import { listSessions, sessionBaseDir, writeSessionRecord } from "./persistence.
  *   nobody has seen.
  * - It does not touch a record with a **live queue owner**: those are skipped and
  *   listed, never waited on.
- * - It does not touch a Claude-family record at all, for any reason.
+ * - It does not touch a Claude-family record **that a Claude account actually
+ *   serves**. ⚠️ That qualifier is load-bearing and this line used to lack it
+ *   ("not a Claude-family record at all, for any reason"), which became false the
+ *   moment the picker route shipped: a picker-route session is Claude-family by
+ *   HARNESS and OpenRouter-served by MODEL, so it carries the same meaningless
+ *   `profile` / `account_switch` and dies the same permanent death at resume.
+ *   {@link classifyRecord} therefore asks about the model too, and such records
+ *   ARE swept — see its comment for why the conjunction can only widen.
  */
 
 /**
@@ -90,7 +98,7 @@ export interface AccountSeamRepairEntry {
 export interface AccountSeamRepairResult {
   /** Every record the sweep read. */
   scanned: number;
-  /** Claude-family records, left untouched by construction. */
+  /** Claude-family records that a Claude account genuinely serves, left untouched. */
   skippedClaudeFamily: number;
   /** Records with no `agent_command` (subagents); deliberately not swept. */
   skippedUnknownAgent: number;
@@ -207,12 +215,26 @@ type RecordVerdict =
   | { kind: "already-clean" }
   | { kind: "repair"; entry: AccountSeamRepairEntry };
 
-function classifyRecord(record: SessionRecord): RecordVerdict {
+async function classifyRecord(record: SessionRecord): Promise<RecordVerdict> {
   const agentCommand = record.agentCommand.trim();
   if (agentCommand.length === 0) {
     return { kind: "skip-unknown-agent" };
   }
-  if (isClaudeFamilyAgent(agentCommand)) {
+  // ⚠️ CLAUDE-FAMILY IS NO LONGER A SUFFICIENT REASON TO SKIP, AND THAT IS THE
+  // POINT OF THIS BRANCH. The sweep was written when "Claude-family harness"
+  // implied "served by a Claude account", so it skipped such records by
+  // construction. A picker-route session breaks that implication: it IS the
+  // claude harness, and its model is served by OpenRouter on the box key, so it
+  // has no Claude account and no transcript — the same wedged state this sweep
+  // exists to clear, reached down a route the harness predicate cannot see. Such
+  // a record must be REPAIRED, not skipped, or the very sessions that motivated
+  // this fix (Daniel's `9bbccf9a`, devbox-staging 2026-09-08) stay dead.
+  //
+  // The conjunction's order matters: the model is consulted only for records the
+  // harness gate would have skipped, so a non-Claude record still takes exactly
+  // the original path and this branch can only WIDEN the swept population, never
+  // narrow it.
+  if (isClaudeFamilyAgent(agentCommand) && !(await recordIsOpenRouterServed(record))) {
     return { kind: "skip-claude-family" };
   }
   const options: Record<string, unknown> = record.acpx?.session_options ?? {};
@@ -296,7 +318,7 @@ export async function repairAccountSeamRecords(
   };
 
   for (const record of records) {
-    const verdict = classifyRecord(record);
+    const verdict = await classifyRecord(record);
     if (verdict.kind !== "repair") {
       result[SKIP_COUNTERS[verdict.kind]] += 1;
       continue;

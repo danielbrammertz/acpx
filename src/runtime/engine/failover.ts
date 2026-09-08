@@ -5,6 +5,7 @@ import {
   formatErrorMessage,
 } from "../../acp/error-normalization.js";
 import { extractAcpError } from "../../acp/error-shapes.js";
+import { recordIsOpenRouterServed } from "../../acp/openrouter-routing.js";
 import {
   findProfile,
   isSubscriptionProfileLocked,
@@ -517,10 +518,10 @@ function defaultProfileId(loadOpts?: SubscriptionLookupOptions): string | undefi
   return loadProfileRegistry(loadOpts).default?.trim() || undefined;
 }
 
-function selectedProfileId(
+async function selectedProfileId(
   record: SessionRecord,
   loadOpts?: SubscriptionLookupOptions,
-): string | undefined {
+): Promise<string | undefined> {
   // The Claude-family gate comes FIRST, ahead of the stored value, because a
   // stored `profile` on a non-Claude record is exactly the corruption this
   // programme is repairing: a record already wedged by the pre-fix selector
@@ -545,6 +546,28 @@ function selectedProfileId(
   if (!isClaudeFamilyAgent(record.agentCommand)) {
     return undefined;
   }
+  // ⚠️ THE SAME WITHHOLDING, ON THE SECOND AXIS — and it must be withheld HERE
+  // rather than refused at the switch, or the cure is worse than the disease.
+  // A picker-route session passes the harness gate above (it IS claude) while its
+  // model is served by OpenRouter on the box key: `startPickerShim` never applies
+  // this profile's auth, so the profile pays for nothing and the session has no
+  // Claude transcript. Left resolvable, the pre-turn selector treats it as
+  // subscription-backed, rotates it on headroom (`selection`), and the persisted
+  // `account_switch` then makes the resume gate demand a transcript that cannot
+  // exist — the identical ending the comment above records for Pi, reached down a
+  // route the harness predicate cannot see. Daniel, devbox-staging 2026-09-08.
+  //
+  // ⚠️ WITHHOLD, DO NOT THROW. `assertClaudeFamilySeam` refuses the MANUAL switch
+  // loudly, which is right for a user who asked for something impossible. But the
+  // callers reached from here are the AUTOMATIC ones (`selection`, `locked`,
+  // `failover`), and a throw there would kill the very turn this fix exists to
+  // keep alive — trading a wedged session for a failing one. Returning `undefined`
+  // is what makes currentProfile() / failoverEnabledForRecord() /
+  // selectSubscriptionBeforeTurn() / enforceSubscriptionLockBeforeTurn() no-op,
+  // which is precisely the behaviour an OpenRouter-served session should have.
+  if (await recordIsOpenRouterServed(record)) {
+    return undefined;
+  }
   const stored = storedSelectionId(record);
   if (stored !== undefined) {
     return stored;
@@ -552,11 +575,11 @@ function selectedProfileId(
   return defaultProfileId(loadOpts);
 }
 
-function currentProfile(
+async function currentProfile(
   record: SessionRecord,
   loadOpts?: SubscriptionLookupOptions,
-): ResolvedProfile | undefined {
-  const id = selectedProfileId(record, loadOpts);
+): Promise<ResolvedProfile | undefined> {
+  const id = await selectedProfileId(record, loadOpts);
   return id ? findProfile(id, loadProfileRegistry(loadOpts)) : undefined;
 }
 
@@ -579,14 +602,14 @@ function failureContext(
   return errorEffectiveAccount(error) ?? metadataFromProfile(fallbackProfile);
 }
 
-export function failoverEnabledForRecord(
+export async function failoverEnabledForRecord(
   record: SessionRecord,
   loadOpts?: SubscriptionLookupOptions,
-): boolean {
+): Promise<boolean> {
   if (!autoFailoverEnabledForRecord(record)) {
     return false;
   }
-  const profile = currentProfile(record, loadOpts);
+  const profile = await currentProfile(record, loadOpts);
   return profile !== undefined && transcriptAnchorDir(profile) !== null;
 }
 
@@ -942,7 +965,7 @@ export async function enforceSubscriptionLockBeforeTurn(
   loadOpts?: SubscriptionLookupOptions,
 ): Promise<SubscriptionLockEnforcementResult> {
   const registry = loadProfileRegistry(loadOpts);
-  const current = currentProfile(record, loadOpts);
+  const current = await currentProfile(record, loadOpts);
   if (
     !current ||
     current.authMode !== "subscription" ||
@@ -1014,7 +1037,7 @@ async function selectSubscriptionBeforeTurnUnsafe(
   if (proactiveSelectionDisabled(record)) {
     return {};
   }
-  const current = currentProfile(record, loadOpts);
+  const current = await currentProfile(record, loadOpts);
   // Only subscription-auth sessions participate; non-subscription profiles have no
   // headroom/reset probe to select on.
   if (!current || current.authMode !== "subscription") {
@@ -1309,7 +1332,7 @@ export async function attemptFailoverAndRetry<T>(args: {
   loadOpts?: SubscriptionLookupOptions;
   verbose?: boolean;
 }): Promise<FailoverRetryResult<T>> {
-  const current = currentProfile(args.record, args.loadOpts);
+  const current = await currentProfile(args.record, args.loadOpts);
   if (!current) {
     throw new AllSubscriptionsExhaustedError("failover unavailable - no selected profile");
   }

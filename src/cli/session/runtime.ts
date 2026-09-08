@@ -1362,7 +1362,7 @@ async function resolveFailoverRecord(
     return null;
   }
   const record = await resolveSessionRecord(sessionRecordId);
-  if (!failoverEnabledForRecord(record)) {
+  if (!(await failoverEnabledForRecord(record))) {
     return null;
   }
   return record;

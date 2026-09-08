@@ -9,6 +9,7 @@ import {
 } from "../../acp/error-normalization.js";
 import { depthMechanismForAgentCommand } from "../../acp/harness-capabilities.js";
 import { RequestedModelUnsupportedError } from "../../acp/model-support.js";
+import { recordIsOpenRouterServed } from "../../acp/openrouter-routing.js";
 import { InterruptedError, TimeoutError, withTimeout } from "../../async-control.js";
 import { findProfile, loadProfileRegistry, transcriptAnchorDir } from "../../config/profiles.js";
 import {
@@ -895,6 +896,20 @@ async function ensurePendingSwitchTranscript(
   // conception is explicit that both ends are needed, and this is the end that
   // makes the one-shot sweep a cleanup rather than a rescue.
   if (!isClaudeFamilyAgent(record.agentCommand)) {
+    return;
+  }
+  // ⚠️ THE SECOND AXIS, AND THE ONE THE PREDICATE ABOVE CANNOT SEE. A picker-route
+  // session IS Claude-family by harness — so every gate keyed on `agentCommand`
+  // passes — while its model is served by OpenRouter on the box key, under the
+  // shim's own isolated CLAUDE_CONFIG_DIR. It therefore writes no Claude SDK
+  // transcript under ANY subscription anchor, and the port below cannot find one
+  // to move: the refusal is permanent, not a race. This is the end that FREES a
+  // record already carrying the switch, exactly as the harness gate above does
+  // for a non-Claude one — the writer gate alone would leave Daniel's session
+  // (and every one like it) dead. Measured on devbox-staging 2026-09-08:
+  // `9bbccf9a` took `sub5 -> sub7` (reason "selection") on its SECOND message and
+  // has zero transcript files anywhere on the box.
+  if (await recordIsOpenRouterServed(record)) {
     return;
   }
   // Real turns only (brick://509b4ee1): a breadcrumb-only session has no

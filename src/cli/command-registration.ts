@@ -162,8 +162,10 @@ export function registerSessionsCommand(
   sessionsCommand
     .command("repair-account-seam")
     .description(
-      "Clear Claude-family profile / account_switch from NON-Claude session records that the " +
-        "account seam wedged (idempotent; backs up every record it rewrites)",
+      "Clear Claude-family profile / account_switch from session records the account seam " +
+        "wedged — non-Claude harnesses, AND claude sessions whose model is served by OpenRouter " +
+        "(the picker route), which have no Claude account either (idempotent; backs up every " +
+        "record it rewrites)",
     )
     .option("--dry-run", "List what would be repaired and write nothing")
     .option(
