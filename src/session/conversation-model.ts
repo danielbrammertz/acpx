@@ -1053,7 +1053,22 @@ const SESSION_UPDATE_HANDLERS: Record<string, SessionUpdateHandler> = {
     if (update.sessionUpdate === "usage_update") {
       applyUsageUpdate(conversation, update);
       rememberContextWindow(acpx, update);
-      rememberCostFromUsageUpdate(acpx, update);
+      // ⚠️ GUARDED, AND THE GUARD IS MEASURED RATHER THAN DEFENSIVE. An unguarded
+      // call here took the WHOLE update with it when it threw: a paired real-turn
+      // control (same cwd, model and prompt, only the binary varied) showed
+      // `context_window_size` — a PRE-EXISTING shipped field written two lines up
+      // — landing as 262144 on origin/main and as null with this call added, on
+      // three arms. The unit suite was green in every one. Cost is enrichment; it
+      // must never be able to cost the caller its update.
+      //
+      // 🛑 AND IT REPORTS RATHER THAN SWALLOWING. A silent catch would leave the
+      // feature inert while looking healthy — the exact defect this brick exists
+      // to fix (a module with no caller, nothing persisted, nothing said).
+      try {
+        rememberCostFromUsageUpdate(acpx, update);
+      } catch (error) {
+        reportCostIngestFailure(error);
+      }
     }
   },
   session_info_update: (conversation, _acpx, update) => {
@@ -1114,6 +1129,20 @@ function applyUsageUpdate(conversation: SessionConversation, update: UsageUpdate
   if (userId) {
     conversation.request_token_usage[userId] = usage;
   }
+}
+
+let costIngestFailureReported = false;
+
+/** Say it ONCE per process: enough to be discovered, not enough to flood a turn. */
+function reportCostIngestFailure(error: unknown): void {
+  if (costIngestFailureReported) {
+    return;
+  }
+  costIngestFailureReported = true;
+  process.stderr.write(
+    `[acpx] session cost not recorded (the turn is unaffected): ` +
+      `${error instanceof Error ? error.message : String(error)}\n`,
+  );
 }
 
 /**
