@@ -1,4 +1,3 @@
-import { deriveBilling } from "../models/catalogue.js";
 import {
   type CostUnit,
   deriveCostFigure,
@@ -6,7 +5,11 @@ import {
   type SessionCostFigure,
   type UnitRates,
 } from "../models/cost-provenance.js";
-import { defaultCatalogueCachePath, readOpenRouterCacheSync } from "../models/openrouter-catalogue.js";
+import {
+  defaultCatalogueCachePath,
+  type OpenRouterRawModel,
+  readOpenRouterCacheSync,
+} from "../models/openrouter-catalogue.js";
 import type { SessionAcpxState } from "../types.js";
 
 /**
@@ -66,23 +69,22 @@ export function lookupUnitRates(
   modelId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): UnitRates | null {
-  const bare = modelId.startsWith("openrouter/") ? modelId.slice("openrouter/".length) : modelId;
   const snapshot = readOpenRouterCacheSync(defaultCatalogueCachePath(env));
-  const row = snapshot?.models.find((model) => model.id === bare);
+  // ⚠️ TRY THE ID AS GIVEN BEFORE STRIPPING, AND THE ORDER IS THE FIX.
+  // `openrouter/` is usually a SELECTOR prefix (`openrouter/z-ai/glm-5.3-flash` →
+  // the row `z-ai/glm-5.3-flash`), but it is also a real VENDOR: the row
+  // `openrouter/auto-beta` IS its own id. Stripping unconditionally makes every
+  // openrouter-vendor model unfindable, which prices a real session as `unpriced`
+  // — caught by the drift pin against the live catalogue, not reasoned about.
+  const row =
+    snapshot?.models.find((model) => model.id === modelId) ??
+    (modelId.startsWith("openrouter/")
+      ? snapshot?.models.find((model) => model.id === modelId.slice("openrouter/".length))
+      : undefined);
   if (!row) {
     return null;
   }
-  const billing = deriveBilling(row);
-  const quoted = [billing.inPerM, billing.outPerM];
-  return {
-    inPerM: billing.inPerM,
-    outPerM: billing.outPerM,
-    cacheReadPerM: billing.cacheReadPerM,
-    cacheWritePerM: billing.cacheWritePerM,
-    // A POSITIVE row quoting zero on both billed axes. `null` (unquoted) is not
-    // zero, so it can never reach here as `free`.
-    measuredFree: quoted.every((rate) => rate === 0),
-  };
+  return ratesFromPricing(row.pricing);
 }
 
 /**
@@ -144,4 +146,74 @@ export function rememberSessionCost(
 export function costFigureFromUnits(acpx: SessionAcpxState): SessionCostFigure | undefined {
   const units = acpx.cost_units;
   return units && units.length > 0 ? deriveCostFigure(units) : undefined;
+}
+
+/**
+ * ⚠️ DERIVED HERE RATHER THAN VIA `deriveBilling`, AND THE REASON IS THE BUNDLE.
+ *
+ * `models/catalogue.ts` pulls in `acp/harness-capabilities.ts` and the capability
+ * chain. Importing it from THIS module — which the `usage_update` handler calls on
+ * every assistant message — put a heavy subgraph on a hot path and, in the BUNDLED
+ * `dist/` build, produced a circular initialisation that silently killed the whole
+ * update: measured 2026-09-08 in a paired real-turn control, same cwd, same model,
+ * same prompt, only the binary varied —
+ *
+ *     deployed build : context_window_size 262144   ✓
+ *     with that import: context_window_size null    ✗   (a PRE-EXISTING field, killed)
+ *
+ * The unit suite was green in both. `dist-test/` preserves modules and the bundle
+ * does not, so the failure was invisible to every test and visible only on a real
+ * turn — which is precisely the trap this brick is about.
+ *
+ * ⇒ This module depends ONLY on leaves: `cost-provenance.ts` (no imports) and
+ * `openrouter-catalogue.ts` (node built-ins only).
+ *
+ * 🛑 THE DUPLICATION IS PINNED, NOT TRUSTED. `cost-ingest.test.ts` asserts this
+ * agrees with `deriveBilling` on the real catalogue rows, so the two cannot drift
+ * apart silently — do not "simplify" it back into an import.
+ */
+function ratesFromPricing(pricing: OpenRouterRawModel["pricing"]): UnitRates {
+  const prompt = pricing?.prompt;
+  // `-1` is OpenRouter's VARIABLE marker — a price that exists but is not quoted.
+  // It is not zero and it is not free; it is unpriceable, which `deriveCostFigure`
+  // turns into `unpriced`.
+  if (prompt === "-1") {
+    return {
+      inPerM: null,
+      outPerM: null,
+      cacheReadPerM: null,
+      cacheWritePerM: null,
+      measuredFree: false,
+    };
+  }
+  const inPerM = perMillion(prompt);
+  const outPerM = perMillion(pricing?.completion);
+  const cacheReadPerM = perMillion(pricing?.input_cache_read);
+  const cacheWritePerM = perMillion(pricing?.input_cache_write);
+  // A MEASURED zero: the row QUOTES zero on both billed axes. An unquoted rate is
+  // `null`, never 0, so absence of a ROW can never reach `free`.
+  const measuredFree = inPerM === 0 && (outPerM ?? 0) === 0;
+  if (measuredFree) {
+    // ⚠️ ON THE FREE BRANCH, UNQUOTED CACHE RATES ARE ZERO — mirroring
+    // `deriveBilling`. Leaving them `null` here is not conservative, it is WRONG:
+    // `priceUnit` refuses a unit whose cacheRead is non-zero with a null cache
+    // rate, so a genuinely free model that used cached tokens would come back
+    // `unpriced` instead of `free` — the exact conflation this brick removes,
+    // inverted. (Caught by the drift pin against a real row,
+    // `inclusionai/ling-3.0-flash-sante:free`, which quotes 0/0 and no cache rates.)
+    return {
+      inPerM: 0,
+      outPerM: 0,
+      cacheReadPerM: cacheReadPerM ?? 0,
+      cacheWritePerM: cacheWritePerM ?? 0,
+      measuredFree: true,
+    };
+  }
+  return { inPerM, outPerM, cacheReadPerM, cacheWritePerM, measuredFree };
+}
+
+/** USD-per-token (OpenRouter's unit) → USD per 1M, which is what `UnitRates` states. */
+function perMillion(rate: string | number | null | undefined): number | null {
+  const value = typeof rate === "string" ? Number.parseFloat(rate) : rate;
+  return typeof value === "number" && Number.isFinite(value) ? value * 1_000_000 : null;
 }

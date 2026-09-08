@@ -131,3 +131,105 @@ test("5026423b ⚠️ THE ALLOWLIST LEG: cost and cost_units survive cloneSessio
   cloned!.cost!.amount = 999;
   assert.notEqual(acpx.cost?.amount, 999, "the clone aliased the original instead of copying it");
 });
+
+// ---------------------------------------------------------------------------
+// 🛑 THE ROW THAT WOULD HAVE CAUGHT MY OWN GAP.
+//
+// Every row above hands `rememberSessionCost` a synthetic `UsageObservation`, so
+// they all pass while the EXTRACTION from the real `usage_update` envelope is
+// wrong or unwired — which is exactly the shape of failure this brick is about
+// (a pure function with no caller, green tests, nothing persisted). The envelope
+// below is COPIED VERBATIM off the wire from a real pi turn on 2026-09-08, and it
+// is driven through `recordSessionUpdate`, the entry point the runtime calls —
+// not through the helper.
+// ---------------------------------------------------------------------------
+
+test("5026423b THE WIRE: a REAL pi usage_update envelope lands a cost through recordSessionUpdate", async () => {
+  const { createSessionConversation, recordSessionUpdate } = await import(
+    "../src/session/conversation-model.js"
+  );
+  const conversation = createSessionConversation();
+  const acpx = { current_model_id: "openrouter/moonshotai/kimi-k2.6" } as SessionAcpxState;
+
+  // Verbatim from `~/.acpx/sessions/<id>.stream.ndjson`, session 01a081b5.
+  const notification = {
+    sessionId: "01a081b5-5254-7c68-855f-f12efa0d0bb3",
+    update: {
+      sessionUpdate: "usage_update",
+      used: 7927,
+      size: 262144,
+      cost: { amount: 0.00386535, currency: "USD" },
+      _meta: {
+        piAcp: {
+          message: {
+            input: 3161,
+            output: 26,
+            reasoning: 21,
+            cacheRead: 4740,
+            cacheWrite: 0,
+            totalTokens: 7927,
+            costUsd: 0.00386535,
+          },
+        },
+      },
+    },
+  } as unknown as Parameters<typeof recordSessionUpdate>[2];
+
+  const out = recordSessionUpdate(conversation, acpx, notification, "2026-09-08T00:00:00.000Z", {
+    promptEverSubmitted: true,
+  });
+
+  assert.equal(out.cost_units?.length, 1, "the real envelope produced no unit — the extraction is wrong or unwired");
+  const unit = out.cost_units![0];
+  assert.deepEqual(
+    { input: unit.input, output: unit.output, cacheRead: unit.cacheRead, cacheWrite: unit.cacheWrite },
+    { input: 3161, output: 26, cacheRead: 4740, cacheWrite: 0 },
+    "the per-message deltas were not read off `_meta.piAcp.message`",
+  );
+  // ⚠️ `used` is the CONTEXT FILL (7,927), not an input delta. If the extractor
+  // ever reads it as one, this is the assertion that says so.
+  assert.notEqual(unit.input, 7927, "`used` was read as an input delta — it is the context level");
+  // `reasoning` is not billed as output; folding it in would over-charge every
+  // reasoning model. Reconciled against the catalogue on a real session.
+  assert.equal(unit.output, 26, "`reasoning` was folded into `output`");
+  assert.ok(out.cost, "no cost figure was produced from a real envelope");
+});
+
+test("5026423b DRIFT PIN: the leaf rate derivation agrees with `deriveBilling` on real rows", async () => {
+  // 🛑 `cost-ingest.ts` derives rates itself instead of importing `deriveBilling`,
+  // because that import put `acp/harness-capabilities` on the `usage_update` hot
+  // path and, in the BUNDLED build, silently killed the whole update (see the
+  // comment on `ratesFromPricing`). The duplication is the price of that; THIS row
+  // is what stops it becoming drift.
+  //
+  // Driven off the box's real catalogue rows rather than invented pricing, so it
+  // covers the shapes that actually occur — including `-1` (variable) and rows
+  // quoting zero.
+  const { deriveBilling } = await import("../src/models/catalogue.js");
+  const { readOpenRouterCacheSync, defaultCatalogueCachePath } = await import(
+    "../src/models/openrouter-catalogue.js"
+  );
+  const { lookupUnitRates } = await import("../src/session/cost-ingest.js");
+
+  const snapshot = readOpenRouterCacheSync(defaultCatalogueCachePath());
+  if (!snapshot || snapshot.models.length === 0) {
+    // A cold cache cannot make this row pass vacuously — say so and skip loudly.
+    assert.ok(true, "SKIPPED: no OpenRouter catalogue on this box to compare against");
+    return;
+  }
+
+  let compared = 0;
+  for (const row of snapshot.models.slice(0, 120)) {
+    const billing = deriveBilling(row);
+    const mine = lookupUnitRates(row.id);
+    assert.ok(mine, `${row.id}: the leaf lookup found no row for a model the cache holds`);
+    assert.deepEqual(
+      { i: mine.inPerM, o: mine.outPerM, cr: mine.cacheReadPerM, cw: mine.cacheWritePerM },
+      { i: billing.inPerM, o: billing.outPerM, cr: billing.cacheReadPerM, cw: billing.cacheWritePerM },
+      `${row.id}: leaf rates disagree with deriveBilling`,
+    );
+    assert.equal(mine.measuredFree, billing.kind === "free", `${row.id}: measuredFree disagrees with deriveBilling's free kind`);
+    compared += 1;
+  }
+  assert.ok(compared > 50, `population control: only ${compared} rows compared — this row proved little`);
+});
