@@ -261,13 +261,18 @@ test("pi DOES get a generated models-store.json now that the merge semantics are
     // Same split as the row this replaces: acpx's own bookkeeping is judged apart
     // from what the harness consumes, so a NEW entry in either still fails here.
     const harnessVisible = written.filter((entry) => !entry.startsWith("."));
-    // `settings.json` joined this list with the pi stall policy (brick 3437c6b5).
+    // `settings.json` joined this list with the pi stall policy (brick 3437c6b5),
+    // and `models.json` with the catalogue-refresh fix (brick 626f56f5) — pi
+    // OVERWRITES `models-store.json` on a refresh, so the durable copy of the
+    // provisioned slug and the Anthropic base-URL repair lives in the config file
+    // pi only ever reads.
     // The row failing on a new entry is the contract working, not a nuisance: it
     // is the only thing that notices acpx quietly adding a file to a directory a
     // harness reads, so it is UPDATED here rather than loosened.
     assert.deepEqual(harnessVisible.toSorted(), [
       "APPEND_SYSTEM.md",
       "models-store.json",
+      "models.json",
       "settings.json",
     ]);
     assert.deepEqual(
@@ -580,13 +585,23 @@ test("no primer and no model still yields a dir and the env vars", () => {
     });
     assert.ok(plan);
     assert.ok(env.PI_CODING_AGENT_DIR);
-    // No primer and no model ⇒ no APPEND_SYSTEM.md and no models-store.json; the
-    // stall policy is unconditional, so `settings.json` is the whole content.
+    // No primer and no model ⇒ no APPEND_SYSTEM.md and no models-store.json.
+    // The two UNCONDITIONAL files are the whole content: the stall policy
+    // (`settings.json`, brick 3437c6b5) and the Anthropic base-URL repair
+    // (`models.json`, brick 626f56f5) — the latter because a session that named no
+    // model can still `session/set_model` onto one of pi's 15 broken
+    // `anthropic-messages` rows, measured to return an empty turn.
     assert.deepEqual(
       readdirSync(env.PI_CODING_AGENT_DIR)
         .filter((entry) => !entry.startsWith("."))
         .toSorted(),
-      ["settings.json"],
+      ["models.json", "settings.json"],
+    );
+    // …and with nothing to provision it carries ONLY the repair, never a
+    // fabricated `models[]` that would shadow a real row.
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(env.PI_CODING_AGENT_DIR, "models.json"), "utf8")),
+      { providers: { openrouter: { baseUrl: "https://openrouter.ai/api/v1" } } },
     );
   });
 });

@@ -1038,9 +1038,21 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   // ⚠️ BUT `models-store.json` IS PI'S OWN CACHE, AND PI OVERWRITES IT — which is
   // why the durable copy of both facts goes in `models.json`. See
   // {@link writePiModelProvisioning}.
-  if (input.provisionModelId) {
-    writePiModelProvisioning(dir, input.env, stripProviderPrefix(input.provisionModelId), files);
-  }
+  //
+  // ⚠️ AND THIS IS NO LONGER GATED ON `provisionModelId`. The Anthropic repair was
+  // never *about* provisioning — it rode along inside the provisioning write
+  // because that is where the file happened to be produced. Gating it there left
+  // it missing in the default case: a session created without `--model` can still
+  // `session/set_model` onto any of pi's 15 broken `anthropic-messages` rows.
+  // Measured 2026-09-08 on such a dir (`APPEND_SYSTEM.md` + `settings.json` only):
+  // the refresh landed 15 broken rows, `set_model` reported success, and the turn
+  // came back with `content: []` — no answer, no usable error.
+  writePiModelProvisioning(
+    dir,
+    input.env,
+    input.provisionModelId ? stripProviderPrefix(input.provisionModelId) : undefined,
+    files,
+  );
   writePiStallPolicy(dir, files);
   // ⚠️ KEEP pi's SESSION STORE WHERE IT WAS — read BEFORE the re-point below,
   // which is the last moment the box's own agent dir is still reachable through
@@ -1290,9 +1302,18 @@ function piAlreadyKnows(
 function writePiModelProvisioning(
   dir: string,
   env: NodeJS.ProcessEnv,
-  modelId: string,
+  /** `undefined` ⇒ the session named no model. There is nothing to provision, but
+   *  the repair is still written; see the call site. */
+  modelId: string | undefined,
   files: string[],
 ): void {
+  if (modelId === undefined) {
+    // Return BEFORE `readPiAdvertisedModelIds`, which is a ~539 ms `spawnSync` on
+    // a cold cache. A session that named no model must not pay it to learn that
+    // it has nothing to look up.
+    writePiModelsConfig(dir, undefined, files);
+    return;
+  }
   // The box's catalogue is parsed fresh from disk on every call, so mutating the
   // entries here cannot reach anything else.
   const boxModels = readBoxPiOpenRouterModels(env);
