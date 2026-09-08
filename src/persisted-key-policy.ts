@@ -130,3 +130,124 @@ export function assertPersistedKeyPolicy(value: unknown): void {
     `Persisted key policy violation (expected snake_case keys): ${violations.join(", ")}`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// COMPILE-TIME TWIN OF THE RUNTIME POLICY ABOVE
+// ---------------------------------------------------------------------------
+
+/**
+ * 🛑 THE RUNTIME CHECK ABOVE FIRES TOO LATE TO PROTECT ANYONE — IT THROWS FROM
+ * INSIDE THE WRITE, BEFORE `fs.writeFile`, AND THE THROW IS SWALLOWED.
+ *
+ * brick://48aca560. One camelCase key added anywhere reachable from
+ * {@link SessionAcpxState} makes `assertPersistedKeyPolicy` throw on EVERY
+ * subsequent session-record write. The record on disk then silently freezes at
+ * its last successful state: in-memory values stay correct, no exception
+ * surfaces, and everything written from that moment on is lost. Measured on
+ * `fix/5026423b-persist-cost`, where `cost_units[].cacheRead` alone stopped
+ * `context_window_size` — an unrelated, pre-existing, shipped field — from ever
+ * reaching disk again.
+ *
+ * Two other guards were blind to it and stay blind by construction:
+ * `scripts/lint-persisted-key-casing.ts` checks ONE HAND-WRITTEN fixture record
+ * and cannot see a field invented after it was written, and no unit test drives
+ * a cost-bearing record through the write path.
+ *
+ * This assertion is the one that fires BEFORE the change ships. It is derived
+ * from the TYPE, so a newly added field is covered with nothing to register and
+ * no list to maintain — `pnpm run typecheck` names the offending key and fails.
+ *
+ * ⚠️ SCOPE, stated rather than implied: this catches an UPPERCASE letter in a
+ * key, which is the camelCase hazard that has actually bitten. The runtime
+ * policy is stricter (`/^[a-z][a-z0-9_]*$/`, so it also rejects `cache-read` and
+ * a leading digit) and remains the authority; this is a fast, maintenance-free
+ * net under the failure mode that occurs, not a restatement of the regex.
+ */
+export type PersistedAcpxKeysAreSnakeCase = RequireNoOffendingKeys<
+  OffendingKeys<import("./types.js").SessionAcpxState>
+>;
+
+/** Fails the constraint — and NAMES the key — as soon as an offender exists. */
+type RequireNoOffendingKeys<Offenders extends never> = Offenders;
+
+/** Values that hold no persisted keys of their own; recursion stops here. */
+type LeafValue = string | number | boolean | bigint | symbol | null | undefined;
+
+/**
+ * String keys of `T` that are known at compile time.
+ *
+ * An index signature (`Record<string, …>`) contributes the key `string`, whose
+ * members are chosen at runtime and so can never be checked here — the runtime
+ * policy skips those same map objects (`MAP_OBJECT_PATHS`) for the identical
+ * reason. Their VALUES are still walked below; only the key names are exempt.
+ */
+type StaticKeyOf<T> =
+  Extract<keyof T, string> extends infer Key
+    ? Key extends string
+      ? string extends Key
+        ? never
+        : Key
+      : never
+    : never;
+
+/**
+ * Compile-time-known keys of `T` that carry an uppercase letter and are not
+ * explicitly permitted by the runtime policy.
+ *
+ * ⚠️ BOTH EXEMPTIONS BELOW ARE DELIBERATELY UNSCOPED BY PATH, where the runtime
+ * ones are path-scoped. That asymmetry is safe in exactly one direction: this
+ * guard can only ever MISS a violation the runtime still catches, never invent
+ * one. A guard that reds on legitimate code gets disabled; a guard that is
+ * merely incomplete still catches the case that has actually bitten twice.
+ */
+type NonSnakeKeyOf<T> = {
+  [K in StaticKeyOf<T>]: K extends Lowercase<K> ? never : K extends PermittedKey ? never : K;
+}[StaticKeyOf<T>];
+
+/**
+ * Mirrors `ACCOUNT_SWITCH_KEYS` — camelCase keys the runtime policy grants an
+ * explicit exception to. Grandfathered, not a precedent: a NEW persisted key
+ * belongs in snake_case, and adding to this union is how you opt out of the
+ * only check that would have caught brick://48aca560.
+ */
+type PermittedKey =
+  | "fromProfile"
+  | "toProfile"
+  | "fromAccount"
+  | "toAccount"
+  | "effectiveAccount"
+  | "effectiveProfile"
+  | "effectiveAuthMode"
+  | "effectiveAnchor"
+  | "effectiveResolutionMethod";
+
+/**
+ * Mirrors the `acpx.*` entries of `OPAQUE_VALUE_PATHS` — fields the runtime
+ * policy does not descend into because their interior is an opaque passthrough
+ * of someone else's shape (an adapter's advertised config options).
+ */
+type OpaqueFieldName = "config_options" | "desired_config_options";
+
+/**
+ * Every offending key reachable from `T`.
+ *
+ * `Depth` bounds the walk so a self-referential type cannot make the compiler
+ * recurse forever; 8 clears the deepest persisted nesting we have with room to
+ * spare (`cost_units[] -> rates -> …` bottoms out at 4).
+ */
+type OffendingKeys<T, Depth extends readonly unknown[] = []> = Depth["length"] extends 8
+  ? never
+  : T extends LeafValue
+    ? never
+    : T extends readonly (infer Element)[]
+      ? OffendingKeys<Element, [...Depth, unknown]>
+      : T extends object
+        ?
+            | NonSnakeKeyOf<T>
+            | {
+                [K in Exclude<Extract<keyof T, string>, OpaqueFieldName>]: OffendingKeys<
+                  NonNullable<T[K]>,
+                  [...Depth, unknown]
+                >;
+              }[Exclude<Extract<keyof T, string>, OpaqueFieldName>]
+        : never;

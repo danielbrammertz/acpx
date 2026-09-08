@@ -884,8 +884,21 @@ export type SessionAcpxState = {
      */
     provisioning_warning?: {
       at: string;
-      profileId?: string;
-      authMode?: string;
+      /**
+       * ⚠️ snake_case, and NOT cosmetic: these two were `profileId`/`authMode`
+       * from 2026-06-13 until brick://48aca560, and that made this breadcrumb
+       * DEAD ON ARRIVAL. `assertPersistedKeyPolicy` runs before `fs.writeFile`,
+       * so the first warning to fire threw inside the write, the throw was
+       * swallowed by `LiveSessionCheckpoint`, and the session's record silently
+       * froze — losing not just this breadcrumb but every field written after
+       * it. No exception, correct in-memory state, green suite.
+       *
+       * Renaming needed no back-compat parse leg: the policy (a44dd8b,
+       * 2026-02-28) predates the field (5f474d5, 2026-06-13), so no record can
+       * ever have been written carrying the camelCase form.
+       */
+      profile_id?: string;
+      auth_mode?: string;
       adapter?: string;
       anchor?: string;
       message: string;

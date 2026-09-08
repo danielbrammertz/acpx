@@ -14,8 +14,8 @@ import { subscriptionRegistryPath, type SubscriptionLookupOptions } from "./subs
 
 export type ProvisioningWarningBreadcrumb = {
   at: string;
-  profileId?: string;
-  authMode?: string;
+  profile_id?: string;
+  auth_mode?: string;
   adapter?: string;
   anchor?: string;
   message: string;
@@ -165,8 +165,8 @@ function warnInvalidOsHarnessConfig(
 ): void {
   emitProvisioningWarning(
     {
-      profileId: profile.id,
-      authMode: profile.authMode,
+      profile_id: profile.id,
+      auth_mode: profile.authMode,
       adapter: profile.adapter,
       message:
         `profile "${profile.id}" has invalid osHarness provisioning config; ` +
@@ -221,8 +221,8 @@ function warnForError(
   const detail = params.error instanceof Error ? params.error.message : String(params.error);
   emitProvisioningWarning(
     {
-      profileId: params.profile.id,
-      authMode: params.profile.authMode,
+      profile_id: params.profile.id,
+      auth_mode: params.profile.authMode,
       adapter: params.profile.adapter,
       ...(params.anchor !== undefined ? { anchor: params.anchor } : {}),
       message: `${params.message}: ${detail}`,
@@ -269,8 +269,8 @@ function symlinkEntry(params: {
   if (!existsSync(source)) {
     emitProvisioningWarning(
       {
-        profileId: params.profile.id,
-        authMode: params.profile.authMode,
+        profile_id: params.profile.id,
+        auth_mode: params.profile.authMode,
         adapter: params.profile.adapter,
         anchor: params.anchor,
         message: `osHarness source entry missing: ${source}`,
@@ -291,8 +291,8 @@ function symlinkEntry(params: {
     } else {
       emitProvisioningWarning(
         {
-          profileId: params.profile.id,
-          authMode: params.profile.authMode,
+          profile_id: params.profile.id,
+          auth_mode: params.profile.authMode,
           adapter: params.profile.adapter,
           anchor: params.anchor,
           message: `osHarness entry ${target} already exists and is not the acpx-owned symlink; leaving it unchanged`,
@@ -364,8 +364,8 @@ function sourceHookEntry(
   if (!existsSync(sourceSettingsPath)) {
     emitProvisioningWarning(
       {
-        profileId: ctx.profile.id,
-        authMode: ctx.profile.authMode,
+        profile_id: ctx.profile.id,
+        auth_mode: ctx.profile.authMode,
         adapter: ctx.profile.adapter,
         anchor: ctx.anchor,
         message: `osHarness source settings missing: ${sourceSettingsPath}`,
@@ -380,8 +380,8 @@ function sourceHookEntry(
   if (sourceEntry === undefined) {
     emitProvisioningWarning(
       {
-        profileId: ctx.profile.id,
-        authMode: ctx.profile.authMode,
+        profile_id: ctx.profile.id,
+        auth_mode: ctx.profile.authMode,
         adapter: ctx.profile.adapter,
         anchor: ctx.anchor,
         message:
@@ -403,8 +403,8 @@ function targetSettingsObject(
   if (!targetSettings) {
     emitProvisioningWarning(
       {
-        profileId: ctx.profile.id,
-        authMode: ctx.profile.authMode,
+        profile_id: ctx.profile.id,
+        auth_mode: ctx.profile.authMode,
         adapter: ctx.profile.adapter,
         anchor: ctx.anchor,
         message: `osHarness target settings is not a JSON object: ${targetSettingsPath}`,
@@ -425,8 +425,8 @@ function targetHooksObject(
   if (existingHooks !== undefined && !isRecord(existingHooks)) {
     emitProvisioningWarning(
       {
-        profileId: ctx.profile.id,
-        authMode: ctx.profile.authMode,
+        profile_id: ctx.profile.id,
+        auth_mode: ctx.profile.authMode,
         adapter: ctx.profile.adapter,
         anchor: ctx.anchor,
         message: `osHarness target settings has non-object hooks; leaving ${targetSettingsPath} unchanged`,
@@ -447,8 +447,8 @@ function targetEventHooks(
   if (existingEventHooks !== undefined && !isUnknownArray(existingEventHooks)) {
     emitProvisioningWarning(
       {
-        profileId: ctx.profile.id,
-        authMode: ctx.profile.authMode,
+        profile_id: ctx.profile.id,
+        auth_mode: ctx.profile.authMode,
         adapter: ctx.profile.adapter,
         anchor: ctx.anchor,
         message:
@@ -473,8 +473,8 @@ function maybeWarnForModifiedHookEntry(
   }
   emitProvisioningWarning(
     {
-      profileId: ctx.profile.id,
-      authMode: ctx.profile.authMode,
+      profile_id: ctx.profile.id,
+      auth_mode: ctx.profile.authMode,
       adapter: ctx.profile.adapter,
       anchor: ctx.anchor,
       message:
@@ -577,8 +577,8 @@ function materializeProfileOsHarness(
   if (profile.adapter === "codex") {
     emitProvisioningWarning(
       {
-        profileId: profile.id,
-        authMode: profile.authMode,
+        profile_id: profile.id,
+        auth_mode: profile.authMode,
         adapter: profile.adapter,
         message: "no harness materializer for adapter family codex",
       },
@@ -591,8 +591,8 @@ function materializeProfileOsHarness(
   if (!anchor) {
     emitProvisioningWarning(
       {
-        profileId: profile.id,
-        authMode: profile.authMode,
+        profile_id: profile.id,
+        auth_mode: profile.authMode,
         adapter: profile.adapter,
         message: `profile "${profile.id}" has no osHarness materialization anchor`,
       },

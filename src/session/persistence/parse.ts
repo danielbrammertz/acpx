@@ -674,14 +674,15 @@ function assignSessionOptionAccountSwitch(
   };
 }
 
-function isValidProvisioningWarning(record: Record<string, unknown>): record is {
-  at: string;
-  profileId?: string;
-  authMode?: string;
-  adapter?: string;
-  anchor?: string;
-  message: string;
-} {
+/**
+ * ⚠️ The predicate names the CANONICAL type rather than restating its fields.
+ * It used to carry a hand-copied duplicate of the shape, which is how
+ * `profileId`/`authMode` survived here after brick://48aca560 renamed them —
+ * a second declaration is a second thing to forget.
+ */
+function isValidProvisioningWarning(
+  record: Record<string, unknown>,
+): record is NonNullable<NonNullable<SessionAcpxState["session_options"]>["provisioning_warning"]> {
   return (
     typeof record.at === "string" &&
     record.at.length > 0 &&
@@ -700,8 +701,8 @@ function assignSessionOptionProvisioningWarning(
   }
   options.provisioning_warning = {
     at: record.at,
-    ...(typeof record.profileId === "string" ? { profileId: record.profileId } : {}),
-    ...(typeof record.authMode === "string" ? { authMode: record.authMode } : {}),
+    ...(typeof record.profile_id === "string" ? { profile_id: record.profile_id } : {}),
+    ...(typeof record.auth_mode === "string" ? { auth_mode: record.auth_mode } : {}),
     ...(typeof record.adapter === "string" ? { adapter: record.adapter } : {}),
     ...(typeof record.anchor === "string" ? { anchor: record.anchor } : {}),
     message: record.message,
