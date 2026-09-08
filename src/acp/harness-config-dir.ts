@@ -1068,23 +1068,61 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   return { harness: "pi", dir, envNames, files };
 }
 
-/** pi's HTTP idle bound for acpx-PROVISIONED sessions, in ms. See {@link writePiStallPolicy}. */
-const PI_HTTP_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * pi's HTTP idle bound for acpx-PROVISIONED sessions, in ms. See
+ * {@link writePiStallPolicy}.
+ *
+ * 🛑 **INTERIM (brick 5aacdba2) — 120 000 WAS CUTTING DANIEL'S HEALTHY TURNS.**
+ * Measured from his session `01a0827e`'s own `timestamps.ndjson`
+ * (`openrouter/qwen/qwen3.8-flash`, 2026-09-08): four stream gaps of
+ * **119.98 / 119.90 / 120.07 / 120.07 s** — all within 0.1 s of 120.000, with
+ * ~85 KB of real streaming in between, one burst of 48 KB in 7.66 s. **A flaky
+ * provider gives 8 s, 47 s, 200 s; it does not give 120.0 s four times.** The
+ * timer was ours, and two of us told him it was the model before anyone measured
+ * the gaps.
+ *
+ * 300 000 is pi's own default, so a first token up to 300 s is no longer cut.
+ */
+const PI_HTTP_IDLE_TIMEOUT_MS = 300_000;
 
 /**
  * pi retries a failed turn `maxRetries` times, so ATTEMPTS = 1 + this.
  *
- * 🛑 **`1` IS A COMPENSATION FOR A MISSING DEADLINE, NOT A CONSIDERED PERMANENT
- * VALUE — do not read it as tuning.** `maxRetries` governs **every** transient
- * failure (rate limits, 5xx, network blips), not just idle stalls, so dropping
- * pi's default of 3 to 1 buys the wall-clock target by **spending resilience
- * against a different failure class**. That trade is acceptable only because pi
- * has no total-turn deadline (see {@link writePiStallPolicy}), which makes the
- * `idle × attempts` product the only lever available.
+ * 🛑 **`0` IS AN INTERIM STOPGAP WITH AN EXPIRY, NOT A DECISION — AND IT SPENDS
+ * THE LAST RETRY (brick 5aacdba2).** `maxRetries` governs **every** transient
+ * failure (rate limits, 5xx, network blips), not just idle stalls. Brick
+ * `3437c6b5` already cut pi's default of 3 to 1, and warned in this very comment
+ * that doing so **spends resilience against a different failure class**. Going to
+ * `0` spends the rest. It is acceptable **only** because it is temporary and
+ * because a retry against a *stall* mostly bought another full window of silence
+ * rather than a different outcome — it never helped the case it was paying for.
+ *
+ * ⚠️ **`0` IS VALID AND MEANS EXACTLY ONE ATTEMPT — MEASURED, NOT ASSUMED.**
+ * pi reads it as `this.settings.retry?.maxRetries ?? 3`
+ * (`core/settings-manager.js:595`), and `??` preserves `0` where `||` would have
+ * silently restored `3`. Both attempt guards agree (`agent-session.js:431`
+ * `_retryAttempt >= maxRetries`, `:2285` `> maxRetries`). Confirmed on the wire
+ * against a black-hole server that accepts and sends nothing, `idle` 5 000:
+ *
+ * ```
+ *   maxRetries 0 -> 1 attempt      maxRetries 1 -> 2      maxRetries 3 -> 4
+ *   inter-attempt gaps for 3: 7 015 / 9 006 / 13 011 ms = idle + 2 000·2^n
+ * ```
+ *
+ * ⇒ **THE WORST-CASE FORMULA BELOW IS CONFIRMED AGAINST THAT MEASUREMENT**, not
+ * merely restated: at `idle` 5 000 × 4 attempts it predicts 34 000 ms and the
+ * final attempt failed at ~34 032 ms.
+ *
+ * 🛑 **WHAT THIS INTERIM DOES *NOT* FIX, so nobody reads it as the fix:** it does
+ * not bound a stall that keeps emitting SSE keepalives (those are bytes, so this
+ * bound is inert at ANY value — see {@link writePiStallPolicy}), and it does not
+ * bound the **mid-stream** cut Daniel also hit. Both need the no-progress
+ * deadline in acpx's own code — 5aacdba2. **When that lands, restore pi's own
+ * 300 000 × 4 here and delete this note.**
  *
  * ⇒ **When a turn deadline lands in acpx's own code, this should go back up.**
  */
-const PI_TURN_MAX_RETRIES = 1;
+const PI_TURN_MAX_RETRIES = 0;
 
 /**
  * Bound how long an acpx-provisioned pi session sits in dead air when the
@@ -1107,12 +1145,34 @@ const PI_TURN_MAX_RETRIES = 1;
  * worst case ≈ idleMs × (1 + maxRetries) + baseDelayMs × (2^maxRetries − 1)
  * ```
  *
- * At 120 000 / 1 that is **4 m 02 s**, inside the ≤ ~5 min target.
+ * **Confirmed on the wire, not just restated** (brick 5aacdba2): against a
+ * black-hole server at `idle` 5 000, attempts were 1 / 2 / 4 for `maxRetries`
+ * 0 / 1 / 3, inter-attempt gaps `idle + 2 000·2^n` (7 015 / 9 006 / 13 011 ms),
+ * and the 4-attempt arm's final failure landed at ~34 032 ms against the
+ * formula's 34 000.
+ *
+ * **The three configurations this brick weighed, all from the formula above:**
+ *
+ * ```
+ *   idle × attempts (retries)   covers a first token to   worst case
+ *   120 000 × 2   (1)                    120 s             4 m 02 s   ← cut Daniel's healthy turns
+ *   300 000 × 1   (0)                    300 s             5 m 00 s   ← CURRENT (interim)
+ *   300 000 × 4   (3)                    300 s            20 m 14 s   ← pi's default; the original 20-min hang
+ * ```
+ *
+ * The interim takes the middle row: it covers a first token to 300 s instead of
+ * 120 s **and still lands inside the ≤ ~5 min target**, which the 120 000 row only
+ * met by cutting healthy requests. It buys that with the last retry — see
+ * {@link PI_TURN_MAX_RETRIES}.
+ *
  * ⚠️ **The ruling's own wording — "idle ~120 s × 2 retries" — is 3 attempts and
- * 6 m 06 s, i.e. OVER the target it sets.** One retry is chosen over two so the
- * per-attempt window can stay at the generous 120 s: against a *provider* stall a
- * second retry mostly buys another full window of silence rather than a different
- * outcome, whereas a shorter window is what starts cutting healthy requests.
+ * 6 m 06 s, i.e. OVER the target it sets.** Kept on the page because it is the
+ * ruling's text, not because it was ever implemented.
+ *
+ * 🛑 **AND THIS FORMULA STOPS GOVERNING THE USER'S WAIT once the no-progress
+ * deadline lands in acpx (5aacdba2): acpx will cut first, so `idle × attempts`
+ * will bound pi's retry budget and NOT the wall clock.** Retire this block then
+ * rather than leaving two competing formulas on the page.
  *
  * ## 🛑 WHAT THIS DOES NOT BUY — and it is half the failure space
  *

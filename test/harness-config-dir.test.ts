@@ -361,6 +361,13 @@ test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR insi
       "the budget formula no longer reproduces the 20m14s default it was derived from",
     );
 
+    // ⚠️ THE INTERIM (brick 5aacdba2) SITS EXACTLY ON THIS BUDGET, WITH ZERO
+    // HEADROOM: 300 000 × 1 attempt + 2 000 × 0 = 300 000. That is deliberate, not
+    // luck — it is the largest first-token window (300 s, pi's own default) that
+    // still fits the ≤ 5 min target, bought by spending the last retry. So ANY
+    // increase to either value turns this row red, which is the point: the next
+    // change to these numbers must be the no-progress deadline that makes this
+    // formula stop governing the user's wait, not a bigger number here.
     const budgetMs = worstCaseMs(settings.httpIdleTimeoutMs, settings.retry.maxRetries);
     assert.ok(
       budgetMs <= 300_000,
