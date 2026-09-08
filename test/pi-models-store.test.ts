@@ -117,7 +117,19 @@ function fixture(options: {
   };
 }
 
-function storeFor(fx: Fixture, provisionModelId: string): { path: string; json: any } | null {
+/**
+ * ONE write, both files. The two must be read from the same
+ * `applyHarnessConfigDir` call, or the "they cannot disagree" assertion below
+ * would be comparing two independent writes and would pass on a real divergence.
+ */
+function provisioningFor(
+  fx: Fixture,
+  provisionModelId: string,
+): {
+  dir: string;
+  store: { path: string; json: any } | null;
+  config: { path: string; json: any } | null;
+} {
   const plan = applyHarnessConfigDir({
     env: fx.env,
     agentCommand: PI_COMMAND,
@@ -126,11 +138,15 @@ function storeFor(fx: Fixture, provisionModelId: string): { path: string; json: 
     rootDir: join(fx.root, "cfg"),
   });
   assert.ok(plan, "applyHarnessConfigDir must produce a plan for the pi harness");
-  const path = join(plan.dir, "models-store.json");
-  if (!existsSync(path)) {
-    return null;
-  }
-  return { path, json: JSON.parse(readFileSync(path, "utf8")) };
+  const read = (name: string) => {
+    const path = join(plan.dir, name);
+    return existsSync(path) ? { path, json: JSON.parse(readFileSync(path, "utf8")) } : null;
+  };
+  return { dir: plan.dir, store: read("models-store.json"), config: read("models.json") };
+}
+
+function storeFor(fx: Fixture, provisionModelId: string): { path: string; json: any } | null {
+  return provisioningFor(fx, provisionModelId).store;
 }
 
 test("CASE 1 — a model acpx CAN price gets pi's REAL rates, window and output cap, never zeros", () => {
@@ -227,6 +243,122 @@ test("CASE 4 — with the box overlay file ABSENT (the box's ACTUAL state) both 
     const unknown = storeFor(fx, "openrouter/vendor/never-heard-of-it");
     assert.ok(unknown, "unknown ⇒ still provisioned");
     assert.equal(unknown.json.openrouter.models.length, 1, "and the overlay contributes nothing");
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Brick 626f56f5 — a catalogue refresh must not be able to revert provisioning.
+//
+// `models-store.json` is pi's OWN cache and pi overwrites it: `FileModelsStore.write`
+// assigns `current["openrouter"] = entry`, so a refresh replaces the whole block.
+// The durable copy therefore lives in `models.json`, which pi only ever reads.
+//
+// 🛑 THESE TESTS PIN THE FILE'S SHAPE. THEY DO NOT — AND CANNOT — PROVE SURVIVAL.
+// A fixture cannot show that a real refresh leaves this layer standing; that was
+// measured against a live `pi --mode rpc` process with `checkedAt` aged 5 h, in
+// paired arms, and the evidence is in brick 626f56f5 `verification/`. If these
+// tests are ever the only thing standing behind the survival claim, the claim is
+// unsupported.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The one value the provider-wide `baseUrl` override is allowed to be, and the
+ * measurement that licenses applying it to EVERY openrouter model.
+ *
+ * Measured 2026-09-08 against pi 0.84.4's live catalogue (379 openrouter models,
+ * read over `pi --mode rpc` → `get_available_models`):
+ *
+ *   364 × https://openrouter.ai/api/v1     ← already correct; the override is a no-op
+ *    15 × https://openrouter.ai/api        ← every `anthropic-messages` row; the bug
+ *
+ * There is no third value, which is what makes a blanket override safe. **If a
+ * future pi serves an openrouter model on some other base URL, this override
+ * would rewrite it — re-measure the histogram when the pinned pi version moves.**
+ */
+const PI_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+test("626f56f5 — models.json is written for EVERY provisioned pi session, store or no store", () => {
+  // The `alreadyKnown` path deliberately writes NO models-store.json (CASE 3).
+  // The durable layer must still exist there, because the Anthropic repair is
+  // needed whether or not acpx also has a slug to add — and on this fleet it is
+  // needed ONLY there: the 15 broken rows are not bundled, they arrive with pi's
+  // refresh, so the store-side repair has nothing to act on.
+  const fx = fixture({ piKnows: [KNOWN_ID], catalogue: [KNOWN_ROW] });
+  try {
+    const { store, config } = provisioningFor(fx, `openrouter/${KNOWN_ID}`);
+    assert.equal(store, null, "known slug ⇒ still no models-store.json (CASE 3 unchanged)");
+    assert.ok(config, "…but models.json MUST be written: it carries the Anthropic repair");
+    assert.equal(
+      config.json.providers.openrouter.baseUrl,
+      PI_OPENROUTER_BASE_URL,
+      "the repair is a provider-wide baseUrl — modelOverrides cannot express baseUrl at all",
+    );
+    assert.equal(
+      "models" in config.json.providers.openrouter,
+      false,
+      "a slug pi already knows must NOT be shadowed: pi rebuilds a models.json model " +
+        "from the definition alone, so an entry here would lose its thinkingLevelMap",
+    );
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("626f56f5 — an arbitrary slug reaches models.json, and the two files cannot disagree", () => {
+  const fx = fixture({ piKnows: [], catalogue: [KNOWN_ROW] });
+  try {
+    const { store, config } = provisioningFor(fx, `openrouter/${KNOWN_ID}`);
+    assert.ok(store, "unknown slug ⇒ a store entry, as before");
+    assert.ok(config, "…and the durable copy a refresh cannot reach");
+
+    const definitions = config.json.providers.openrouter.models;
+    assert.equal(definitions.length, 1, "exactly the provisioned slug, never a whole catalogue");
+    const definition = definitions[0];
+    assert.equal(definition.id, KNOWN_ID);
+    assert.equal(definition.baseUrl, PI_OPENROUTER_BASE_URL);
+
+    // ⚠️ `provider` is NOT a field of pi's ModelDefinitionSchema (pi sets it from
+    // the block key). The shape measured working live is the one without it, and
+    // an invalid models.json does not fail loudly — `ModelConfig.load` returns an
+    // error and pi composes with an EMPTY config, so the whole layer vanishes.
+    assert.equal(
+      "provider" in definition,
+      false,
+      "provider must be stripped: it is not in pi's ModelDefinitionSchema",
+    );
+
+    // The structural half: both files describe the SAME entry from ONE write, so
+    // a change to either writer that lets them drift turns this red.
+    const storeEntry = store.json.openrouter.models.find((m: any) => m.id === KNOWN_ID);
+    assert.ok(storeEntry, "the store must carry the same slug");
+    const { provider, ...storeWithoutProvider } = storeEntry;
+    assert.equal(provider, "openrouter", "the store form DOES carry provider — pi's cache shape");
+    assert.deepEqual(
+      definition,
+      storeWithoutProvider,
+      "models.json and models-store.json must describe one entry, differing only in `provider`",
+    );
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("626f56f5 — an unpriceable slug still gets pi's mandatory zero cost block in models.json", () => {
+  // Same necessity as CASE 2, on the new leg: pi dereferences `cost` unconditionally
+  // (`calculateCost` throws on a missing block), and `modelFromJson` would otherwise
+  // substitute its own zeros anyway. Pinned here so the definition builder cannot be
+  // "tidied" into omitting it on this path only.
+  const fx = fixture({ piKnows: [], catalogue: [] });
+  try {
+    const { config } = provisioningFor(fx, "openrouter/vendor/never-heard-of-it");
+    assert.ok(config);
+    const definition = config.json.providers.openrouter.models[0];
+    assert.equal(definition.id, "vendor/never-heard-of-it");
+    assert.deepEqual(definition.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    assert.equal(definition.contextWindow, 128_000);
+    assert.equal(definition.maxTokens, 16_384);
   } finally {
     rmSync(fx.root, { recursive: true, force: true });
   }

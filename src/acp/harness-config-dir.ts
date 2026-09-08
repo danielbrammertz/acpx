@@ -1034,9 +1034,25 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   // 404 (I2 R6, root-caused at the wire). Every entry generated here therefore
   // carries `https://openrouter.ai/api/v1`, and because the merge is BY ID this
   // also repairs a bundled entry rather than merely adding new ones.
-  if (input.provisionModelId) {
-    writePiModelsStore(dir, input.env, stripProviderPrefix(input.provisionModelId), files);
-  }
+  //
+  // ⚠️ BUT `models-store.json` IS PI'S OWN CACHE, AND PI OVERWRITES IT — which is
+  // why the durable copy of both facts goes in `models.json`. See
+  // {@link writePiModelProvisioning}.
+  //
+  // ⚠️ AND THIS IS NO LONGER GATED ON `provisionModelId`. The Anthropic repair was
+  // never *about* provisioning — it rode along inside the provisioning write
+  // because that is where the file happened to be produced. Gating it there left
+  // it missing in the default case: a session created without `--model` can still
+  // `session/set_model` onto any of pi's 15 broken `anthropic-messages` rows.
+  // Measured 2026-09-08 on such a dir (`APPEND_SYSTEM.md` + `settings.json` only):
+  // the refresh landed 15 broken rows, `set_model` reported success, and the turn
+  // came back with `content: []` — no answer, no usable error.
+  writePiModelProvisioning(
+    dir,
+    input.env,
+    input.provisionModelId ? stripProviderPrefix(input.provisionModelId) : undefined,
+    files,
+  );
   writePiStallPolicy(dir, files);
   // ⚠️ KEEP pi's SESSION STORE WHERE IT WAS — read BEFORE the re-point below,
   // which is the last moment the box's own agent dir is still reachable through
@@ -1158,10 +1174,53 @@ function writePiStallPolicy(dir: string, files: string[]): void {
 }
 
 /**
- * Generate pi's per-session `models-store.json` so an arbitrary OpenRouter slug
- * resolves — and repair pi's broken Anthropic entries on the way past.
+ * Make an arbitrary OpenRouter slug resolve under pi, and repair pi's broken
+ * Anthropic base URLs — in a way a catalogue refresh cannot undo.
  *
- * ## The two measurements this is built on (pi 0.84.4, brick ef5999ca)
+ * ## 🛑 TWO FILES, AND THE SECOND ONE IS WHAT MAKES EITHER GUARANTEE HOLD (brick 626f56f5)
+ *
+ * `models-store.json` is **pi's own cache of its remote catalogue, and pi
+ * OVERWRITES IT.** `FileModelsStore.write` (`dist/core/models-store.js:92-102`)
+ * assigns `current["openrouter"] = entry`, so a refresh REPLACES the whole
+ * provider block — provisioned slug and Anthropic repair with it. The `checkedAt`
+ * stamp below suppresses that refresh for 4 h
+ * (`REMOTE_CATALOG_REFRESH_INTERVAL_MS`, `remote-catalog-provider.js:6,58-63`)
+ * and no longer than 4 h.
+ *
+ * **Measured live on pi 0.84.4, one process, paired arms, `checkedAt` aged 5 h**
+ * (brick 626f56f5 `verification/`). Both arms took a real refresh — the store
+ * went 1 → 363 models and gained pi.dev's own etag — and then:
+ *
+ * ```
+ *                             store-only (before)      + models.json (after)
+ *   broken anthropic entries          15                        0
+ *   provisioned entry            REVERTED to pi.dev's      preserved
+ *                                (baseUrl lost /v1,
+ *                                 ctx 200k → 1M)
+ * ```
+ *
+ * `models.json` is pi's **user config**, which pi only ever READS
+ * (`ModelConfig.load`, `model-config.js:212`) — nothing in pi writes it. And
+ * `composeModelProvider().getModels()` re-runs
+ * `applyModelsJson(providerId, base.getModels(), config)` **on every call**
+ * (`provider-composer.js`), while a refresh only mutates `dynamicModels` inside
+ * `withRemoteCatalog`. So this layer is re-applied on top of whatever the refresh
+ * produced. **That is why the guarantee is structural and not a race we won.**
+ *
+ * ⚠️ **THE BRICK'S OWN FRAMING — "mid-session, at the 4 h mark" — IS WRONG, AND
+ * THE CORRECTION IS WHERE THE NEXT READER SHOULD LOOK.** In pi's RPC mode (the
+ * only mode pi-acp uses) the catalogue refresh is a **one-shot fired at pi
+ * PROCESS STARTUP** — `main.js:739-746`, comment *"RPC refreshes catalogs here in
+ * the background"*; grepped, there is no periodic timer and no RPC verb that
+ * refreshes. So nothing fires 4 h into a running process. What the expiry
+ * actually decides is whether the **next pi process** clobbers the block: a stamp
+ * older than 4 h at startup, and it does — in seconds, which is how the arms
+ * above reproduced it without waiting.
+ *
+ * ⇒ **NEVER move either fact back into `models-store.json` alone.** It reads like
+ * a simplification (one file, one merge) and it is the defect: pi owns that file.
+ *
+ * ## The measurements the store side is built on (pi 0.84.4, brick ef5999ca)
  *
  * **It MERGES, by id.** `mergeModels(baseline, dynamic)`
  * (`dist/core/remote-catalog-provider.js:7-16`) replaces a same-id model and
@@ -1198,11 +1257,15 @@ function writePiStallPolicy(dir: string, files: string[]): void {
  * still serves 15 such entries. Because the merge is by id, patching them in the
  * copied overlay repairs them for the session rather than merely adding new ones.
  *
- * ⚠️ `checkedAt` is stamped NOW deliberately: pi refreshes the remote catalogue
- * when that is older than 4 h, and a refresh REPLACES the whole `openrouter`
- * block — provisioned slug and Anthropic repair included. A session running
- * longer than 4 h can therefore lose both. Recorded rather than worked around;
- * the fix belongs in pi's own merge, not in a second copy of it here.
+ * ⚠️ **AND ON THIS FLEET THAT COPY REPAIRS NOTHING, WHICH IS THE SECOND REASON
+ * THE `models.json` LAYER EXISTS.** The 15 broken entries are **not bundled** —
+ * measured 2026-09-08, pi's bundled 333 openrouter models are *all*
+ * `openai-completions` on the correct `…/api/v1`, and the broken
+ * `anthropic-messages` rows arrive only with the remote refresh. So a repair
+ * applied to the box's overlay copy can only fix entries the box already cached,
+ * and every dev box's overlay is empty (`~/.pi/agent/models-store.json` is `{}`).
+ * The provider-level `baseUrl` in `models.json` repairs rows acpx has never seen,
+ * including any future broken one, without touching their other metadata.
  */
 /**
  * pi's own catalogue ships `https://openrouter.ai/api` — no `/v1` — for all 15
@@ -1236,16 +1299,25 @@ function piAlreadyKnows(
   return piKnown?.has(modelId) ?? false;
 }
 
-function writePiModelsStore(
+function writePiModelProvisioning(
   dir: string,
   env: NodeJS.ProcessEnv,
-  modelId: string,
+  /** `undefined` ⇒ the session named no model. There is nothing to provision, but
+   *  the repair is still written; see the call site. */
+  modelId: string | undefined,
   files: string[],
 ): void {
+  if (modelId === undefined) {
+    // Return BEFORE `readPiAdvertisedModelIds`, which is a ~539 ms `spawnSync` on
+    // a cold cache. A session that named no model must not pay it to learn that
+    // it has nothing to look up.
+    writePiModelsConfig(dir, undefined, files);
+    return;
+  }
   // The box's catalogue is parsed fresh from disk on every call, so mutating the
   // entries here cannot reach anything else.
-  const models = readBoxPiOpenRouterModels(env);
-  repairAnthropicBaseUrls(models);
+  const boxModels = readBoxPiOpenRouterModels(env);
+  repairAnthropicBaseUrls(boxModels);
 
   // ⚠️ THE GUARD ASKS ABOUT **PI'S** KNOWLEDGE, NOT THE OVERLAY'S (brick 6253611b).
   // The overlay alone was the wrong question: 333 of the 374 models pi advertises
@@ -1254,23 +1326,104 @@ function writePiModelsStore(
   // unreachable for EVERY model, and each session replaced pi's real entry with a
   // fabricated one. `readPiAdvertisedModelIds` returns `null` when pi could not be
   // asked, which must NOT be read as "pi knows nothing".
-  const alreadyKnown = piAlreadyKnows(models, modelId, readPiAdvertisedModelIds(env));
+  const alreadyKnown = piAlreadyKnows(boxModels, modelId, readPiAdvertisedModelIds(env));
 
-  // Nothing to add AND nothing to repair ⇒ write no file at all. This is the
-  // point of the fix: a store we do not write cannot replace pi's block, so the
-  // model keeps its real price, its real context window and its
-  // `thinkingLevelMap`, and the session keeps the models the overlay would have
-  // displaced.
-  if (alreadyKnown && models.length === 0) {
+  // ⚠️ ONE QUESTION, ASKED ONCE, ANSWERED FOR BOTH FILES — the two writers must
+  // not be able to disagree. A slug pi already knows gets NO fabricated entry in
+  // EITHER file, and the reason is the same on both sides: pi rebuilds a
+  // `models.json` model from the definition alone (`modelFromJson` inherits only
+  // `api` and `baseUrl` from the existing row, so `thinkingLevelMap` becomes
+  // `undefined`, `cost` becomes zeros and `contextWindow` becomes 128 000), just
+  // as a same-id store entry replaces pi's real row. `undefined` here therefore
+  // means "pi has a better entry than anything acpx could write".
+  const provisioned = alreadyKnown ? undefined : buildPiCatalogueEntry(modelId, env);
+
+  writePiModelsConfig(dir, provisioned, files);
+  writePiModelsStore(dir, boxModels, provisioned, files);
+}
+
+/**
+ * pi's `models.json` — the layer a catalogue refresh cannot reach. See
+ * {@link writePiModelProvisioning} for the measurement and for why it exists.
+ *
+ * ## Why the Anthropic repair is PROVIDER-level and not per model
+ *
+ * `models.json` has exactly one lever that can change a `baseUrl`:
+ * `providers.<id>.baseUrl`, which `applyModelsJson` maps over **every** model of
+ * that provider (`provider-composer.js`: `baseUrl: config.baseUrl ?? model.baseUrl`).
+ * The per-model alternative, `modelOverrides`, **cannot express `baseUrl` at all**
+ * — `applyModelOverride` copies `name`, `reasoning`, `thinkingLevelMap`, `input`,
+ * `cost`, `contextWindow`, `maxTokens`, `samplingParams` and `compat`, and no
+ * more. The only other route is a full `models[]` definition per broken id, which
+ * would replace those 15 real rows with fabricated ones — trading the routing bug
+ * for the metadata bug brick 6253611b just removed.
+ *
+ * A blanket provider `baseUrl` is therefore both the only metadata-preserving
+ * option and the strictly more useful one: it repairs ids acpx has never heard of.
+ *
+ * ⚠️ **AND IT IS SAFE ONLY BECAUSE EVERY OTHER OPENROUTER ROW ALREADY CARRIES
+ * THIS EXACT VALUE. RE-MEASURE WHEN THE PINNED pi VERSION MOVES.** Measured
+ * 2026-09-08 against pi 0.84.4's live catalogue: of 379 openrouter models, 364
+ * carry `https://openrouter.ai/api/v1` and the 15 `anthropic-messages` rows carry
+ * `https://openrouter.ai/api`. There is no third value, so the override is a
+ * no-op everywhere it is not a repair. Should pi ever serve an openrouter model
+ * on some other base URL, this line would rewrite it — the one axis on which this
+ * fix can regress, and the reason `PI_OPENROUTER_BASE_URL_HISTOGRAM` in
+ * `test/pi-models-store.test.ts` pins the measured shape rather than a comment.
+ *
+ * ⚠️ **A SCHEMA MISTAKE HERE FAILS SILENTLY-ISH: `ModelConfig.load` returns an
+ * ERROR OBJECT and pi composes with an EMPTY config** — no repair, no slug, and
+ * the only surface is pi's `getError()`. So keep this file minimal and keep the
+ * shape pinned by tests; do not grow it speculatively.
+ */
+function writePiModelsConfig(
+  dir: string,
+  provisioned: PiCatalogueModel | undefined,
+  files: string[],
+): void {
+  const openrouter: { baseUrl: string; models?: PiCatalogueModel[] } = {
+    baseUrl: OPENROUTER_API_BASE,
+  };
+  if (provisioned) {
+    openrouter.models = [piModelDefinition(provisioned)];
+  }
+  const configPath = join(dir, "models.json");
+  writeFileSync(configPath, `${JSON.stringify({ providers: { openrouter } }, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  files.push(configPath);
+}
+
+/**
+ * The same entry, as a `models.json` model DEFINITION.
+ *
+ * `provider` is not a field of pi's `ModelDefinitionSchema` — pi sets it from the
+ * provider block's key — so it is dropped rather than passed through. The shape
+ * that was measured working live is the one without it; whether pi's typebox
+ * object would also tolerate the extra key was not established, and guessing is
+ * how a well-formed file becomes an empty config (above).
+ */
+function piModelDefinition(entry: PiCatalogueModel): PiCatalogueModel {
+  const definition = { ...entry };
+  delete definition.provider;
+  return definition;
+}
+
+function writePiModelsStore(
+  dir: string,
+  boxModels: PiCatalogueModel[],
+  provisioned: PiCatalogueModel | undefined,
+  files: string[],
+): void {
+  // Nothing to add AND nothing to repair ⇒ write no file at all. A store we do
+  // not write cannot displace pi's block, so the model keeps its real price, its
+  // real context window and its `thinkingLevelMap`, and the session keeps the
+  // models the overlay would have displaced.
+  if (!provisioned && boxModels.length === 0) {
     return;
   }
 
-  // A slug the catalogue already carries needs nothing: it keeps every field pi
-  // has for it, including the `thinkingLevelMap` the depth ladder is derived from.
-  if (!alreadyKnown) {
-    models.push(buildPiCatalogueEntry(modelId, env));
-  }
-
+  const models = provisioned ? [...boxModels, provisioned] : boxModels;
   const now = Date.now();
   const storePath = join(dir, "models-store.json");
   writeFileSync(
