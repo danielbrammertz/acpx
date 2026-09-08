@@ -14,6 +14,7 @@ import {
   injectionReturnsTerminalResponse,
 } from "../../acp/mid-turn-injection-support.js";
 import { assertRequestedModelSupported } from "../../acp/model-support.js";
+import { explainTurnError } from "../../acp/openrouter-refusal-reason.js";
 import { InterruptedError, withInterrupt, withTimeout } from "../../async-control.js";
 import { tailClaudeSubagentJsonl } from "../../claude-jsonl.js";
 import { transcriptCwdHash } from "../../config/subscription-transcript.js";
@@ -2882,8 +2883,30 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
         // guard looks like defensive clutter; the reason lives in acpx-ui, whose
         // control `4ec33f59 CONTROL: a clean 'done' invents no note` goes red the
         // moment this widens. The acpx-side control below pins the same property.
-        const turnErrorForTerminal =
+        const rawTurnErrorForTerminal =
           terminalStopReason === "cancelled" ? undefined : response.turnError;
+        // bricks bb23a7fa / 5aacdba2 — say whose fault it was. pi reports a cut
+        // stream as "Request timed out.", a statement about US, when the measured
+        // cause is OpenRouter refusing us on a SHARED rate-limit pool and saying so
+        // in a 429 that the STREAMING endpoint never delivers. One cheap
+        // non-streaming probe recovers the provider's own sentence.
+        //
+        // ⚠️ IT ONLY EVER REWORDS AN ERROR THAT ALREADY EXISTS. The guard above is
+        // untouched: `undefined` stays `undefined`, so a clean `done` still invents
+        // no note and the acpx-ui control `4ec33f59 CONTROL` stays green. This is
+        // total on strings — it decides WHAT to say, never WHETHER to report.
+        //
+        // ⚠️ AND IT IS DELIBERATELY NOT A DECISION INPUT: measured sensitivity is
+        // 50% with a 14% false-positive rate, so it is unusable for retry/abandon
+        // and fine for prose. See `openrouter-refusal-reason.ts`.
+        const turnErrorForTerminal =
+          rawTurnErrorForTerminal === undefined
+            ? undefined
+            : await explainTurnError(
+                rawTurnErrorForTerminal,
+                record.acpx?.current_model_id,
+                process.env,
+              );
         await appendDeliveryTerminal(
           mainDeliveryContext,
           deliveryPhaseForStopReason(terminalStopReason),

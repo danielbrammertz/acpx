@@ -336,16 +336,23 @@ test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR insi
       readFileSync(join(env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"),
     ) as { httpIdleTimeoutMs: number; retry: { maxRetries: number; baseDelayMs?: number } };
 
-    // pi's own default, relied on by the budget below. Asserting its ABSENCE is
-    // deliberate: if a later change starts setting it, this arithmetic is no
-    // longer reading the value pi will actually use, and the row must be updated
-    // rather than quietly becoming wrong.
-    assert.equal(
-      settings.retry.baseDelayMs,
-      undefined,
-      "baseDelayMs is now set explicitly — the worst-case budget below no longer uses pi's default",
-    );
+    // ⚠️ THIS ROW FIRED EXACTLY AS ITS OLD COMMENT PROMISED IT WOULD. It used to
+    // assert `baseDelayMs === undefined` and explain that "if a later change starts
+    // setting it, this arithmetic is no longer reading the value pi will actually use,
+    // and the row must be updated rather than quietly becoming wrong." Brick bb23a7fa
+    // set it, this went red, and it is updated here — the contract working, not a
+    // nuisance.
+    //
+    // The budget must now read the EMITTED base delay, because pi's default (2 000)
+    // and ours (500) differ by 190 s across 8 attempts: at 2 000 the same attempt
+    // count would blow the target on backoff alone. Falling back to the default when
+    // the field is absent keeps the row honest either way.
     const PI_DEFAULT_BASE_DELAY_MS = 2_000;
+    const baseDelayMs = settings.retry.baseDelayMs ?? PI_DEFAULT_BASE_DELAY_MS;
+    assert.ok(
+      baseDelayMs > 0,
+      `baseDelayMs ${baseDelayMs} must be positive — pi multiplies it by 2^(n-1)`,
+    );
 
     // `agent-session.js:2279-2291`: attempts = 1 + maxRetries, backoff = base·2^(n-1).
     // Calibration: pi's OWN defaults (300 000, 3) give 1 214 000 ms — and the
@@ -353,10 +360,10 @@ test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR insi
     // reproduces the bug it is protecting against, which is what makes it a
     // budget and not an arbitrary inequality.
     const worstCaseMs = (idleMs: number, maxRetries: number): number =>
-      idleMs * (1 + maxRetries) + PI_DEFAULT_BASE_DELAY_MS * (2 ** maxRetries - 1);
+      idleMs * (1 + maxRetries) + baseDelayMs * (2 ** maxRetries - 1);
 
     assert.equal(
-      worstCaseMs(300_000, 3),
+      300_000 * 4 + PI_DEFAULT_BASE_DELAY_MS * (2 ** 3 - 1),
       1_214_000,
       "the budget formula no longer reproduces the 20m14s default it was derived from",
     );
@@ -368,12 +375,35 @@ test("a provisioned pi session's stall policy keeps the WORST-CASE DEAD AIR insi
         1 + settings.retry.maxRetries
       } attempts) — over the 300 000 ms target this policy exists to hold`,
     );
-    // The lower bound is the other half of the trade: an idle bound is what cuts a
-    // model that is genuinely slow to first token, so driving these numbers down
-    // to buy a tighter budget is a REGRESSION, not an improvement.
+    // ── The lower bound: the other half of the trade, RE-DERIVED (brick bb23a7fa) ──
+    //
+    // This row used to demand ≥ 60 000, to protect "a model that is genuinely slow to
+    // first token". **That model was never measured, and the measurement killed it:**
+    // the distribution is bimodal — every healthy request completed in 0.9–6.05 s and
+    // every failure delivered nothing, ever (no request has been observed arriving
+    // between 6 s and 615 s). There is no slow-but-alive request for a long bound to
+    // rescue; a longer bound only makes a REFUSAL take longer to report.
+    //
+    // ⚠️ BUT THE FLOOR STILL EXISTS, ON A DIFFERENT AXIS — and it is the one that
+    // nearly caught me out. `httpIdleTimeoutMs` is a per-byte INACTIVITY timer, so
+    // what binds is the largest gap BETWEEN chunks of a healthy stream, not the
+    // longest healthy turn. Measured on Daniel's session 01a0827e (~85 KB streamed):
+    // gaps of 5.06 / 1.25 / 7.66 / 1.20 s. **7.66 s is the number to clear**, and a
+    // 10 s bound sized off the 6.05 s figure would have had only 1.3× headroom.
+    const LARGEST_HEALTHY_INTER_CHUNK_GAP_MS = 7_660;
     assert.ok(
-      settings.httpIdleTimeoutMs >= 60_000,
-      `idle bound ${settings.httpIdleTimeoutMs} ms is below 60 s — that cuts slow-first-token models`,
+      settings.httpIdleTimeoutMs >= 2 * LARGEST_HEALTHY_INTER_CHUNK_GAP_MS,
+      `idle bound ${settings.httpIdleTimeoutMs} ms gives under 2x headroom over the largest ` +
+        `MEASURED healthy inter-chunk gap (${LARGEST_HEALTHY_INTER_CHUNK_GAP_MS} ms) — that cuts ` +
+        `working streams mid-response, which is invisible until a user reports it`,
+    );
+    // And the detector must still be fast enough to be a detector: the failure it
+    // meets is a refusal, and spending minutes on one is what shipped and cost
+    // Daniel an evening.
+    assert.ok(
+      settings.httpIdleTimeoutMs <= 60_000,
+      `idle bound ${settings.httpIdleTimeoutMs} ms is a WAIT, not a detector — a throttled ` +
+        `request delivers zero bytes forever, so waiting longer recovers nothing`,
     );
   });
 });
