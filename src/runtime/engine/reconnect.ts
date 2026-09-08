@@ -7,6 +7,7 @@ import {
   isAcpQueryClosedBeforeResponseError,
   isAcpResourceNotFoundError,
 } from "../../acp/error-normalization.js";
+import { depthMechanismForAgentCommand } from "../../acp/harness-capabilities.js";
 import { RequestedModelUnsupportedError } from "../../acp/model-support.js";
 import { InterruptedError, TimeoutError, withTimeout } from "../../async-control.js";
 import { findProfile, loadProfileRegistry, transcriptAnchorDir } from "../../config/profiles.js";
@@ -332,7 +333,21 @@ async function replayDesiredConfigOptions(params: {
 }): Promise<string[]> {
   const declined: string[] = [];
   const normalizedDesiredConfigOptions: Array<[configId: string, value: string]> = [];
-  for (const [configId, value] of Object.entries(params.desiredConfigOptions)) {
+  // ⚠️ A DEPTH REQUEST ON A `mode` HARNESS IS NOT A CONFIG OPTION, AND REPLAYING
+  // IT AS ONE IS A GUARANTEED ERROR EVERY RECONNECT. The mode arm persists the
+  // request as `desired_config_options.effort` (it is the desired depth, and the
+  // record shape is read elsewhere), but pi carries depth on `session/set_mode`
+  // and its config id is `thought_level` — so this loop sent
+  // `session/set_config_option {configId:"effort"}` on every reconnect and pi
+  // answered `-32602 Unknown config option: effort` (measured at the wire
+  // 2026-09-08). `replayDesiredMode`, which runs just before this, restores the
+  // depth properly from `desired_mode_id`; this skip only stops acpx recording a
+  // "declined" option for a request that WAS honoured, one call earlier.
+  const depthReplayedAsMode = depthMechanismForAgentCommand(params.record.agentCommand) === "mode";
+  const replayable = Object.entries(params.desiredConfigOptions).filter(
+    ([configId]) => !(depthReplayedAsMode && configId === "effort"),
+  );
+  for (const [configId, value] of replayable) {
     const replayValue = replayConfigOptionValue(configId, value, params.desiredModelId);
     try {
       await withTimeout(

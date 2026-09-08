@@ -102,6 +102,19 @@ export interface DepthProjection {
   kind: DepthProjectionKind;
   /** The value to send. `undefined` for `send-nothing` and `unavailable`. */
   value?: string;
+  /**
+   * The mode/option id acpx ACTUALLY SENT to the agent, when one was sent.
+   *
+   * ⚠️ NOT always `value`, and the difference is why this exists. On the mode arm
+   * `value` is downgraded to the agent's own advertised *served effort* (e.g. mode
+   * `off` served as effort `"none"`), so `value` can name something that is not a
+   * mode the agent would accept back. Replaying depth after a reconnect needs the
+   * ID WE SENT; replaying `value` would set a mode that does not exist.
+   *
+   * Not persisted — `recordDepthOutcome` writes `requested`/`kind`/`value`/`reason`
+   * only. This is an in-process hand-off between applying and remembering.
+   */
+  appliedId?: string;
   /** The canonical request this came from, echoed so a record carries both ends. */
   requested: string;
   /**
@@ -151,19 +164,7 @@ export function projectDepthOntoLadder(
   }
 
   if (request === DEPTH_OFF) {
-    const offRung = rungs.find((rung) => OFF_RUNG_NAMES.has(rung.toLowerCase()));
-    if (offRung !== undefined) {
-      return { kind: "off", value: offRung, requested: request };
-    }
-    // No off-rung: the request is UNSATISFIABLE. Clamping to the lowest rung is
-    // the closest honest action, and recording it is what stops acpx reporting
-    // "reasoning disabled" on a model that never disabled it.
-    return {
-      kind: "clamped",
-      value: rungs[0],
-      requested: request,
-      reason: `"off" is not on this model's ladder (${rungs.join(", ")}) — reasoning cannot be disabled here; clamped to the lowest rung "${rungs[0]}"`,
-    };
+    return projectOffRequest(rungs);
   }
 
   if (rungs.includes(request)) {
@@ -181,15 +182,112 @@ export function projectDepthOntoLadder(
     };
   }
 
-  const lastRungIndex = CANONICAL_DEPTH_RUNGS.length - 1; // 6
-  const projectedIndex = Math.round((index / lastRungIndex) * (rungs.length - 1));
-  const value = rungs[projectedIndex];
+  // 🛑 A LADDER OF NOTHING BUT OFF-RUNGS CANNOT SERVE A DEPTH REQUEST, AND THE
+  // PROPORTIONAL RULE BELOW WOULD ANSWER ONE BY *DISABLING REASONING*. pi
+  // advertises exactly `["off"]` for a model its catalogue marks non-reasoning,
+  // and `rungs[round(i/6 × 0)]` is `"off"` for every request — so `high` would
+  // have set the mode to `off` and recorded it as a position projection. The
+  // off-rung exclusion inside `projectByName` does not cover this: that function
+  // declines (returns `undefined`) when it has no candidates, which fell straight
+  // through to the rule it was protecting against.
+  if (rungs.every((rung) => OFF_RUNG_NAMES.has(rung.toLowerCase()))) {
+    return {
+      kind: "unavailable",
+      requested: request,
+      reason: `this model advertises no thinking rung at all (only ${rungs.join(", ")}), so "${request}" cannot be served — asking for depth here would only turn reasoning off`,
+    };
+  }
+
+  const value = projectByName(index, rungs) ?? projectByProportion(index, rungs);
   return {
     kind: "projected",
     value,
     requested: request,
     reason: `"${request}" is not on this model's ladder (${rungs.join(", ")}) — projected by position to "${value}"`,
   };
+}
+
+/** `off`: an off-rung when the ladder has one, else the recorded clamp. */
+function projectOffRequest(rungs: readonly string[]): DepthProjection {
+  const offRung = rungs.find((rung) => OFF_RUNG_NAMES.has(rung.toLowerCase()));
+  if (offRung !== undefined) {
+    return { kind: "off", value: offRung, requested: DEPTH_OFF };
+  }
+  // No off-rung: the request is UNSATISFIABLE. Clamping to the lowest rung is
+  // the closest honest action, and recording it is what stops acpx reporting
+  // "reasoning disabled" on a model that never disabled it.
+  return {
+    kind: "clamped",
+    value: rungs[0],
+    requested: DEPTH_OFF,
+    reason: `"off" is not on this model's ladder (${rungs.join(", ")}) — reasoning cannot be disabled here; clamped to the lowest rung "${rungs[0]}"`,
+  };
+}
+
+/**
+ * Project onto a ladder that speaks OUR vocabulary, by NAME position.
+ *
+ * 🛑 THE DEFECT THIS FIXES, MEASURED LIVE ON PI 2026-09-08: the proportional rule
+ * below assumes the ladder SPANS the canonical scale. Pi's does not — it is the
+ * bottom of it (`off, minimal, low, medium, high`). Scaling then COMPRESSES every
+ * request above the ladder's top into its middle, so `--reasoning-effort xhigh`
+ * and `max` both landed on **`medium`** — strictly LESS thinking than plain
+ * `high`, which is one rung down in the same vocabulary. Asking for more gave
+ * less, non-monotonically, and the recorded reason said "projected by position"
+ * as though that were a considered answer.
+ *
+ * The rule here is the target's own: **walk UP from the request to the nearest
+ * rung it has, and only if there is none, walk down.** That is `clampThinkingLevel`
+ * verbatim, lifted from pi's six names to the canonical positions, so acpx
+ * substitutes what the agent would have substituted. Monotone by construction.
+ *
+ * ⚠️ Independently corroborated, and NOT by acpx's own output. The nativai
+ * `pi-acp` fork publishes `_meta.piAcp.clampedFrom` — the levels pi will clamp
+ * ONTO each advertised rung, in pi's own words. On the no-map ladder `high`
+ * carries `clampedFrom: ["xhigh"]`, and this function maps `xhigh → high`. The
+ * agreement is pinned by a test; the frozen table that shipped before was
+ * "corroborated" by a string acpx generated from the table itself.
+ *
+ * ⚠️ AN OFF-RUNG IS NEVER A TARGET HERE. `off` sits below the whole scale and is
+ * reachable only by REQUESTING `off` (handled above). Letting it compete would
+ * answer a request for `minimal` on a `["off","high"]` ladder by DISABLING
+ * reasoning — a silent, maximal miss dressed as a projection.
+ *
+ * Returns `undefined` when the ladder does not speak this vocabulary at all (a
+ * harness with its own words, e.g. `fast|balanced|thorough`), leaving the
+ * proportional rule to handle it — there, position really is all we have.
+ */
+function projectByName(requestedIndex: number, rungs: readonly string[]): string | undefined {
+  const speaksCanonical = rungs.every(
+    (rung) => canonicalDepthRungIndex(rung) !== undefined || OFF_RUNG_NAMES.has(rung.toLowerCase()),
+  );
+  if (!speaksCanonical) {
+    return undefined;
+  }
+  const candidates = rungs
+    .map((rung) => ({ rung, index: canonicalDepthRungIndex(rung) }))
+    .filter((entry): entry is { rung: string; index: number } => entry.index !== undefined);
+  if (candidates.length === 0) {
+    // Every rung is an off-rung. There is no depth to project onto; fall through
+    // to the proportional rule rather than inventing one.
+    return undefined;
+  }
+  // UP FIRST, THEN DOWN — pi's own `clampThinkingLevel`, generalised over
+  // canonical positions rather than over pi's six names. Choosing this direction
+  // over "nearest at or below" is deliberate: a floor rule would answer `medium`
+  // on a `low|high|max` ladder with `low`, which is neither what the user asked
+  // for nor what the agent would have done with the same request.
+  const above = candidates.filter((entry) => entry.index > requestedIndex);
+  if (above.length > 0) {
+    return above.reduce((best, entry) => (entry.index < best.index ? entry : best)).rung;
+  }
+  return candidates.reduce((best, entry) => (entry.index > best.index ? entry : best)).rung;
+}
+
+/** The fallback for a ladder in a vocabulary we do not own: `L[round(i/6 × (|L|−1))]`. */
+function projectByProportion(requestedIndex: number, rungs: readonly string[]): string {
+  const lastRungIndex = CANONICAL_DEPTH_RUNGS.length - 1; // 6
+  return rungs[Math.round((requestedIndex / lastRungIndex) * (rungs.length - 1))];
 }
 
 /**
