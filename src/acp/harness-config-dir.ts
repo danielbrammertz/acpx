@@ -1269,6 +1269,14 @@ export function reportHarnessConfigDir(
 }
 
 /** What was written, so a caller can log or evidence it without re-deriving. */
+/** One pi extension acpx copied into a session's config dir, and where it came from. */
+export interface SeededPiExtension {
+  /** The file or directory in the BOX-level pi extensions dir. */
+  source: string;
+  /** The copy under this spawn's provisioned `extensions/` — what pi actually reads. */
+  target: string;
+}
+
 export interface HarnessConfigDirPlan {
   harness: HarnessId;
   dir: string;
@@ -1287,6 +1295,21 @@ export interface HarnessConfigDirPlan {
   envNames: string[];
   /** Absolute paths written, for evidence. Never contains a credential. */
   files: string[];
+  /**
+   * Every pi extension this spawn COPIED, target ← source (brick 074a1bd9).
+   *
+   * ⚠️ THE PAIR, NOT THE TARGET ALONE — the source is the entire point. When pi
+   * refuses to start on an extension it cannot load, it names the path it read,
+   * which is the acpx-provisioned copy under a generated directory: a path the
+   * operator has never seen, cannot edit usefully, and which vanishes at close.
+   * Only the SOURCE tells them which file in their own box dir to fix. Recording
+   * targets alone would let acpx detect the failure and still be unable to say
+   * anything actionable about it.
+   *
+   * Absent for every harness but pi, and empty when the seed is off or the box
+   * has no extensions.
+   */
+  piExtensions?: SeededPiExtension[];
   /** This client's claim on the directory — hand it back to
    *  {@link releaseHarnessConfigDir} at close. */
   holderId?: string;
@@ -1465,7 +1488,7 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     files,
   );
   writePiStallPolicy(dir, files);
-  seedPiExtensions(dir, input.env, files);
+  const piExtensions = seedPiExtensions(dir, input.env, files);
   // KEEP pi's SESSION STORE IN THE BOX STORE (brick ac86eb34, corrected by
   // brick://cb214e48): the target is derived from `boxAgentDir` above, so it is
   // immune to the re-point on the next line — and to whatever an ancestor pi
@@ -1486,7 +1509,7 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     // leg: it builds `env` fresh, with nothing inherited.
     delete input.env.PI_CODING_AGENT_SESSION_DIR;
   }
-  return { harness: "pi", dir, sessionDir, envNames, files };
+  return { harness: "pi", dir, sessionDir, envNames, files, piExtensions };
 }
 
 /**
@@ -1535,28 +1558,82 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
  *
  * `ACPX_PI_EXTENSIONS_SEED=off` skips the seeding entirely — the box operator's
  * kill-switch for the channel. Anything else (or unset) seeds.
+ *
+ * ## ⚠️ SEEDING DOES NOT — AND CANNOT — VET WHAT IT COPIES (brick 074a1bd9)
+ *
+ * pi REFUSES TO START on an extension it cannot load (measured, pi 0.84.4: a
+ * module with no default export ⇒ `Failed to load extension …`, exit 1), and its
+ * only lever is `-ne`, which disables ALL extensions — there is no "skip this
+ * one". Deciding loadability HERE would mean reimplementing pi's jiti loader,
+ * virtual modules and factory-shape check inside acpx, where a wrong verdict
+ * either silently drops a working extension or fails to stop the crash anyway,
+ * and where `acpx pi` would then diverge from what plain `pi` does with the same
+ * file. So we copy by pi's DISCOVERY grammar and record the pairs, and the
+ * failure is made ACTIONABLE instead of prevented — see
+ * {@link describePiExtensionSeedFailure}.
+ *
+ * @returns every copied source→target pair, for that diagnosis.
  */
-function seedPiExtensions(dir: string, env: NodeJS.ProcessEnv, files: string[]): void {
+function seedPiExtensions(
+  dir: string,
+  env: NodeJS.ProcessEnv,
+  files: string[],
+): SeededPiExtension[] {
+  const seeded: SeededPiExtension[] = [];
   if ((env.ACPX_PI_EXTENSIONS_SEED ?? "").trim().toLowerCase() === "off") {
-    return;
+    return seeded;
   }
   const source = resolvePiExtensionsSource(env);
   let names: string[];
   try {
     names = readdirSync(source);
   } catch {
-    return; // no box-level extensions dir — a legitimate state, not an error
+    return seeded; // no box-level extensions dir — a legitimate state, not an error
   }
   const target = join(dir, "extensions");
   try {
     mkdirSync(target, { recursive: true });
   } catch (error) {
     warnPiExtensionsSeed(`could not create ${target}; continuing without box extensions`, error);
-    return;
+    return seeded;
   }
   for (const name of names) {
-    seedPiExtensionEntry(source, target, name, files);
+    seedPiExtensionEntry(source, target, name, files, seeded);
   }
+  return seeded;
+}
+
+/**
+ * Turn "pi would not start" into "this file, from here, and here is the switch".
+ *
+ * pi names the path it READ — the acpx-provisioned copy under a generated
+ * directory that the operator has never seen and that disappears at session
+ * close. Left at that, the error is unactionable twice over: they cannot tell
+ * where the file came from, and they cannot tell that acpx put it there at all.
+ * This maps the named copy back to its box source and states the kill-switch.
+ *
+ * ⚠️ MATCH ON THE TARGET PATH, NOT ON pi's WORDING. Keying off `"Failed to load
+ * extension"` would bind acpx to one harness version's phrasing and go silent the
+ * day pi rewords it — while a path acpx itself generated appearing in an error is
+ * unambiguous whatever sentence surrounds it.
+ *
+ * @returns the hint, or `undefined` when the failure names no extension we seeded
+ *   (in which case this has nothing to say and must stay quiet).
+ */
+export function describePiExtensionSeedFailure(
+  errorText: string,
+  seeded: SeededPiExtension[] | undefined,
+): string | undefined {
+  const named = seeded?.filter((entry) => errorText.includes(entry.target)) ?? [];
+  if (named.length === 0) {
+    return undefined;
+  }
+  const lines = named.map((entry) => `  ${entry.target}\n    seeded from: ${entry.source}`);
+  return [
+    "pi could not start with a box pi extension acpx seeded into its config dir:",
+    ...lines,
+    "Fix or remove the source file, or set ACPX_PI_EXTENSIONS_SEED=off to spawn pi without the box's extensions.",
+  ].join("\n");
 }
 
 /**
@@ -1572,7 +1649,13 @@ function resolvePiExtensionsSource(env: NodeJS.ProcessEnv): string {
   return join(agentDir, "extensions");
 }
 
-function seedPiExtensionEntry(source: string, target: string, name: string, files: string[]): void {
+function seedPiExtensionEntry(
+  source: string,
+  target: string,
+  name: string,
+  files: string[],
+  seeded: SeededPiExtension[],
+): void {
   const from = join(source, name);
   const to = join(target, name);
   try {
@@ -1580,9 +1663,11 @@ function seedPiExtensionEntry(source: string, target: string, name: string, file
     if (st.isFile() && /\.(ts|js)$/.test(name)) {
       copyFileSync(from, to);
       files.push(to);
+      seeded.push({ source: from, target: to });
     } else if (st.isDirectory() && piWouldLoadExtensionDir(from)) {
       cpSync(from, to, { recursive: true });
       files.push(to);
+      seeded.push({ source: from, target: to });
     }
   } catch (error) {
     warnPiExtensionsSeed(`could not seed pi extension ${name}; skipping it`, error);

@@ -201,6 +201,78 @@ test("4a6fdda0 REAL SPAWN: the dir survives client A's close AND client B's TURN
   }
 });
 
+test("074a1bd9 REAL SPAWN: a session/new that names a seeded extension names the BOX file and the kill-switch", async () => {
+  // ⚠️ THE ROW THAT PROVES THE WIRING, NOT JUST THE FUNCTION. The unit rows in
+  // harness-config-dir.test.ts call `describePiExtensionSeedFailure` directly and
+  // would stay green if `createSession` never invoked it — the gap that let the
+  // original defect ship. This spawns a real adapter over a real ACP connection,
+  // with a real seeded extension, and asserts on what a caller of `createSession`
+  // actually receives.
+  await withTempHome(async (boxHome) => {
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "074a1bd9-spawn-"));
+    const clients: AcpClient[] = [];
+    try {
+      // The adapter is reached through a `pi-acp` path, which is how acpx decides
+      // this spawn is pi and provisions a pi config dir at all.
+      const linkDir = path.join(scratch, "pi-acp");
+      await fs.mkdir(linkDir, { recursive: true });
+      const mockLink = path.join(linkDir, "mock-agent.js");
+      await fs.symlink(MOCK_AGENT_PATH, mockLink);
+
+      // The temp HOME holds one extension pi cannot load — no default export, the
+      // measured discriminator (pi 0.84.4).
+      const boxExtDir = path.join(boxHome, ".pi", "agent", "extensions");
+      await fs.mkdir(boxExtDir, { recursive: true });
+      const boxExtension = path.join(boxExtDir, "half-written.js");
+      await fs.writeFile(boxExtension, "export const notAFactory = 1\n");
+
+      const client = new AcpClient({
+        agentCommand: `node ${JSON.stringify(mockLink)} --fail-new-session-on-seeded-extension`,
+        cwd: scratch,
+        permissionMode: "approve-reads",
+        sessionContext: { acpxRecordId: `rec-074a1bd9-${path.basename(scratch)}` },
+      });
+      clients.push(client);
+      await client.start();
+
+      // CONTROL: the extension really was seeded. Without it a build that stopped
+      // seeding entirely would pass every assertion below for the wrong reason.
+      const dir = client.harnessConfigDirPath;
+      assert.ok(dir, "no pi config dir was provisioned — this row is vacuous");
+      assert.equal(
+        existsSync(path.join(dir, "extensions", "half-written.js")),
+        true,
+        "control: the box extension was never seeded",
+      );
+
+      const error = await client
+        .createSession()
+        .then(() => null)
+        .catch((e: unknown) => e);
+      assert.ok(error, "createSession resolved — the adapter did not fail as configured");
+
+      const text = error instanceof Error ? error.message : JSON.stringify(error);
+      // The defect verbatim: this is what a caller used to get INSTEAD of a cause.
+      assert.equal(
+        /Cannot call write after a stream was destroyed/i.test(text),
+        false,
+        `raw stream error reached the caller: ${text}`,
+      );
+      assert.ok(text.includes("half-written.js"), `the offending file is not named: ${text}`);
+      assert.ok(text.includes(boxExtension), `the BOX source file is not named: ${text}`);
+      assert.ok(
+        text.includes("ACPX_PI_EXTENSIONS_SEED=off"),
+        `the way to disable seeding is not stated: ${text}`,
+      );
+    } finally {
+      for (const client of clients) {
+        await client.close().catch(() => {});
+      }
+      await fs.rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 433f6bf8 — `closeSession` IS A CLOSE PATH, AND IT DID NOT RELEASE ANYTHING.
 //
