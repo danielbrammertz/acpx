@@ -368,9 +368,14 @@ test("pi extension seeding: an inherited acpx PER-SESSION dir is NOT the source"
     });
     const seeded = join(env.PI_CODING_AGENT_DIR!, "extensions");
     // The BOX dir was the source …
+    // Assert against the CONSTANT the fixture writes, never a re-typed literal:
+    // this row was authored against the pre-074a1bd9 comment-only fixture and
+    // broke at the f24f6644 × 074a1bd9 merge, when that brick repaired
+    // `withBoxExtensions` to write a module pi can actually load. The
+    // discriminator is unchanged — box content here, `parent-only.js` below.
     assert.equal(
       readFileSync(join(seeded, "pi-full-output.js"), "utf8"),
-      "// FILE-EXTENSION-MARKER\n",
+      LOADABLE_EXTENSION_SOURCE,
       "the box extensions dir was not the source",
     );
     // … and nothing came from the parent's throwaway dir.
