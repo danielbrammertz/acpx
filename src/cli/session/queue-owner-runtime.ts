@@ -535,12 +535,12 @@ export const IDLE_CHECK_CADENCE_MS = 5_000;
  * Exported so that invariant is assertable in a unit test rather than trusted to
  * a comment: the window must NOT shrink when the cadence does.
  */
-export function idleCheckTimings(
-  idleWindowMs: number | undefined,
-): { pollTimeoutMs: number | undefined; quiescenceWindowMs: number } {
+export function idleCheckTimings(idleWindowMs: number | undefined): {
+  pollTimeoutMs: number | undefined;
+  quiescenceWindowMs: number;
+} {
   return {
-    pollTimeoutMs:
-      idleWindowMs == null ? undefined : Math.min(idleWindowMs, IDLE_CHECK_CADENCE_MS),
+    pollTimeoutMs: idleWindowMs == null ? undefined : Math.min(idleWindowMs, IDLE_CHECK_CADENCE_MS),
     quiescenceWindowMs: idleWindowMs ?? 0,
   };
 }

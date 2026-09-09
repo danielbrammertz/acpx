@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { deriveBilling } from "../models/catalogue.js";
@@ -1054,6 +1064,7 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     files,
   );
   writePiStallPolicy(dir, files);
+  seedPiExtensions(dir, input.env, files);
   // ⚠️ KEEP pi's SESSION STORE WHERE IT WAS — read BEFORE the re-point below,
   // which is the last moment the box's own agent dir is still reachable through
   // the variable we are about to overwrite (brick ac86eb34; same ordering as the
@@ -1066,6 +1077,131 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     envNames.push("PI_CODING_AGENT_SESSION_DIR");
   }
   return { harness: "pi", dir, envNames, files };
+}
+
+/**
+ * Seed the session's `extensions/` from the BOX-level pi extensions dir, so an
+ * agent's deployed pi extensions reach acpx-spawned pi sessions without any
+ * per-session planting (brick af6907f4, w8/pi-full-output).
+ *
+ * ## Why this channel and not settings.json
+ *
+ * pi discovers extensions from `<agentDir>/extensions/` BY NAME — no settings
+ * entry needed (`discoverAndLoadExtensions`, pi `dist/core/extensions/loader.js`:
+ * "Global extensions: agentDir/extensions/"). This dir IS the session's agent
+ * dir (`PI_CODING_AGENT_DIR` re-pointed above), so a seeded `<dir>/extensions/`
+ * is loaded by pi unconditionally and merges with nothing: it is the same
+ * mechanism a direct user gets, applied to the provisioned dir. Writing
+ * `extensions: [...]` into the per-session `settings.json` was rejected — that
+ * file is {@link writePiStallPolicy}'s contract (a partial object naming only
+ * what acpx changes), and re-shaping it to carry paths would couple two
+ * unrelated concerns and give up the discovery symmetry with the box.
+ *
+ * ## ⚠️ COPY, NOT SYMLINK — snapshot semantics are the FEATURE
+ *
+ * A symlink would couple a session's runtime to the live box dir (mid-session
+ * extension edits appearing under a running agent) and add sweep interplay
+ * (rmSync of the session dir must never traverse a link into the box's own
+ * files). A copy is a snapshot AS OF SPAWN — exactly what a fresh direct `pi`
+ * run sees — deterministic, and immune to both. Cost is KBs per session.
+ *
+ * ## Source resolution mirrors pi's own `getAgentDir()`
+ *
+ * `PI_CODING_AGENT_DIR` **as received, BEFORE the re-point below** — for a
+ * nested spawn (an agent spawning a child) that is the PARENT session's dir, so
+ * a child inherits what its parent sees (the natural chain); otherwise
+ * `<HOME>/.pi/agent`. Missing source dir ⇒ return silently: no extensions means
+ * no delta and no error, matching pi's own tolerance.
+ *
+ * ## Fidelity to pi's discovery grammar
+ *
+ * Top-level `*.ts` / `*.js` files, and subdirectories that pi would load (an
+ * `index.ts` / `index.js`, or a `package.json` carrying a `pi` field) — copied
+ * recursively. Anything else in the source dir is NOT a pi extension and is not
+ * seeded. Best-effort per entry: a single unreadable entry warns to stderr and
+ * never fails provisioning (same posture as the primer above).
+ *
+ * ## Opt-out
+ *
+ * `ACPX_PI_EXTENSIONS_SEED=off` skips the seeding entirely — the box operator's
+ * kill-switch for the channel. Anything else (or unset) seeds.
+ */
+function seedPiExtensions(dir: string, env: NodeJS.ProcessEnv, files: string[]): void {
+  if ((env.ACPX_PI_EXTENSIONS_SEED ?? "").trim().toLowerCase() === "off") {
+    return;
+  }
+  const source = resolvePiExtensionsSource(env);
+  let names: string[];
+  try {
+    names = readdirSync(source);
+  } catch {
+    return; // no box-level extensions dir — a legitimate state, not an error
+  }
+  const target = join(dir, "extensions");
+  try {
+    mkdirSync(target, { recursive: true });
+  } catch (error) {
+    warnPiExtensionsSeed(`could not create ${target}; continuing without box extensions`, error);
+    return;
+  }
+  for (const name of names) {
+    seedPiExtensionEntry(source, target, name, files);
+  }
+}
+
+/**
+ * Resolve the box-level pi agent dir the way pi's own `getAgentDir()` does, then
+ * step into its `extensions/`: `PI_CODING_AGENT_DIR` as received IS an agent dir
+ * (for a nested spawn, the parent session's provisioned dir) — do NOT append
+ * `.pi/agent` to it. Only when unset does `~/.pi/agent` (HOME from the spawn
+ * env) apply. Called BEFORE the re-point below.
+ */
+function resolvePiExtensionsSource(env: NodeJS.ProcessEnv): string {
+  const agentDir =
+    env.PI_CODING_AGENT_DIR?.trim() || join(env.HOME?.trim() || homedir(), ".pi", "agent");
+  return join(agentDir, "extensions");
+}
+
+function seedPiExtensionEntry(source: string, target: string, name: string, files: string[]): void {
+  const from = join(source, name);
+  const to = join(target, name);
+  try {
+    const st = statSync(from);
+    if (st.isFile() && /\.(ts|js)$/.test(name)) {
+      copyFileSync(from, to);
+      files.push(to);
+    } else if (st.isDirectory() && piWouldLoadExtensionDir(from)) {
+      cpSync(from, to, { recursive: true });
+      files.push(to);
+    }
+  } catch (error) {
+    warnPiExtensionsSeed(`could not seed pi extension ${name}; skipping it`, error);
+  }
+}
+
+function warnPiExtensionsSeed(message: string, error: unknown): void {
+  process.stderr.write(
+    `[acpx] ${message}: ${error instanceof Error ? error.message : String(error)}\n`,
+  );
+}
+
+/**
+ * Mirror pi's subdirectory discovery test (`resolveExtensionEntries`, pi
+ * `dist/core/extensions/loader.js`): a subdirectory is an extension when it
+ * carries an `index.ts` / `index.js`, or a `package.json` with a `pi` field.
+ */
+function piWouldLoadExtensionDir(dir: string): boolean {
+  if (existsSync(join(dir, "index.ts")) || existsSync(join(dir, "index.js"))) {
+    return true;
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+      pi?: unknown;
+    };
+    return pkg.pi !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 /**

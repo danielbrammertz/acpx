@@ -21,11 +21,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
 import {
   createSessionConversation,
   recordPromptSubmission,
 } from "../src/session/conversation-model.js";
-import { runPromptTurn } from "../src/runtime/engine/prompt-turn.js";
 
 // The nativai pi-acp fork's own wording, so the fixture is the real string a
 // human would be shown rather than a stand-in.

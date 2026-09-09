@@ -364,7 +364,11 @@ test("P2 #15 DISCRIMINATOR: a recently-relaying owner survives the short cadence
 // the idle branch: nextTask(undefined) never times out, so it stays unreachable.
 test("P2 #16 cadence: --ttl 0 still yields no poll timeout (idle branch stays structurally unreachable)", () => {
   const { pollTimeoutMs, quiescenceWindowMs } = idleCheckTimings(undefined);
-  assert.equal(pollTimeoutMs, undefined, "no timeout ⇒ nextTask never returns empty ⇒ never released");
+  assert.equal(
+    pollTimeoutMs,
+    undefined,
+    "no timeout ⇒ nextTask never returns empty ⇒ never released",
+  );
   assert.equal(quiescenceWindowMs, 0);
 });
 

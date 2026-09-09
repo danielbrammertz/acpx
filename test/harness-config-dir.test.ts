@@ -231,6 +231,154 @@ test("pi gets PI_CODING_AGENT_DIR and an APPEND_SYSTEM.md primer", () => {
   });
 });
 
+// ── THE EXTENSIONS SEED (brick af6907f4): the box-level ~/.pi/agent/extensions
+// dir must reach an acpx-spawned pi session WITHOUT per-session planting.
+
+/**
+ * Fixture: a box HOME whose `.pi/agent/extensions/` holds exactly what a box
+ * deploy would (a file extension, a subdir-with-index extension, and junk that
+ * pi would NOT load). Returns the HOME path.
+ */
+function withBoxExtensions(root: string): string {
+  const boxHome = join(root, "box-home");
+  const extDir = join(boxHome, ".pi", "agent", "extensions");
+  mkdirSync(extDir, { recursive: true });
+  writeFileSync(join(extDir, "pi-full-output.js"), "// FILE-EXTENSION-MARKER\n");
+  mkdirSync(join(extDir, "pkg-ext"), { recursive: true });
+  writeFileSync(join(extDir, "pkg-ext", "index.ts"), "export default () => {}\n");
+  mkdirSync(join(extDir, "not-an-extension"), { recursive: true }); // no index, no pi pkg
+  writeFileSync(join(extDir, "README.md"), "docs, not code");
+  return boxHome;
+}
+
+test("pi provisioning seeds extensions/ from the box-level dir WITHOUT planting", () => {
+  // The test that would have caught the original gap (brick af6907f4): acpx
+  // re-points PI_CODING_AGENT_DIR, so a box deploy under ~/.pi/agent was
+  // invisible to every acpx session. This row pins the channel at the
+  // provisioning boundary — see the file-top boundary note for what it does
+  // NOT prove (that pi READS it is the live rig's / e2e evidence's job).
+  withTempRoot((root) => {
+    const boxHome = withBoxExtensions(root);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome, PATH: "" };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_ext",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(env.PI_CODING_AGENT_DIR, "PI_CODING_AGENT_DIR unset — nothing to inspect");
+    const seeded = join(env.PI_CODING_AGENT_DIR, "extensions");
+    assert.ok(existsSync(seeded), "extensions/ not seeded into the session dir");
+    // The file extension arrived byte-for-byte.
+    assert.equal(
+      readFileSync(join(seeded, "pi-full-output.js"), "utf8"),
+      "// FILE-EXTENSION-MARKER\n",
+    );
+    // The subdir extension arrived recursively; non-extensions did not.
+    assert.ok(existsSync(join(seeded, "pkg-ext", "index.ts")), "subdir extension not seeded");
+    assert.equal(existsSync(join(seeded, "not-an-extension")), false, "junk dir was seeded");
+    assert.equal(existsSync(join(seeded, "README.md")), false, "non-code file was seeded");
+  });
+});
+
+test("pi extension seeding: no box-level dir is a silent no-op, never an error", () => {
+  withTempRoot((root) => {
+    const env: NodeJS.ProcessEnv = { HOME: join(root, "empty-home") };
+    mkdirSync(env.HOME!, { recursive: true });
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_noext",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(plan);
+    assert.equal(existsSync(join(env.PI_CODING_AGENT_DIR!, "extensions")), false);
+  });
+});
+
+test("pi extension seeding opt-out: ACPX_PI_EXTENSIONS_SEED=off seeds nothing", () => {
+  withTempRoot((root) => {
+    const boxHome = withBoxExtensions(root);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome, ACPX_PI_EXTENSIONS_SEED: "off" };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_killoff",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.equal(
+      existsSync(join(env.PI_CODING_AGENT_DIR!, "extensions")),
+      false,
+      "kill-switch did not suppress the seed",
+    );
+  });
+});
+
+test("pi extension seeding: a nested spawn inherits the PARENT's extensions", () => {
+  // Source resolution mirrors pi's getAgentDir(): an incoming PI_CODING_AGENT_DIR
+  // (here, a parent session's provisioned dir) is the source, NOT <HOME> — so
+  // what the parent sees, the child sees.
+  withTempRoot((root) => {
+    const parentDir = join(root, "parent-dir");
+    mkdirSync(join(parentDir, "extensions"), { recursive: true });
+    writeFileSync(join(parentDir, "extensions", "inherited.js"), "// PARENT-SEEN\n");
+    const env: NodeJS.ProcessEnv = {
+      HOME: join(root, "home-without-extensions"),
+      PI_CODING_AGENT_DIR: parentDir,
+    };
+    mkdirSync(env.HOME!, { recursive: true });
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_child",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.equal(
+      readFileSync(join(env.PI_CODING_AGENT_DIR!, "extensions", "inherited.js"), "utf8"),
+      "// PARENT-SEEN\n",
+    );
+  });
+});
+
+test("pi extension seeding snapshots — edits to the box dir after provisioning do not leak in", () => {
+  withTempRoot((root) => {
+    const boxHome = withBoxExtensions(root);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_snap",
+      primer: "P",
+      rootDir: root,
+    });
+    const seeded = join(env.PI_CODING_AGENT_DIR!, "extensions");
+    // Post-provision box edits must NOT appear in the running session's dir.
+    writeFileSync(join(boxHome, ".pi", "agent", "extensions", "late.js"), "// LATE\n");
+    assert.equal(existsSync(join(seeded, "late.js")), false, "seed is not a snapshot");
+  });
+});
+
+test("GUARDRAIL: the extensions seed adds nothing for claude/codex dirs", () => {
+  withTempRoot((root) => {
+    withBoxExtensions(root);
+    for (const agentCommand of [CLAUDE, CODEX]) {
+      const env: NodeJS.ProcessEnv = { PATH: "/usr/bin", HOME: root };
+      const plan = applyHarnessConfigDir({
+        env,
+        agentCommand,
+        sessionId: `s-${agentCommand.slice(0, 8)}`,
+        primer: "P",
+        rootDir: root,
+      });
+      assert.equal(plan, undefined, `${agentCommand}: planned a dir`);
+    }
+  });
+});
+
 test("pi DOES get a generated models-store.json now that the merge semantics are measured", () => {
   // ⚠️ THIS ROW REPLACES ONE THAT ASSERTED THE ABSENCE, AND THE REVERSAL IS THE
   // POINT. The old row said writing the file risked REPLACING pi's ~371-entry
