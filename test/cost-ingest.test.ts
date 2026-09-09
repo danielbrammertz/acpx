@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { UnitRates } from "../src/models/cost-provenance.js";
+import type { CostUnit, UnitRates } from "../src/models/cost-provenance.js";
+import { assertPersistedKeyPolicy } from "../src/persisted-key-policy.js";
 import { cloneSessionAcpxState } from "../src/session/conversation-model.js";
 import { rememberSessionCost } from "../src/session/cost-ingest.js";
 import type { SessionAcpxState } from "../src/types.js";
@@ -279,4 +280,188 @@ test("5026423b DRIFT PIN: the leaf rate derivation agrees with `deriveBilling` o
     compared > 50,
     `population control: only ${compared} rows compared — this row proved little`,
   );
+});
+
+// ─── brick 19693941: per-unit stamping (ts / model / cost_usd) ────────────────
+
+const FIXED = new Date("2026-09-09T14:03:02.125Z");
+const clock = (): Date => FIXED;
+
+/**
+ * The session's units, asserted present.
+ *
+ * ⚠️ THIS EXISTS BECAUSE THE REPO'S TWO CHECKERS CONTRADICT EACH OTHER ON
+ * `acpx.cost_units!`. `tsgo` under `tsconfig.test.json` rejects the bare access
+ * (`TS18048: 'acpx.cost_units' is possibly 'undefined'`) so the `!` is REQUIRED;
+ * `oxlint --type-aware` rejects the `!` (`no-unnecessary-type-assertion`) so it is
+ * FORBIDDEN. The baseline lives with the oxlint error in this very file — tsc wins
+ * there because it blocks the build while lint does not.
+ *
+ * `assert.ok` is declared `asserts value`, so this narrows for tsc with no assertion
+ * operator anywhere: both checkers are satisfied instead of one being overruled.
+ * Do not "simplify" this back to `acpx.cost_units!` — that re-picks a side.
+ */
+function unitsOf(acpx: SessionAcpxState): CostUnit[] {
+  const units = acpx.cost_units;
+  assert.ok(units, "expected rememberSessionCost to have written cost_units");
+  return units;
+}
+
+test("19693941: every new unit is stamped with ts, model and its own cost_usd", () => {
+  const acpx = state();
+  rememberSessionCost(
+    acpx,
+    { input: 3692, output: 24, cacheRead: 6854, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  const unit = unitsOf(acpx)[0];
+  assert.equal(unit.ts, "2026-09-09T14:03:02.125Z");
+  assert.equal(unit.model, "openrouter/moonshotai/kimi-k2.6");
+  // 3692×0.95 + 24×4 + 6854×0.16, per million — the real devbox session 01a082bf.
+  assert.equal(unit.cost_usd, (3692 * 0.95 + 24 * 4 + 6854 * 0.16) / 1_000_000);
+  // And that figure IS the session total for a one-unit session.
+  assert.equal(acpx.cost!.amount, unit.cost_usd);
+});
+
+test("19693941 THE INVARIANT: the non-null cost_usd values SUM to cost.amount", () => {
+  // ⚠️ This is what makes stamping `cost_usd` safe rather than a second opinion. A
+  // consumer emitting one row per unit must land on the same total the session
+  // figure states; if these two could drift, per-turn rows would silently disagree
+  // with the session they belong to. Mixed priced/unpriced on purpose — the
+  // unpriceable unit must contribute to NEITHER side.
+  const acpx = state();
+  rememberSessionCost(
+    acpx,
+    { input: 6810, output: 226, cacheRead: 1088, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  rememberSessionCost(
+    acpx,
+    { input: 260, output: 321, cacheRead: 7872, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  rememberSessionCost(
+    acpx,
+    { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 },
+    () => null,
+    clock,
+  );
+
+  const units = unitsOf(acpx);
+  assert.equal(units.length, 3);
+  const summed = units.reduce((a, u) => a + (u.cost_usd ?? 0), 0);
+  assert.equal(summed, acpx.cost!.amount, "per-unit prices must reconcile with the session figure");
+  assert.equal(acpx.cost!.provenance, "computed");
+  assert.deepEqual(acpx.cost!.coverage, { unit: "message", priced: 2, total: 3 });
+  assert.equal(units[2].cost_usd, null, "an unpriceable unit stamps null, never 0");
+});
+
+test("19693941: an unpriceable unit is still stamped with ts and model", () => {
+  // Absence of a price must not cost us the ability to PLACE the unit: a consumer
+  // still needs to emit a flagged row for it, at the right time, on the right model.
+  const acpx = state();
+  rememberSessionCost(
+    acpx,
+    { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 },
+    () => null,
+    clock,
+  );
+  const unit = unitsOf(acpx)[0];
+  assert.equal(unit.cost_usd, null);
+  assert.equal(unit.rates, null);
+  assert.equal(unit.ts, "2026-09-09T14:03:02.125Z");
+  assert.equal(unit.model, "openrouter/moonshotai/kimi-k2.6");
+});
+
+test("19693941: a MODEL SWITCH mid-session is attributed per unit, not session-wide", () => {
+  // The reason `model` is stamped on the unit rather than read from the session: a
+  // session-level model would retroactively relabel every unit before the switch.
+  const acpx = state("openrouter/z-ai/glm-5.3-flash");
+  rememberSessionCost(
+    acpx,
+    { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  acpx.current_model_id = "openrouter/moonshotai/kimi-k2.6";
+  rememberSessionCost(
+    acpx,
+    { input: 200, output: 20, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  assert.equal(unitsOf(acpx)[0].model, "openrouter/z-ai/glm-5.3-flash");
+  assert.equal(unitsOf(acpx)[1].model, "openrouter/moonshotai/kimi-k2.6");
+});
+
+test("19693941: a session with no current model stamps model null, not a guess", () => {
+  const acpx = {} as SessionAcpxState;
+  rememberSessionCost(
+    acpx,
+    { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  assert.equal(unitsOf(acpx)[0].model, null);
+  assert.equal(unitsOf(acpx)[0].cost_usd, null, "no model ⇒ no rates ⇒ unpriceable");
+});
+
+test("19693941: a free model stamps cost_usd 0 — measured free, not absent", () => {
+  // The measured-free asymmetry must survive stamping: 0 here means a catalogue row
+  // QUOTED zero, which is categorically different from `null` (no row at all).
+  const acpx = state();
+  rememberSessionCost(
+    acpx,
+    { input: 1000, output: 100, cacheRead: 0, cacheWrite: 0 },
+    () => FREE,
+    clock,
+  );
+  assert.equal(unitsOf(acpx)[0].cost_usd, 0);
+  assert.equal(acpx.cost!.provenance, "free");
+});
+
+test("19693941: the stamped keys satisfy the PERSISTED KEY POLICY", () => {
+  // ⚠️ THE TRAP THIS TEST EXISTS FOR (brick://48aca560): a non-snake_case key on an
+  // object under `acpx.cost_units` makes `assertPersistedKeyPolicy` throw INSIDE the
+  // session-record write, before `fs.writeFile` — and the failure is not "cost is
+  // missing", it is the WHOLE RECORD silently not being written, taking unrelated
+  // shipped fields with it, with a green suite. These three keys are new on that
+  // exact object, so they are checked through the real policy, not by eye.
+  const acpx = state();
+  rememberSessionCost(
+    acpx,
+    { input: 10, output: 1, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  assert.doesNotThrow(() => assertPersistedKeyPolicy({ acpx }));
+  // Control: the policy must actually be capable of rejecting, or the line above
+  // proves nothing (a guard that cannot fail is not a guard).
+  assert.throws(
+    () => assertPersistedKeyPolicy({ acpx: { cost_units: [{ costUsd: 1 }] } }),
+    /Persisted key policy violation/,
+  );
+});
+
+test("19693941: stamping is ADDITIVE — a pre-change unit without the fields still prices", () => {
+  // Units written before this change can never gain stamps, and `parse.ts` passes
+  // the array through verbatim, so the derivation must keep working over a mixed
+  // array. A consumer tells the two apart by `ts` being absent — never by a default.
+  const acpx = state();
+  acpx.cost_units = [{ input: 100, output: 10, cache_read: 0, cache_write: 0, rates: PRICED }];
+  rememberSessionCost(
+    acpx,
+    { input: 200, output: 20, cacheRead: 0, cacheWrite: 0 },
+    () => PRICED,
+    clock,
+  );
+  const units = unitsOf(acpx);
+  assert.equal(units.length, 2);
+  assert.equal(units[0].ts, undefined, "the legacy unit stays unstamped");
+  assert.equal(units[1].ts, "2026-09-09T14:03:02.125Z");
+  assert.equal(acpx.cost!.coverage!.total, 2, "both units still count toward coverage");
+  assert.equal(acpx.cost!.provenance, "computed");
 });

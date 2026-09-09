@@ -1,6 +1,7 @@
 import {
   type CostUnit,
   deriveCostFigure,
+  priceUnit,
   reportedCost,
   type SessionCostFigure,
   type UnitRates,
@@ -111,6 +112,8 @@ export function rememberSessionCost(
   acpx: SessionAcpxState,
   observation: UsageObservation,
   lookupRates: RateLookup = (modelId) => lookupUnitRates(modelId),
+  /** Clock seam — a test must be able to pin the stamped `ts` (brick 19693941). */
+  now: () => Date = () => new Date(),
 ): void {
   const tokens = observation.input + observation.output;
   const reported = observation.reportedAmount;
@@ -126,8 +129,60 @@ export function rememberSessionCost(
     return;
   }
 
-  const modelId = acpx.current_model_id;
-  const unit: CostUnit = {
+  const units = [
+    ...(acpx.cost_units ?? []),
+    stampedUnit(acpx.current_model_id, observation, lookupRates, now),
+  ];
+  acpx.cost_units = units;
+  acpx.cost = deriveCostFigure(units);
+}
+
+/**
+ * One fully-stamped unit: counts, the rates in force, and the three fields brick
+ * 19693941 added (`ts` / `model` / `cost_usd`).
+ *
+ * Split out of `rememberSessionCost` to keep that function under the repo's
+ * complexity ceiling of 8 — the stamping pushed it to 10. Extracting was the right
+ * remedy rather than raising the ceiling: the two jobs really are separate (decide
+ * whether there is anything to price, vs. build the priced artefact), and the
+ * pre-commit hook refusing the commit is what forced the question.
+ *
+ * brick 19693941 — the stamps let a consumer place a unit in time, attribute it,
+ * and price it without re-deriving any of those. `ts` is what unlocks ONE ROW PER
+ * TURN downstream; without it a consumer can only emit one cumulative row at
+ * session close, and a cumulative row emitted twice SUMS (brick ff878c28).
+ */
+function stampedUnit(
+  modelId: string | undefined,
+  observation: UsageObservation,
+  lookupRates: RateLookup,
+  now: () => Date,
+): CostUnit {
+  // ⚠️ `ts` IS THE OBSERVATION TIME, NOT THE TURN'S START OR THE RECORD'S
+  // `last_used_at`. This function runs on the `usage_update` that reports the
+  // message, so "now" is the truthful instant for it — and it is the only instant
+  // available: pi's wire block (`_meta.piAcp.message`) carries no timestamp of its
+  // own (measured: its keys are cacheRead, cacheWrite, costUsd, input, output,
+  // reasoning, totalTokens). Deriving it from the record's `last_used_at` instead
+  // would stamp every unit of a turn with the same moving value.
+  //
+  // 🛑 `cost_usd` IS THE COMPUTED FIGURE FROM `priceUnit`. IT IS **NOT** THE WIRE'S
+  // `costUsd`, AND THE TWO SHARE A NAME WHILE HAVING OPPOSITE PROVENANCE.
+  //
+  // pi's per-message block carries its own `costUsd` — measured, it is right there
+  // beside the counts (`cacheRead, cacheWrite, costUsd, input, output, reasoning,
+  // totalTokens`). Reading it instead of computing looks like an obvious
+  // simplification: same name, same units, one less call. **It is the defect this
+  // module's `reported` rule exists to refuse.** A harness whose catalogue row
+  // quotes zeroed rates computes zero and reports it TRUTHFULLY — measured on pi
+  // 2026-09-08: `cost.amount 0` beside 7,906 real tokens. Taking the wire value
+  // would put a confident `$0.00` on a session that was never priced, through the
+  // one field a reader is least likely to doubt.
+  //
+  // ⇒ If you are here to "simplify this to the adapter's own number", that is the
+  // bug. `priceUnit` is the only source, and `cost-ingest.test.ts` pins that the
+  // non-null `cost_usd` values sum to `cost.amount` on the computed path.
+  const priceable: CostUnit = {
     input: observation.input,
     output: observation.output,
     // camelCase observation in, snake_case unit out — the unit is persisted
@@ -136,10 +191,12 @@ export function rememberSessionCost(
     cache_write: observation.cacheWrite,
     rates: modelId ? lookupRates(modelId) : null,
   };
-
-  const units = [...(acpx.cost_units ?? []), unit];
-  acpx.cost_units = units;
-  acpx.cost = deriveCostFigure(units);
+  return {
+    ...priceable,
+    ts: now().toISOString(),
+    model: modelId ?? null,
+    cost_usd: priceUnit(priceable),
+  };
 }
 
 /** Re-derive from the persisted units — used after a cold resume, where the

@@ -106,7 +106,28 @@ export type UnitRates = {
   measured_free: boolean;
 };
 
-/** One priceable usage event: token counts plus the rates in force for it. */
+/**
+ * One priceable usage event: token counts plus the rates in force for it.
+ *
+ * ## The three stamped fields (brick 19693941) — and why they are OPTIONAL
+ *
+ * `ts` / `model` / `cost_usd` are stamped at ingest so a consumer can place a unit
+ * on a time axis and attribute it, which is what lets acpx-ui emit ONE ROW PER TURN
+ * for pi instead of one cumulative row per session at close. That is not a
+ * cosmetic upgrade: a cumulative total emitted twice SUMS, which is the reopen
+ * over-report (brick ff878c28); **a per-turn row is an immutable delta, so emitting
+ * it twice is the same row, not a second one.** The defect closes by construction.
+ *
+ * ⚠️ THEY ARE OPTIONAL BECAUSE UNITS WRITTEN BEFORE THIS CHANGE DO NOT HAVE THEM,
+ * AND THOSE UNITS CAN NEVER GAIN THEM. `parse.ts` passes the array through
+ * verbatim, so a pre-change record round-trips with unstamped units forever. A
+ * consumer must therefore treat "no `ts`" as *unplaceable in time* and must NOT
+ * substitute a default — any default is an invented timestamp. acpx-ui handles that
+ * set explicitly (its pre-migration remainder row).
+ *
+ * ⚠️ snake_case, like every key here, and for the reason on {@link UnitRates}:
+ * these keys reach the session record verbatim.
+ */
 export type CostUnit = {
   input: number;
   output: number;
@@ -114,6 +135,29 @@ export type CostUnit = {
   cache_write: number;
   /** `null` ⇔ no catalogue row was found ⇒ this unit is unpriceable. */
   rates: UnitRates | null;
+  /**
+   * ISO-8601 instant the usage event was observed. Absent on units written before
+   * brick 19693941 — see the header; absence means "cannot be placed in time".
+   */
+  ts?: string;
+  /**
+   * The model in force for THIS unit. `null` when the session had no current
+   * model. Stored per unit because a session can switch models mid-flight, so a
+   * session-level model would misattribute every unit before the switch.
+   */
+  model?: string | null;
+  /**
+   * This unit's own price in USD, from {@link priceUnit} — `null` ⇔ unpriceable.
+   *
+   * ⚠️ STAMPED HERE SO THE PRICING RULE STAYS IN ONE PLACE. A consumer that needs
+   * a per-unit cost would otherwise have to re-implement `priceUnit` — including
+   * the `-1` VARIABLE marker, the measured-free asymmetry, and
+   * `cacheRateMissingWhereItMatters` — in another repo, where it would drift out of
+   * agreement silently. The invariant that keeps this honest: the non-null
+   * `cost_usd` values sum to `deriveCostFigure(units).amount` whenever provenance
+   * is `computed`, and `cost-ingest.test.ts` pins exactly that.
+   */
+  cost_usd?: number | null;
 };
 
 /**
@@ -127,7 +171,17 @@ function cacheRateMissingWhereItMatters(unit: CostUnit, rates: UnitRates): boole
   );
 }
 
-function priceUnit(unit: CostUnit): number | null {
+/**
+ * One unit's price in USD, or `null` when it cannot be priced.
+ *
+ * Exported (brick 19693941) so `cost-ingest` can stamp each unit's own
+ * `cost_usd` at the moment it resolves that unit's rates. ⚠️ This is the ONLY
+ * implementation of the per-unit pricing rule — the `-1` VARIABLE marker, the
+ * measured-free asymmetry and the missing-cache-rate refusal all live here. Do not
+ * re-derive it elsewhere, in this repo or another: the whole point of stamping
+ * `cost_usd` is that no consumer has to.
+ */
+export function priceUnit(unit: CostUnit): number | null {
   const r = unit.rates;
   if (!r) {
     return null;
