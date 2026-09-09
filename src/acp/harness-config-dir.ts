@@ -1068,23 +1068,99 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   return { harness: "pi", dir, envNames, files };
 }
 
-/** pi's HTTP idle bound for acpx-PROVISIONED sessions, in ms. See {@link writePiStallPolicy}. */
-const PI_HTTP_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * pi's HTTP idle bound for acpx-PROVISIONED sessions, in ms. See
+ * {@link writePiStallPolicy}.
+ *
+ * **20 000 IS A DETECTOR, NOT A WAIT (bricks bb23a7fa, 5aacdba2).** The stall this
+ * bound meets is an upstream refusal, not a slow model: `qwen/qwen3.8-flash` has one
+ * provider (Alibaba) and acpx is on OpenRouter's shared pool, so a throttled request
+ * delivers **zero bytes, forever**. Waiting longer recovers nothing — the previous
+ * 120 000 spent two minutes learning what 20 s establishes.
+ *
+ * ## ⚠️ SIZED AGAINST INTER-CHUNK GAPS, NOT TOTAL COMPLETION — the axis is the trap
+ *
+ * This is a per-byte INACTIVITY timer, so what it must clear is the largest gap
+ * *between* chunks of a healthy stream, **not** the longest healthy turn. Those are
+ * different numbers and using the wrong one is how a detector cuts working traffic:
+ *
+ * ```
+ *   healthy TOTAL completions (20 probes)   0.9 – 6.05 s   <- NOT the binding axis
+ *   healthy INTER-CHUNK gaps (Daniel's      5.06 / 1.25 / 7.66 / 1.20 s
+ *   session 01a0827e, ~85 KB streamed)                     <- the binding axis: 7.66 s
+ * ```
+ *
+ * A 10 s bound looked right against the first row and leaves only 1.3× headroom on
+ * the second. **20 000 gives 2.6× over the largest healthy gap actually recorded.**
+ * ⇒ Raise this if a longer healthy gap is ever measured; do not lower it to detect
+ * faster, because the failure it would cause is invisible until a user reports it.
+ */
+const PI_HTTP_IDLE_TIMEOUT_MS = 20_000;
+
+/**
+ * Backoff base for pi's turn retries, in ms. pi computes
+ * `delayMs = baseDelayMs · 2^(attempt−1)` and **DOES NOT CAP IT** — measured:
+ * `_prepareRetry` (`agent-session.js:2289`) has no ceiling, and
+ * `retry.provider.maxRetryDelayMs` governs a *different* mechanism (the SDK's
+ * provider-level retries via `getProviderRetrySettings`), not this path.
+ *
+ * So the base is the only lever on the tail, and pi's default of 2 000 makes 8
+ * attempts unaffordable (2 000 × (2^7 − 1) = 254 s of pure waiting). At 500 the same
+ * 8 attempts cost 63.5 s of backoff.
+ *
+ * **Small is also right on the merits here:** the pool frees and re-fills on a
+ * seconds timescale, so the early fast retries (0.5 / 1 / 2 / 4 s) are the ones most
+ * likely to catch a free window, and the doubling still backs off before the tail.
+ */
+const PI_RETRY_BASE_DELAY_MS = 500;
 
 /**
  * pi retries a failed turn `maxRetries` times, so ATTEMPTS = 1 + this.
  *
- * 🛑 **`1` IS A COMPENSATION FOR A MISSING DEADLINE, NOT A CONSIDERED PERMANENT
- * VALUE — do not read it as tuning.** `maxRetries` governs **every** transient
- * failure (rate limits, 5xx, network blips), not just idle stalls, so dropping
- * pi's default of 3 to 1 buys the wall-clock target by **spending resilience
- * against a different failure class**. That trade is acceptable only because pi
- * has no total-turn deadline (see {@link writePiStallPolicy}), which makes the
- * `idle × attempts` product the only lever available.
+ * **7 (⇒ 8 attempts) IS DERIVED FROM A MEASURED FAILURE RATE, not tuned by feel
+ * (bricks bb23a7fa, 5aacdba2).** The failure being retried is an upstream
+ * shared-pool refusal that is INDEPENDENT per attempt — measured
+ * `P(dead | previous dead) = 50%` against a base rate of 50%, i.e. no clustering.
+ * That is what makes retrying the correct response at all: each attempt is a fresh
+ * draw, so the failure probability compounds down.
  *
- * ⇒ **When a turn deadline lands in acpx's own code, this should go back up.**
+ * ## The dead rate is SHAPE-dependent, and the count is sized for the worst shape
+ *
+ * ```
+ *   3-word prompt                              21% dead (3/14 sequential)
+ *   25k context + medium reasoning              50% dead (7/14 sequential)   <- sized for this
+ *   3-word prompt under 20-way concurrency      60% dead
+ * ```
+ *
+ * At 50% per attempt: **2 attempts fail 25% of the time** (that is what shipped, and
+ * it is why Daniel saw four consecutive dead turns — 0.5⁴ = 6.25%, entirely
+ * ordinary). **8 attempts fail 0.39%.**
+ *
+ * ```
+ *   attempts   P(all fail)   worst case at idle 20 000 / base 500
+ *      2          25%          4 m 02 s  (shipped: idle 120 000 × 2)
+ *      7         0.78%         2 m 52 s
+ *      8         0.39%         3 m 44 s   <- CURRENT, inside the ≤ 5 min target
+ *      9         0.20%         over on backoff alone
+ * ```
+ *
+ * ⇒ Strictly better than what shipped on **both** axes: 25% → 0.39% failure and
+ * 4 m 02 s → 3 m 44 s worst case.
+ *
+ * ⚠️ **`maxRetries` still governs EVERY transient failure** (rate limits, 5xx,
+ * network blips), so raising it also buys resilience there — this is the direction
+ * that spends nothing. The previous value of `1` was explicitly recorded as *"a
+ * compensation for a missing deadline, not a considered permanent value"*; the
+ * missing piece turned out not to be a deadline but a correct diagnosis.
+ *
+ * 🛑 **AND RETRY IS NOT THE REAL FIX.** A 50% dead rate is a *provider* condition:
+ * we share OpenRouter's rate-limit pool with every other user of this model and hold
+ * no key of our own (`is_byok: false`). Retrying converts it to 0.39% at the cost of
+ * up to 8 requests per turn. **The actual remedy is BYOK** — the provider's own
+ * `remedy_hint` says so — and routing away from single-provider models. Tracked in
+ * bb23a7fa; this constant is what keeps turns working until then.
  */
-const PI_TURN_MAX_RETRIES = 1;
+const PI_TURN_MAX_RETRIES = 7;
 
 /**
  * Bound how long an acpx-provisioned pi session sits in dead air when the
@@ -1107,12 +1183,22 @@ const PI_TURN_MAX_RETRIES = 1;
  * worst case ≈ idleMs × (1 + maxRetries) + baseDelayMs × (2^maxRetries − 1)
  * ```
  *
- * At 120 000 / 1 that is **4 m 02 s**, inside the ≤ ~5 min target.
+ * **Confirmed on the wire, not merely restated** (brick 5aacdba2): against a
+ * black-hole server that accepts and sends nothing, at `idle` 5 000, attempts were
+ * 1 / 2 / 4 for `maxRetries` 0 / 1 / 3, with inter-attempt gaps
+ * `idle + base·2^(n−1)` (7 015 / 9 006 / 13 011 ms) — and the 4-attempt arm's final
+ * failure landed at ~34 032 ms against the formula's 34 000.
+ *
+ * At the current 20 000 / 7 / 500 that is **3 m 44 s**, inside the ≤ ~5 min target,
+ * with a 0.39% chance of exhausting all 8 attempts at the measured 50% dead rate.
+ *
+ * ⚠️ **The base delay is the tail, and it is UNCAPPED** — `2 000` (pi's default)
+ * would put 254 s of pure backoff into 8 attempts and blow the target on waiting
+ * alone. See {@link PI_RETRY_BASE_DELAY_MS}.
+ *
  * ⚠️ **The ruling's own wording — "idle ~120 s × 2 retries" — is 3 attempts and
- * 6 m 06 s, i.e. OVER the target it sets.** One retry is chosen over two so the
- * per-attempt window can stay at the generous 120 s: against a *provider* stall a
- * second retry mostly buys another full window of silence rather than a different
- * outcome, whereas a shorter window is what starts cutting healthy requests.
+ * 6 m 06 s, i.e. OVER the target it sets.** Kept on the page because it is the
+ * ruling's text, not because it was ever implemented.
  *
  * ## 🛑 WHAT THIS DOES NOT BUY — and it is half the failure space
  *
@@ -1137,9 +1223,22 @@ const PI_TURN_MAX_RETRIES = 1;
  * read** (`openai` 6.40.0 `client.js:489-513`). It bounds response
  * ESTABLISHMENT only. **pi 0.84.4 has no total-turn deadline of any kind.**
  *
- * ⇒ **Bounding the keepalive-emitting mode needs a turn deadline in OUR code, and
- * is deliberately NOT attempted here.** Anyone reading this as "pi stalls now
- * surface in five minutes" is wrong for the half of the space that keeps talking.
+ * ## ⚠️ AND THE OBSERVED FAILURE IS THE **FIRST** ROW, WHICH THIS BOUND DOES CATCH
+ *
+ * That table long carried the conclusion *"bounding the keepalive-emitting mode needs
+ * a turn deadline in OUR code"*, which overstated the live risk. Measured 2026-09-08
+ * (brick bb23a7fa): the throttled request returns **`http=000` with NO response
+ * headers at all** — OpenRouter emits nothing until an upstream provider answers. So
+ * the real failure is row one (headers-or-nothing then silence), and a 20 s bound
+ * meets it in 20 s.
+ *
+ * 🛑 **The keepalive row remains unbounded at any value, and that is still true —
+ * but it has NOT been observed for this failure.** If a stall is ever seen that keeps
+ * emitting keepalives, no `httpIdleTimeoutMs` can catch it and it needs a
+ * progress-view deadline in acpx (keepalives are HTTP bytes but produce no
+ * `session/update`, so acpx can see what pi cannot). Filed rather than built, because
+ * building an unmeasured bound risks cutting healthy long work — the exact failure
+ * this policy exists to avoid.
  *
  * ## Why a partial settings object is the correct shape
  *
@@ -1163,7 +1262,7 @@ function writePiStallPolicy(dir: string, files: string[]): void {
     `${JSON.stringify(
       {
         httpIdleTimeoutMs: PI_HTTP_IDLE_TIMEOUT_MS,
-        retry: { maxRetries: PI_TURN_MAX_RETRIES },
+        retry: { maxRetries: PI_TURN_MAX_RETRIES, baseDelayMs: PI_RETRY_BASE_DELAY_MS },
       },
       null,
       2,
