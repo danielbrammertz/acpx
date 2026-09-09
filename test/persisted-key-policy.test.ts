@@ -190,3 +190,93 @@ test("serializeSessionRecordForDisk rejects the provisioning_warning breadcrumb'
     serializeSessionRecordForDisk(record);
   }, /provisioning_warning\.profileId/);
 });
+
+// --- served_via_shim through the REAL policy (brick://a89c3cd4) -------------
+// The hazard this guards is not "the field is missing": `assertPersistedKeyPolicy`
+// throws INSIDE the record write, before `fs.writeFile`, and the throw is
+// swallowed — so one camelCase key freezes the whole record on disk, taking
+// unrelated pre-existing fields with it, under a green suite (brick://48aca560).
+// So the field is driven through the real policy, with a control proving the
+// policy can still reject — a passing acceptance test alone would look identical
+// if the policy had stopped working.
+
+test("served_via_shim passes the real persisted key policy", () => {
+  const record = makeRecord();
+  record.acpx = {
+    ...record.acpx,
+    session_options: { ...record.acpx?.session_options, served_via_shim: true },
+  };
+
+  const persisted = serializeSessionRecordForDisk(record);
+  assert.deepEqual(findPersistedKeyPolicyViolations(persisted), []);
+  assertPersistedKeyPolicy(persisted);
+
+  // and it actually survives serialization — a key the policy accepts but the
+  // serializer drops would pass the two assertions above while never reaching disk
+  const sessionOptions = (persisted.acpx as { session_options?: Record<string, unknown> })
+    ?.session_options;
+  assert.equal(sessionOptions?.served_via_shim, true);
+});
+
+test("CONTROL: the policy still rejects the camelCase form of this same field", () => {
+  const record = makeRecord();
+  // Seed the snake_case field so `session_options` EXISTS on the serialized
+  // record — `makeRecord()` has none, and injecting into `undefined` throws
+  // before the policy is ever consulted (which is how this control first failed
+  // for a reason having nothing to do with the policy).
+  record.acpx = {
+    ...record.acpx,
+    session_options: { ...record.acpx?.session_options, served_via_shim: true },
+  };
+  const persisted = serializeSessionRecordForDisk(record);
+  const sessionOptions = (persisted.acpx as { session_options?: Record<string, unknown> })
+    ?.session_options as Record<string, unknown>;
+  sessionOptions.servedViaShim = true;
+
+  // NOTE the PATH form: violations are reported as `acpx.session_options.<key>`,
+  // not as a bare key — the `requestId` case above matches a bare name only
+  // because that key is top-level. Asserting the bare name here failed while the
+  // policy was working perfectly, which is precisely what this control caught.
+  const violations = findPersistedKeyPolicyViolations(persisted);
+  assert.equal(violations.includes("acpx.session_options.servedViaShim"), true);
+  assert.throws(() => {
+    assertPersistedKeyPolicy(persisted);
+  }, /snake_case/);
+});
+
+// --- the single-assignment-path invariant (brick://a89c3cd4) ----------------
+// `servedViaShim` is recorded inside `AcpClient.setShimHandle`, so the fact is
+// captured no matter WHICH shim-start site fires. That only holds while the
+// setter is the sole assignment path — and the failure it prevents is one a
+// behavioural test cannot catch, because a picker-only implementation plus a
+// picker-only test is green, and both would be written by the same person in
+// the same sitting. So the invariant is asserted directly.
+//
+// ⚠️ LIMITATION, stated so nobody trusts this further than it goes: it is a TEXT
+// match. A rename of the field, a destructuring assignment, or any other spelling
+// slips past it. It catches the specific regression that matters — someone adding
+// a third shim-start site with a raw assignment, copying the two that were there
+// before — and nothing wider.
+
+test("AcpClient assigns shimHandle ONLY through setShimHandle (single-path invariant)", async () => {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  // Resolved from the REPO ROOT (process.cwd()), not from import.meta.url: the
+  // compiled test runs out of dist-test/test/, so a URL-relative path lands on
+  // the emitted .js instead of the source this invariant is about.
+  const source = await fs.readFile(path.join(process.cwd(), "src/acp/client.ts"), "utf8");
+
+  const assignments = source
+    .split("\n")
+    .map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
+    .filter(({ line }) => /^this\.shimHandle\s*=/.test(line));
+
+  // Exactly one: the assignment inside setShimHandle itself.
+  assert.deepEqual(
+    assignments.map(({ line }) => line),
+    ["this.shimHandle = handle;"],
+    `raw this.shimHandle assignments outside setShimHandle at line(s) ${assignments
+      .map(({ lineNumber }) => lineNumber)
+      .join(", ")} — route them through setShimHandle so the served-via-shim fact is recorded`,
+  );
+});

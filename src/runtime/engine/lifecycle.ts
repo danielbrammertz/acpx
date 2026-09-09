@@ -25,6 +25,18 @@ export function applyLifecycleSnapshotToRecord(
     sessionOptions.provisioning_warning = { ...snapshot.provisioningWarning };
     record.acpx = { ...acpx, session_options: sessionOptions };
   }
+  // brick://a89c3cd4 — STICKY BY CONSTRUCTION, exactly like the block above: the
+  // truthy gate means a falsy snapshot leaves any stored `true` alone, and that
+  // is load-bearing rather than incidental. The consumer is the cold-resume
+  // transcript gate, which runs AFTER teardown — and teardown produces a snapshot
+  // with this unset. An `else` clearing it here would report "not shim-served" at
+  // exactly the moment the truth is needed, reproducing the defect it fixes.
+  if (snapshot.servedViaShim) {
+    const acpx = record.acpx ?? {};
+    const sessionOptions = { ...acpx.session_options };
+    sessionOptions.served_via_shim = true;
+    record.acpx = { ...acpx, session_options: sessionOptions };
+  }
 
   if (snapshot.lastExit) {
     record.lastAgentExitCode = snapshot.lastExit.exitCode;
