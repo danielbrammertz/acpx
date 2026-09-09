@@ -61,6 +61,15 @@ export function supportsMidTurnPromptInjection(agentCommand: string): boolean {
 //                 so an unknown fire-and-forget steer can never wedge a turn).
 export function injectionReturnsTerminalResponse(agentCommand: string): boolean {
   try {
+    // pi (fork build 0ecae6f+, brick 7daa105e): an injected prompt is steered into
+    // the running agent loop and resolves IMMEDIATELY with a steer-ack terminal
+    // (`end_turn` + `_meta.piAcp.steered`) — so awaiting it is safe and the delivery
+    // lifecycle closes at ack time. On pre-steer builds (older fork / upstream) the
+    // injected request resolves only at the containing turn's end; awaiting it is
+    // still bounded by the drain backstop, never wedged.
+    if (harnessIdForAgentCommand(agentCommand) === "pi") {
+      return true;
+    }
     const { command, args } = splitCommandLine(agentCommand);
     return isClaudeAcpCommand(command, args) || isClaudePtyAcpCommand(command, args);
   } catch {

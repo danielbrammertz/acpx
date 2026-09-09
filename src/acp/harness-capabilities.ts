@@ -564,6 +564,19 @@ const PI_FORK_BUILD: HarnessAdapterIdentity = {
   entrySha256: "711536aac8a9939e",
 };
 
+// The fork build that introduced MID-TURN STEERING (brick 7daa105e): a concurrent
+// session/prompt during an active turn is steered into pi's running agent loop and
+// acked immediately (`_meta.piAcp.steered`). Cited separately from PI_FORK_BUILD
+// because a box running the older fork build af431c6 still has NO steer support —
+// the cell is true only from this commit on. Distinguishing the two builds matters:
+// both publish 0.0.33, so the commit + entry sha ARE the identity.
+const PI_FORK_STEER_BUILD: HarnessAdapterIdentity = {
+  kind: "resolved-commit",
+  spec: "nativai/pi-acp fork with mid-turn steer (w8/pi-steer-midturn)",
+  commit: "0ecae6f",
+  entrySha256: "71aa9af8af6abfaa",
+};
+
 /** Where a harness block's claims come from, and how to re-derive it. */
 export interface HarnessMeasurementSource {
   /**
@@ -1264,6 +1277,11 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
         "fork.atIndex": PI_FORK_BUILD,
         usageReporting: PI_FORK_BUILD,
         liveModelChangeBlockedReason: PI_FORK_BUILD,
+        // Mid-turn steering is FORK-ONLY by construction, and NEWER-fork-only:
+        // upstream pi-acp 0.0.33 and fork builds through af431c6 queue a concurrent
+        // session/prompt behind the active turn (turnQueue); the steer feature lands
+        // in the fork at 0ecae6f (brick 7daa105e, 2026-09-09).
+        midTurnSteering: PI_FORK_STEER_BUILD,
       },
     },
     label: "pi",
@@ -1342,7 +1360,17 @@ export const HARNESS_FACTS: Record<HarnessId, HarnessCapabilityFacts> = {
     // land three records early on a session with one tool call and still report
     // success.
     fork: { supported: true, atIndex: "exact" },
-    midTurnSteering: false, // src/acp/mid-turn-injection-support.ts:5-20 (I2 R3)
+    // ⚠️ FLIPPED 2026-09-09 (brick 7daa105e) — was `false` per I2 R3 (measured
+    // 2026-09-03 against a pi-acp that queued concurrent prompts). The nativai
+    // fork now STEERS: a concurrent session/prompt during an active turn is handed
+    // to pi's running agent loop (pi RPC `steer` — delivered after the current tool
+    // calls finish, before the next LLM call) and resolves immediately with a
+    // steer-ack `_meta.piAcp.steered`. Verified live on devbox (rig sessions
+    // 01a0876e pre-fix / post-fix rerun, claude control 22e5220a). TRUE ONLY ON THE
+    // FORK: upstream pi-acp still queues concurrent prompts, so a box without
+    // /opt/pi-acp would see the injected prompt land post-turn — see the
+    // `cellOverrides["midTurnSteering"]` build citation.
+    midTurnSteering: true, // pi-acp fork commit carrying steer (w8/pi-steer-midturn); src/acp/mid-turn-injection-support.ts:5-20
     // ⚠️ THE FORK ADDS A PRIMER CHANNEL THAT DOES NOT MOVE pi's DATA DIR, and
     // that distinction is the whole point: `PI_CODING_AGENT_DIR` is pi's DATA dir
     // as well as its config dir, so re-pointing it for a primer took the session
