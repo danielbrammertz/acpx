@@ -926,6 +926,26 @@ test("cb214e48: pi_session_dir round-trips a cold disk reload", () => {
   assert.equal(parsed?.acpx?.harness_config_dir, "/tmp/acpx-pi-rt");
 });
 
+/** Collect `process.stderr` writes made by `body`, synchronously. The shared
+ *  `withCapturedStderrWrites` is async, which does not compose with the sync
+ *  `withTempRoot` fixture above. */
+function captureStderrSync(body: () => void): string {
+  const original = process.stderr.write.bind(process.stderr);
+  const writes: string[] = [];
+  (process.stderr as unknown as { write: typeof process.stderr.write }).write = ((
+    chunk: string,
+  ) => {
+    writes.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    body();
+  } finally {
+    (process.stderr as unknown as { write: typeof process.stderr.write }).write = original;
+  }
+  return writes.join("");
+}
+
 /** Count paths whose final key is `key`, at ANY depth — the `paths(..)` scan a
  *  tester runs with jq, expressed in-process. Never a field probe: a wrong path
  *  returns a silent undefined indistinguishable from the pass condition. */
@@ -1149,8 +1169,18 @@ test("cb214e48: a LIVE destination file is NEVER overwritten — the destination
       STRANDED_FILE,
       '{"stale":1}\n',
     );
-    withBoxPiAgentDir(box, () => {
-      removeHarnessConfigDir(dir);
+    // ⚠️ AND THE SKIP MUST SAY SO — brick://cb214e48 F1 (TE finding). "Do nothing"
+    // silently is indistinguishable from a rescue that never ran, and THIS is the
+    // branch where a divergent pair lives: a LIVE file at the destination and a
+    // STALE one in the directory about to be deleted. A reader who is not told
+    // which copy was kept cannot tell a correct skip from a lost transcript.
+    // Captured SYNCHRONOUSLY on purpose: `withTempRoot`'s callback is sync, and an
+    // async one would let its `finally` delete the fixture root before the body
+    // settled — a passing row measuring a directory that no longer exists.
+    const writes = captureStderrSync(() => {
+      withBoxPiAgentDir(box, () => {
+        removeHarnessConfigDir(dir);
+      });
     });
     assert.equal(
       readFileSync(join(liveDir, STRANDED_FILE), "utf8"),
@@ -1158,6 +1188,17 @@ test("cb214e48: a LIVE destination file is NEVER overwritten — the destination
       "the live destination file was rolled back to a stale /tmp copy",
     );
     assert.equal(existsSync(dir), false);
+    assert.match(writes, /kept 1 existing pi transcript/, "the skip was SILENT");
+    // Both paths named: the one kept, and the one discarded with the directory.
+    assert.ok(
+      writes.includes(join(liveDir, STRANDED_FILE)),
+      "the line does not name the destination that was kept",
+    );
+    assert.ok(
+      writes.includes(join(dir, "sessions", STRANDED_SLUG, STRANDED_FILE)),
+      "the line does not name the stale copy being discarded",
+    );
+    assert.match(writes, /destination is authoritative/, "the line does not say WHY it was kept");
   });
 });
 

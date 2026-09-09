@@ -489,10 +489,18 @@ function rescueStrandedPiTranscripts(dir: string, env: NodeJS.ProcessEnv = proce
   const boxAgentDir = resolveBoxPiAgentDir(env);
   const rescued: string[] = [];
   const unrescuable: string[] = [];
+  const kept: string[] = [];
   for (const file of stranded) {
     const destination = join(boxAgentDir, "sessions", file.slug, file.name);
     if (existsSync(destination)) {
-      continue; // the destination is authoritative — see the header. Not a failure.
+      // The destination is authoritative — see the header. Not a failure, but NOT
+      // SILENT either: the conception's rule is "do nothing AND SAY SO". A skip that
+      // logged nothing is indistinguishable from a rescue that never ran, and this
+      // branch is exactly where a divergent pair lives (a LIVE file here, a STALE
+      // one in the dir about to be deleted), so the reader needs to be told which
+      // copy was kept and which one is going.
+      kept.push(`${destination} (kept; discarding ${file.path})`);
+      continue;
     }
     try {
       mkdirSync(join(boxAgentDir, "sessions", file.slug), { recursive: true });
@@ -502,20 +510,45 @@ function rescueStrandedPiTranscripts(dir: string, env: NodeJS.ProcessEnv = proce
       unrescuable.push(file.path);
     }
   }
-  if (rescued.length > 0) {
+  reportRescueOutcome(dir, join(boxAgentDir, "sessions"), { rescued, kept, unrescuable });
+  return unrescuable.length === 0;
+}
+
+/**
+ * Say what the rescue did — for ALL THREE outcomes, including the SKIP.
+ *
+ * ⚠️ THE SKIP LINE IS NOT COSMETIC (brick://cb214e48 F1). "Do nothing" performed
+ * silently is indistinguishable from a rescue that never ran, and the skip branch is
+ * exactly where a DIVERGENT PAIR lives: a live file at the destination and a stale
+ * one in the directory about to be deleted. A reader who is not told which copy was
+ * kept cannot tell a correct skip from a lost transcript. The conception's rule for
+ * this branch is "do nothing AND SAY SO", and acceptance §6.5 requires one stderr
+ * line naming which.
+ */
+function reportRescueOutcome(
+  dir: string,
+  boxSessionsDir: string,
+  outcome: { rescued: string[]; kept: string[]; unrescuable: string[] },
+): void {
+  if (outcome.rescued.length > 0) {
     process.stderr.write(
-      `[acpx] rescued ${rescued.length} stranded pi transcript(s) from ${dir} into ` +
-        `${join(boxAgentDir, "sessions")} before removing it (brick cb214e48): ${rescued.join(", ")}\n`,
+      `[acpx] rescued ${outcome.rescued.length} stranded pi transcript(s) from ${dir} into ` +
+        `${boxSessionsDir} before removing it (brick cb214e48): ${outcome.rescued.join(", ")}\n`,
     );
   }
-  if (unrescuable.length > 0) {
+  if (outcome.kept.length > 0) {
+    process.stderr.write(
+      `[acpx] kept ${outcome.kept.length} existing pi transcript(s) in the box store rather than ` +
+        `overwriting from ${dir} — the destination is authoritative (brick cb214e48): ` +
+        `${outcome.kept.join(", ")}\n`,
+    );
+  }
+  if (outcome.unrescuable.length > 0) {
     process.stderr.write(
       `[acpx] REFUSING to remove ${dir}: it holds pi transcript(s) that could not be copied to ` +
-        `${join(boxAgentDir, "sessions")} and exist nowhere else: ${unrescuable.join(", ")}\n`,
+        `${boxSessionsDir} and exist nowhere else: ${outcome.unrescuable.join(", ")}\n`,
     );
-    return false;
   }
-  return true;
 }
 
 /** What a resume-time rescue actually did, so the caller can log a fact rather
