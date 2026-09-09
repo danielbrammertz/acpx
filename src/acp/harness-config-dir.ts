@@ -1465,7 +1465,7 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
     files,
   );
   writePiStallPolicy(dir, files);
-  seedPiExtensions(dir, input.env, files);
+  seedPiExtensions(dir, boxAgentDir, input.env, files);
   // KEEP pi's SESSION STORE IN THE BOX STORE (brick ac86eb34, corrected by
   // brick://cb214e48): the target is derived from `boxAgentDir` above, so it is
   // immune to the re-point on the next line — and to whatever an ancestor pi
@@ -1515,13 +1515,33 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
  * files). A copy is a snapshot AS OF SPAWN — exactly what a fresh direct `pi`
  * run sees — deterministic, and immune to both. Cost is KBs per session.
  *
- * ## Source resolution mirrors pi's own `getAgentDir()`
+ * ## Source is the BOX agent dir — handed in, never re-derived (brick://f24f6644)
  *
- * `PI_CODING_AGENT_DIR` **as received, BEFORE the re-point below** — for a
- * nested spawn (an agent spawning a child) that is the PARENT session's dir, so
- * a child inherits what its parent sees (the natural chain); otherwise
- * `<HOME>/.pi/agent`. Missing source dir ⇒ return silently: no extensions means
- * no delta and no error, matching pi's own tolerance.
+ * ⚠️ **THE COMMENT THAT STOOD HERE DESCRIBED THE DEFECT AS THE DESIGN.** It read:
+ * *"`PI_CODING_AGENT_DIR` **as received, BEFORE the re-point below** — for a
+ * nested spawn (an agent spawning a child) that is the PARENT session's dir, so a
+ * child inherits what its parent sees (the natural chain)"*. That chain is not
+ * natural, it is the bug brick://cb214e48 fixed for the session store: the
+ * parent's dir is a **throwaway**, removed at the parent's terminal close and by
+ * the orphan sweep, and a snapshot of it is a snapshot of *whatever the parent
+ * happened to be seeded with*, not of the box. So the source is
+ * {@link resolveBoxPiAgentDir}'s single per-spawn derivation, threaded in from
+ * {@link writePiConfigDir} — one derivation per spawn, shared with the catalogue
+ * read and the session store, so the three cannot drift.
+ *
+ * Missing source dir ⇒ return silently: no extensions means no delta and no
+ * error, matching pi's own tolerance.
+ *
+ * ⚠️ **`ACPX_PI_BOX_AGENT_DIR` REACHES THIS CHANNEL BECAUSE OF THAT THREADING, AND
+ * THAT IS THE LEG A LIVE PROBE CAN SEE TODAY.** Measured on the pre-fix build
+ * (brick f24f6644, isolated rig, real pi child of a real pi parent): the
+ * `auth-env.ts` spawn-env scrub already deletes an inherited per-session
+ * `PI_CODING_AGENT_DIR`, so the nested-spawn case reached `~/.pi/agent` even
+ * before this fix — but with the box override set and a *legitimately relocated*
+ * `PI_CODING_AGENT_DIR` beside it, the pre-fix code seeded from the latter and
+ * ignored the override that every other pi consumer honours. This is defence in
+ * depth for the first leg and a plain correctness fix for the second: the seeding
+ * no longer depends on the scrub running first.
  *
  * ## Fidelity to pi's discovery grammar
  *
@@ -1536,11 +1556,19 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
  * `ACPX_PI_EXTENSIONS_SEED=off` skips the seeding entirely — the box operator's
  * kill-switch for the channel. Anything else (or unset) seeds.
  */
-function seedPiExtensions(dir: string, env: NodeJS.ProcessEnv, files: string[]): void {
+function seedPiExtensions(
+  dir: string,
+  /** Resolved ONCE by {@link resolveBoxPiAgentDir}, never re-derived from `env`
+   * — the same value the catalogue read and the session store are given
+   * (brick://f24f6644, brick://cb214e48). */
+  boxAgentDir: string,
+  env: NodeJS.ProcessEnv,
+  files: string[],
+): void {
   if ((env.ACPX_PI_EXTENSIONS_SEED ?? "").trim().toLowerCase() === "off") {
     return;
   }
-  const source = resolvePiExtensionsSource(env);
+  const source = join(boxAgentDir, "extensions");
   let names: string[];
   try {
     names = readdirSync(source);
@@ -1557,19 +1585,6 @@ function seedPiExtensions(dir: string, env: NodeJS.ProcessEnv, files: string[]):
   for (const name of names) {
     seedPiExtensionEntry(source, target, name, files);
   }
-}
-
-/**
- * Resolve the box-level pi agent dir the way pi's own `getAgentDir()` does, then
- * step into its `extensions/`: `PI_CODING_AGENT_DIR` as received IS an agent dir
- * (for a nested spawn, the parent session's provisioned dir) — do NOT append
- * `.pi/agent` to it. Only when unset does `~/.pi/agent` (HOME from the spawn
- * env) apply. Called BEFORE the re-point below.
- */
-function resolvePiExtensionsSource(env: NodeJS.ProcessEnv): string {
-  const agentDir =
-    env.PI_CODING_AGENT_DIR?.trim() || join(env.HOME?.trim() || homedir(), ".pi", "agent");
-  return join(agentDir, "extensions");
 }
 
 function seedPiExtensionEntry(source: string, target: string, name: string, files: string[]): void {
