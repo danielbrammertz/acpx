@@ -30,8 +30,10 @@ import {
   modelSetMethodKnownUnsupported,
   setModelSetMethodUnsupported,
 } from "../src/session/mode-preference.js";
+import { parseSessionRecord, serializeSessionRecordForDisk } from "../src/session/persistence.js";
 import { toSessionIndexEntry } from "../src/session/persistence/index.js";
 import type { SessionRecord } from "../src/types.js";
+import { makeSessionRecord } from "./runtime-test-helpers.js";
 
 // B3 deliverable 5 — ONE per-session config dir serving primer + model pin +
 // catalogue fragment, GATED PER HARNESS off the descriptor.
@@ -858,6 +860,69 @@ test("RS-14: the recorded path SURVIVES the per-turn acpx-state clone", () => {
   setHarnessConfigDir(record, "/tmp/acpx-pi-survives");
   const cloned = cloneSessionAcpxState(record.acpx);
   assert.equal(cloned?.harness_config_dir, "/tmp/acpx-pi-survives");
+});
+
+// ── brick://cb214e48: `pi_session_dir`, the same field on the same three legs ──
+
+test("cb214e48: pi_session_dir SURVIVES the per-turn acpx-state clone", () => {
+  // ⚠️ THE LEG THAT HAS EATEN FOUR FIELDS. `cloneSessionAcpxState` is an allowlist
+  // the turn path re-bases `record.acpx` off, so a field it does not name is
+  // present at `sessions new` and NULL AFTER ONE PROMPT — with typecheck, lint and
+  // the whole unit suite green, because no in-memory test takes the turn leg.
+  // Asserted as a PROPERTY here; proven through a REAL TURN in the brick's
+  // verification evidence, because this row alone cannot see the turn path.
+  const record = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", "/home/node/.pi/agent/sessions/--workspace--");
+  const cloned = cloneSessionAcpxState(record.acpx);
+  assert.equal(cloned?.pi_session_dir, "/home/node/.pi/agent/sessions/--workspace--");
+  // And the field it sits beside must not have been traded for it.
+  assert.equal(cloned?.harness_config_dir, "/tmp/acpx-pi-dir");
+});
+
+test("cb214e48: a spawn that hands pi no session dir CLEARS a stale one", () => {
+  // Same rule as harness_config_dir above, and for the same reason: a stale path
+  // that still resolves is a silent WRONG answer. The resume-failure message names
+  // this directory, so a stale value would send the reader to the wrong store.
+  const record = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", "/home/node/.pi/agent/sessions/--old--");
+  assert.equal(record.acpx?.pi_session_dir, "/home/node/.pi/agent/sessions/--old--");
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", undefined);
+  assert.equal(record.acpx?.pi_session_dir, undefined);
+  assert.equal(pathsContainKey(record, "pi_session_dir"), 0);
+});
+
+test("cb214e48: a record that gets NEITHER dir is still left COMPLETELY untouched", () => {
+  // The RS-14 guarantee, re-asserted for the widened setter. Adding a second field
+  // to the guard is exactly how "touch nothing" quietly becomes "give every claude
+  // record an empty acpx object".
+  for (const acpx of [undefined, {}, { current_model_id: "x" }]) {
+    const record = { agentCommand: CLAUDE, ...(acpx ? { acpx } : {}) } as unknown as SessionRecord;
+    const before = JSON.stringify(record);
+    setHarnessConfigDir(record, undefined, undefined);
+    assert.equal(JSON.stringify(record), before, `record changed for acpx=${JSON.stringify(acpx)}`);
+  }
+  // PLANTED CONTROL, same scanner: it CAN see the key when it is there.
+  const planted = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(planted, undefined, "/home/node/.pi/agent/sessions/--x--");
+  assert.equal(pathsContainKey(planted, "pi_session_dir"), 1, "the scanner is blind");
+  assert.equal(pathsContainKey(planted, "harness_config_dir"), 0);
+});
+
+test("cb214e48: pi_session_dir round-trips a cold disk reload", () => {
+  // `parseAcpxState` is an allowlist TOO — a field serialize passes through but
+  // parse does not name is written to disk and silently dropped on the next cold
+  // reload. That reload is exactly when the resume-failure message is produced, so
+  // the field would be absent at the one moment it is read.
+  const record = makeSessionRecord({
+    acpxRecordId: "cb214e48-roundtrip",
+    acpSessionId: "01a0875c-c60c-7e06-84de-6873ea4d3176",
+    agentCommand: AGENT_REGISTRY.pi,
+    cwd: "/workspace/projects/acpx",
+  });
+  setHarnessConfigDir(record, "/tmp/acpx-pi-rt", "/home/node/.pi/agent/sessions/--workspace--");
+  const parsed = parseSessionRecord(serializeSessionRecordForDisk(record));
+  assert.equal(parsed?.acpx?.pi_session_dir, "/home/node/.pi/agent/sessions/--workspace--");
+  assert.equal(parsed?.acpx?.harness_config_dir, "/tmp/acpx-pi-rt");
 });
 
 /** Count paths whose final key is `key`, at ANY depth — the `paths(..)` scan a

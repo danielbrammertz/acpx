@@ -709,6 +709,11 @@ export function cloneSessionAcpxState(
     // acpx-authored value the turn path re-bases off this clone. Lost here, the
     // primer modal silently falls back to a re-render after the first turn.
     harness_config_dir: state.harness_config_dir,
+    // brick://cb214e48 — added HERE, deliberately beside harness_config_dir and in
+    // the same breath as writing the field, because this allowlist is exactly
+    // where a new `acpx.*` field goes to die: present at `sessions new`, null
+    // after ONE prompt, whole suite green. Proven through a real turn.
+    pi_session_dir: state.pi_session_dir,
     // Same allowlist that dropped depth_projection on every real turn. A learned
     // capability fact lost here would be re-learned only by failing again.
     model_set_unsupported_for: state.model_set_unsupported_for,
