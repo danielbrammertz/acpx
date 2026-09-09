@@ -1292,3 +1292,82 @@ test("buildAgentSpawnOptions leaves ACPX_AGENT_TYPE UNSET for an unclassifiable 
     }
   }
 });
+
+// --- account-stamp leak (brick://6530d3b4) ----------------------------------
+// The FW-07 delete list covered session identity and not account identity, so a
+// pi child of a claude parent inherited a complete Claude credential identity
+// for a session authenticated by an OpenRouter box key. The ACPX_EFFECTIVE_ADAPTER
+// half of it is what makes this an IDENTITY bug and not only a hygiene one: it
+// reads "claude" inside a pi session (brick://aa74cb34).
+
+const LEAKED_ACCOUNT_STAMP = {
+  ACPX_SUBSCRIPTION: "sub7",
+  ACPX_EFFECTIVE_PROFILE: "sub7",
+  ACPX_EFFECTIVE_ACCOUNT: "sub7",
+  ACPX_EFFECTIVE_ADAPTER: "claude",
+  ACPX_EFFECTIVE_AUTH_MODE: "subscription",
+  ACPX_EFFECTIVE_ANCHOR: "/home/node/.acpx/subscriptions/sub7",
+} as const;
+
+function withPoisonedAccountStamp(run: () => void): void {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(LEAKED_ACCOUNT_STAMP)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+  try {
+    run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {delete process.env[key];}
+      else {process.env[key] = value;}
+    }
+  }
+}
+
+test("buildAgentSpawnOptions does not leak the parent's account stamp into a child with no selection", () => {
+  withPoisonedAccountStamp(() => {
+    const options = buildAgentSpawnOptions(
+      "/tmp/acpx-agent",
+      undefined,
+      { acpxRecordId: "11111111-2222-3333-4444-555555555555" },
+      undefined,
+      "node /opt/pi-acp/dist/index.js",
+    );
+    for (const key of Object.keys(LEAKED_ACCOUNT_STAMP)) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(options.env, key),
+        false,
+        `${key} leaked from the spawning process into a session with no account selection`,
+      );
+    }
+    // The whole point: the harness answer must come from the classifier, not
+    // from whatever the parent happened to be.
+    assert.equal(options.env.ACPX_AGENT_TYPE, "pi");
+  });
+});
+
+test("buildAgentSpawnOptions still stamps the account for a session that HAS a subscription", async () => {
+  resetKnownDeadSubs();
+  await withSubscriptionsHome(
+    { registry: TWO_SUB_REGISTRY, existingDirs: ["sub1", "sub2"] },
+    async (ctx) => {
+      // Poisoned with sub7 throughout: a pass proves the values were re-derived
+      // for THIS session rather than survived from the environment.
+      withPoisonedAccountStamp(() => {
+        const options = buildAgentSpawnOptions(
+          "/tmp/acpx-agent",
+          undefined,
+          { acpxRecordId: "rec", subscriptionId: "sub1" },
+          ctx.lookupOptions,
+          "node /opt/claude-agent-acp/dist/index.js",
+        );
+        assert.equal(options.env.CLAUDE_CONFIG_DIR, ctx.configDir("sub1"));
+        assert.equal(options.env.ACPX_SUBSCRIPTION, "sub1");
+        assert.equal(options.env.ACPX_EFFECTIVE_PROFILE, "sub1");
+        assert.equal(options.env.ACPX_EFFECTIVE_ADAPTER, "claude");
+        assert.equal(options.env.ACPX_AGENT_TYPE, "claude");
+      });
+    },
+  );
+});

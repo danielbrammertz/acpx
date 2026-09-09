@@ -562,6 +562,39 @@ function buildAgentEnvironment(
   delete env.ACPX_BRICK_PATH;
   delete env.ACPX_OWNER_LOG;
   delete env.ACPX_AGENT_TYPE;
+  // brick://6530d3b4 — the ACCOUNT stamp is spawn context too, and was missing
+  // from the list above. Measured on devbox: a pi child of a claude parent
+  // inherited ACPX_SUBSCRIPTION=sub7, ACPX_EFFECTIVE_ACCOUNT=sub7,
+  // ACPX_EFFECTIVE_ADAPTER=claude, ACPX_EFFECTIVE_PROFILE=sub7 and
+  // ACPX_EFFECTIVE_ANCHOR=…/subscriptions/sub7 — a full Claude credential
+  // identity, for a session authenticated by an OpenRouter box key that never
+  // touched that account. Worse than useless: ACPX_EFFECTIVE_ADAPTER then reads
+  // `claude` INSIDE a pi session, so an agent using it to identify its own
+  // harness is told the wrong answer with no way to tell (brick://aa74cb34).
+  //
+  // The rule already exists elsewhere and simply never reached here:
+  // applyClaudeHomeProfileAuth and applyChatGptProfileAuth both drop
+  // ACPX_SUBSCRIPTION for the same reason, and the non-Claude branch below
+  // warns that a subscription is inert for a non-Claude agent — but that guard
+  // only fires for an explicitly STORED selection, so a leak through the env
+  // passes underneath it silently.
+  //
+  // Safe to clear unconditionally because every legitimate value is written
+  // AFTER this point, by whichever path applies a selection:
+  // applySubscriptionConfigDir → verifyAppliedSubscription →
+  // verifySubscriptionEffectiveAccount → stampEffectiveAccount (sync,
+  // subscription sessions), or applyProfileAuth → stampProfileEffectiveAccount
+  // (async, profile sessions — client.ts calls it before the adapter spawns).
+  // The one in-file READER, ensureProvisioningForResolvedSubscription, consumes
+  // ACPX_EFFECTIVE_PROFILE two lines after applySubscriptionConfigDir writes it,
+  // never the inherited value. A session with neither selection legitimately has
+  // no account identity, and absent is the truthful answer for it.
+  delete env.ACPX_SUBSCRIPTION;
+  delete env[ACPX_EFFECTIVE_PROFILE_ENV];
+  delete env[ACPX_EFFECTIVE_ACCOUNT_ENV];
+  delete env[ACPX_EFFECTIVE_ADAPTER_ENV];
+  delete env[ACPX_EFFECTIVE_AUTH_MODE_ENV];
+  delete env[ACPX_EFFECTIVE_ANCHOR_ENV];
   applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {
