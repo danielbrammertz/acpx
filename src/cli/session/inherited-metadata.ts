@@ -137,12 +137,32 @@ export function withInheritedModel(
 }
 
 /**
- * Spawn-time Claude thinking-depth (`effort`) inheritance — pure, no IO. Mirrors
+ * Spawn-time thinking-depth (`effort`) inheritance — pure, no IO. Mirrors
  * credential inheritance: a child with no explicit `--reasoning-effort` inherits
  * the parent's persisted `desired_config_options.effort` only when the caller
- * passes a same-agent parent value; explicit child selection wins. The caller
- * gates this on same-agent-as-parent (effort is claude-only and model-coupled).
- * The value is an opaque advertised effort id.
+ * passes a same-agent parent value; explicit child selection wins. The value is
+ * an opaque advertised effort id.
+ *
+ * ⚠️ **THE GATE IS SAME-AGENT, NOT IS-CLAUDE — and the difference is load-bearing**
+ * (brick://aa74cb34). This docstring used to say *"Claude thinking-depth"* and
+ * *"effort is claude-only and model-coupled"*. **Both were false, and the second
+ * one propagated**: it was the source of an Operating-System claim that effort
+ * inheritance is *"Claude→Claude only; pi/codex carry none"*, which agents then
+ * acted on — omitting `--reasoning-effort` on a pi child believing it inert.
+ *
+ * Measured on the deployed build (acpx `main` dd6b7699, devbox-staging): a bare
+ * spawn from a **pi** parent pinned `--reasoning-effort low` produced a child
+ * with `desired_config_options.effort = low`, `model_source: inherited`, and
+ * pi's own wire variable `PI_REASONING_LEVEL=low` — against an unconfigured
+ * default of `high`, which is what makes the reading unambiguous. Depth reaches
+ * a `mode` harness through `session/set_mode` before its first turn since
+ * brick://5000f0bb.
+ *
+ * So this function is generic, the caller's `sameAgentAsParent` is the whole
+ * gate, and the reason for that gate is that the value is agent-namespaced —
+ * a claude effort id means nothing to codex, whose depth rides inside the model
+ * id instead. **Do not re-narrow this comment to "claude" without re-measuring**;
+ * the wrong version of it survived in the OS for weeks after it stopped being true.
  */
 export function withInheritedReasoningEffort(
   childEffort: string | undefined,
