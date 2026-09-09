@@ -7,6 +7,7 @@ import { resolveClaudeCodeExecutable } from "../src/acp/agent-command.js";
 import { resolveAgentSessionCwd } from "../src/acp/client-process.js";
 import { buildAgentSpawnOptions, buildSpawnCommandOptions } from "../src/acp/client.js";
 import { buildTerminalSpawnOptions } from "../src/acp/terminal-manager.js";
+import { AGENT_REGISTRY } from "../src/agent-registry.js";
 import { buildQueueOwnerSpawnOptions } from "../src/cli/session/queue-owner-process.js";
 import {
   markSubscriptionDead,
@@ -587,6 +588,88 @@ test("buildAgentSpawnOptions promotes explicit ACPX auth env vars into agent aut
       process.env.OPENAI_API_KEY = previousNormalized;
     }
   }
+});
+
+// ============================================================================
+// brick://cb214e48 — the FW-07 scrub, extended to pi's DATA dir.
+//
+// pi exports its whole environment into every tool subprocess, and
+// `buildAgentEnvironment` starts from `{...process.env}` — so a pi session that
+// spawns `acpx pi …` handed its child the PARENT's re-pointed
+// PI_CODING_AGENT_DIR, which acpx then read as "the box". Same class as the
+// CLAUDE_CONFIG_DIR (brick://1820be37) and OPENROUTER-key (brick://c788eca0)
+// inheritances already on this list.
+// ============================================================================
+
+/** Run `body` with `process.env[name]` forced to `value`, restored afterwards. */
+function withProcessEnv(name: string, value: string | undefined, body: () => void): void {
+  const previous = process.env[name];
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+  try {
+    body();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = previous;
+    }
+  }
+}
+
+test("cb214e48: an inherited acpx-pi-* PI_CODING_AGENT_DIR does not reach the child spawn env", () => {
+  withProcessEnv("PI_CODING_AGENT_DIR", "/tmp/acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13", () => {
+    const options = buildAgentSpawnOptions("/tmp/acpx-agent", undefined, {
+      acpxRecordId: "child-id",
+    });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(options.env, "PI_CODING_AGENT_DIR"),
+      false,
+      "the parent's throwaway agent dir reached the child spawn",
+    );
+  });
+});
+
+test("cb214e48: a BOX-level PI_CODING_AGENT_DIR DOES reach it", () => {
+  // THE CONTROL that stops the scrub becoming unconditional. A box that
+  // legitimately relocates pi's agent dir must keep working — without this row,
+  // `delete env.PI_CODING_AGENT_DIR` on every spawn passes the row above.
+  withProcessEnv("PI_CODING_AGENT_DIR", "/opt/pi-box/agent", () => {
+    const options = buildAgentSpawnOptions("/tmp/acpx-agent", undefined, {
+      acpxRecordId: "child-id",
+    });
+    assert.equal(options.env.PI_CODING_AGENT_DIR, "/opt/pi-box/agent");
+  });
+});
+
+test("cb214e48: PI_CODING_AGENT_SESSION_DIR never survives the copy — for ANY harness", () => {
+  // Unconditional: `writePiConfigDir` is its only writer and its value is
+  // inherently cwd-specific, so an inherited one can only ever be another
+  // session's. pi re-sets its own afterwards; claude / claude-pty / codex carry it
+  // today for no reason at all.
+  withProcessEnv(
+    "PI_CODING_AGENT_SESSION_DIR",
+    "/tmp/acpx-pi-parent/sessions/--workspace-other--",
+    () => {
+      for (const agentCommand of [undefined, AGENT_REGISTRY.pi, AGENT_REGISTRY.claude]) {
+        const options = buildAgentSpawnOptions(
+          "/tmp/acpx-agent",
+          undefined,
+          { acpxRecordId: "child-id" },
+          undefined,
+          agentCommand,
+        );
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(options.env, "PI_CODING_AGENT_SESSION_DIR"),
+          false,
+          `${agentCommand ?? "<no command>"} inherited PI_CODING_AGENT_SESSION_DIR`,
+        );
+      }
+    },
+  );
 });
 
 test("buildTerminalSpawnOptions hides Windows console windows and maps env entries", () => {
@@ -1390,8 +1473,8 @@ function withPoisonedConfigDir(run: () => void): void {
   try {
     run();
   } finally {
-    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-    else process.env.CLAUDE_CONFIG_DIR = previous;
+    if (previous === undefined) {delete process.env.CLAUDE_CONFIG_DIR;}
+    else {process.env.CLAUDE_CONFIG_DIR = previous;}
   }
 }
 
