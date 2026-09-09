@@ -38,10 +38,10 @@ test("supportsMidTurnPromptInjection rejects unrelated ACP command text", () => 
 
 // injectionReturnsTerminalResponse is NARROWER than supportsMidTurnPromptInjection:
 // it gates whether the turn may AWAIT an injected prompt. Only backends whose
-// injected prompt returns a terminal JSON-RPC response qualify — Claude and
-// claude-pty. Codex supports injection but acts on the steer in-turn and returns
-// no terminal, so it must NOT be awaited (stays fire-and-forget). Unknown
-// backends default to false.
+// injected prompt returns a terminal JSON-RPC response qualify — Claude,
+// claude-pty, and pi (steer-ack, brick 7daa105e). Codex supports injection but
+// acts on the steer in-turn and returns no terminal, so it must NOT be awaited
+// (stays fire-and-forget). Unknown backends default to false.
 test("injectionReturnsTerminalResponse is TRUE for Claude ACP and the claude-pty bridge", () => {
   assert.equal(injectionReturnsTerminalResponse("node /opt/claude-agent-acp/dist/index.js"), true);
   assert.equal(injectionReturnsTerminalResponse("claude-agent-acp"), true);
@@ -52,6 +52,10 @@ test("injectionReturnsTerminalResponse is TRUE for Claude ACP and the claude-pty
     ),
     true,
   );
+  // pi (fork build 0ecae6f+, brick 7daa105e): injected prompt resolves immediately
+  // with a steer-ack terminal (`_meta.piAcp.steered`).
+  assert.equal(injectionReturnsTerminalResponse("node /opt/pi-acp/dist/index.js"), true);
+  assert.equal(injectionReturnsTerminalResponse("pi-acp"), true);
 });
 
 test("injectionReturnsTerminalResponse is FALSE for Codex (no terminal) and unknown backends", () => {
