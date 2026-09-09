@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { deriveBilling } from "../models/catalogue.js";
@@ -125,6 +133,90 @@ function configDirName(harness: HarnessId, sessionId: string): string {
  * harness starting to read an entry that was already there.
  */
 const HOLDERS_DIR = ".acpx-holders";
+
+/** The environment variable that names the BOX's pi agent dir explicitly. */
+const PI_BOX_AGENT_DIR_ENV = "ACPX_PI_BOX_AGENT_DIR";
+
+/**
+ * Is this path one of acpx's own PER-SESSION config dirs (brick://cb214e48)?
+ *
+ * ## Why this predicate has to exist at all
+ *
+ * `PI_CODING_AGENT_DIR` is the only name acpx had for "the box's pi agent dir",
+ * and it is not a reliable one: acpx RE-POINTS it at a per-session throwaway dir
+ * for every pi spawn, and pi exports its whole environment into every tool
+ * subprocess. So when the spawner is itself a pi session, the value acpx reads is
+ * **the parent's throwaway directory** — and it was then treated as the box.
+ * Measured on devbox 2026-09-09: eight pi transcripts, four of them grandchildren,
+ * written into an ancestor's `/tmp/acpx-pi-<id>/sessions/`, a directory removed at
+ * that ancestor's close.
+ *
+ * ## ⚠️ DELIBERATELY AN `OR`, AND DELIBERATELY NOT ROOT-ANCHORED
+ *
+ * The tempting stricter form is `basename startsWith CONFIG_DIR_PREFIX` **AND**
+ * `dirname === resolveHarnessConfigDirRoot(...)`. Reject it: the parent's dir was
+ * created under the PARENT's resolved root, and the child process may resolve a
+ * different one (`TMPDIR` differs, or `ACPX_HARNESS_CONFIG_DIR_ROOT` was set for
+ * one and not the other — `harness-config-dir-root.ts`). An `AND` that mismatches
+ * **fails open, straight back into this bug**.
+ *
+ * The asymmetry that settles it: **a wrongly-REFUSED box dir costs a fallback to
+ * `~/.pi/agent` — degraded, visible, and escape-hatched by
+ * `ACPX_PI_BOX_AGENT_DIR`. A wrongly-ACCEPTED one costs a transcript.**
+ *
+ * Both legs read this module's own constants, so a rename of the directory scheme
+ * cannot leave the detector behind — and there is exactly ONE spelling of the
+ * rule, shared with the spawn-env scrub in `auth-env.ts`, because two spellings
+ * is how the writer and the scrubber come to disagree.
+ */
+export function isAcpxPerSessionConfigDir(candidate: string | undefined): boolean {
+  const trimmed = candidate?.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return basename(trimmed).startsWith(CONFIG_DIR_PREFIX) || existsSync(join(trimmed, HOLDERS_DIR));
+}
+
+/**
+ * The BOX's pi agent dir — never a per-session one, however we were spawned
+ * (brick://cb214e48, which is also the RULING on brick://195f1637).
+ *
+ * ## ⚠️ THIS IS WHY THE "READ BEFORE THE RE-POINT" ORDERING QUESTION IS GONE
+ *
+ * 195f1637 asked whether reading `resolvePiSessionDir(input.env, …)` *before*
+ * `input.env.PI_CODING_AGENT_DIR = dir` was deliberate. It was, and the instinct
+ * was sound — but the premise underneath it was false. **The ordering was right;
+ * the SOURCE it read was wrong.** Once the box dir no longer comes from the
+ * variable that is about to be overwritten, "before or after the re-point" stops
+ * being a correctness question at all, which is strictly better than getting the
+ * ordering right and leaving a landmine for whoever moves a line.
+ *
+ * Precedence, stated rather than inferred:
+ *
+ *   1. `ACPX_PI_BOX_AGENT_DIR` — the explicit, unambiguous escape hatch. Present
+ *      for exactly one shape of box: one whose pi agent dir genuinely lives
+ *      somewhere else *and* whose name happens to trip the refusal below. It
+ *      costs one `env` read and removes the only case in which the refusal could
+ *      take something away from an operator.
+ *   2. `PI_CODING_AGENT_DIR`, **unless** it names an acpx per-session dir
+ *      ({@link isAcpxPerSessionConfigDir}) — a box that legitimately relocates
+ *      pi's agent dir must keep working.
+ *   3. `~/.pi/agent` — pi's own documented default, read from its `getAgentDir()`.
+ *
+ * ⚠️ No `rootDir` parameter, on purpose: the refusal is name-based precisely so it
+ * cannot depend on which root THIS process resolves (see the predicate).
+ */
+function resolveBoxPiAgentDir(env: NodeJS.ProcessEnv): string {
+  const explicit = env[PI_BOX_AGENT_DIR_ENV]?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const inherited = env.PI_CODING_AGENT_DIR?.trim();
+  if (inherited && !isAcpxPerSessionConfigDir(inherited)) {
+    return inherited;
+  }
+  return join(env.HOME?.trim() || homedir(), ".pi", "agent");
+}
 
 /** What a release decided, so "nothing happened" is never silent. */
 export interface HarnessConfigDirReleaseResult {
@@ -888,6 +980,17 @@ export function reportHarnessConfigDir(
 export interface HarnessConfigDirPlan {
   harness: HarnessId;
   dir: string;
+  /**
+   * The BOX-store session directory this spawn handed pi, i.e. the value of
+   * `PI_CODING_AGENT_SESSION_DIR` (brick://cb214e48). `undefined` when the spawn
+   * declined to set one — no cwd, or the directory could not be created.
+   *
+   * ⚠️ THE DIRECTORY, NOT THE FILE. acpx never learns the filename: pi mints
+   * `<ISO>_<pi-session-id>.jsonl` and only pi's own store ever sees it. A recorded
+   * directory is a fact acpx owns; a recorded file path would be a guess that goes
+   * stale on every fork.
+   */
+  sessionDir?: string;
   /** Env var names set on the adapter spawn — the RS-13 subject. */
   envNames: string[];
   /** Absolute paths written, for evidence. Never contains a credential. */
@@ -992,14 +1095,29 @@ export function applyHarnessConfigDir(
  * `--append-system-prompt` is unreachable from here however well it works
  * natively.
  *
- * ⚠️ **KNOWN UN-ISOLATABLE LEAK, RECORDED RATHER THAN FOUGHT.** `pi-acp` writes
- * its session map to a **hardcoded** `~/.pi/pi-acp/session-map.json`, ignoring
- * `PI_CODING_AGENT_DIR` entirely. It follows `HOME`, so a per-session config dir
- * does not contain it. Nothing here can fix that — it is the adapter's path, not
- * ours — and pretending otherwise would be worse than saying so.
+ * ⚠️ **CORRECTION (brick://cb214e48). THIS COMMENT USED TO SAY THE OPPOSITE, AND
+ * IT SENDS THE NEXT READER TO THE WRONG DIRECTORY.** It read: *"KNOWN
+ * UN-ISOLATABLE LEAK — `pi-acp` writes its session map to a hardcoded
+ * `~/.pi/pi-acp/session-map.json`, ignoring `PI_CODING_AGENT_DIR` entirely."*
+ * Measured on the deployed nativai fork (`pi-acp` `73f2e39`,
+ * `src/acp/paths.ts:14-22`): the map resolves `PI_ACP_DIR` →
+ * `$PI_CODING_AGENT_DIR/pi-acp` → `~/.pi/pi-acp`, and on acpx **the middle branch
+ * always wins** — so the map is FULLY isolated, inside the per-session dir.
+ *
+ * That isolation is not free, and it is half of why a cold respawn misses: the
+ * per-session dir is new, so its session map is EMPTY, and pi-acp falls through to
+ * scanning `PI_CODING_AGENT_SESSION_DIR` for the JSONL. Which is precisely why
+ * that variable must name the BOX store — see {@link resolveBoxPiAgentDir}.
  */
 function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessConfigDirPlan {
   const files: string[] = [];
+  // brick://cb214e48 — ONE derivation, resolved once, threaded into both consumers
+  // (the catalogue read and the session store) so the writer and the detector
+  // cannot drift. See {@link resolveBoxPiAgentDir} for why this replaced reading
+  // `env.PI_CODING_AGENT_DIR` at each site, and why the ordering warning that
+  // used to sit above the `resolvePiSessionDir` call below is gone rather than
+  // moved: the value no longer comes from the variable being overwritten.
+  const boxAgentDir = resolveBoxPiAgentDir(input.env);
   if (input.primer) {
     // I2 R9 measured this end-to-end: the marker was in turn 1's request body
     // AND survived a SIGKILL of both pi and pi-acp followed by a resume.
@@ -1049,23 +1167,33 @@ function writePiConfigDir(dir: string, input: HarnessConfigDirInput): HarnessCon
   // came back with `content: []` — no answer, no usable error.
   writePiModelProvisioning(
     dir,
+    boxAgentDir,
     input.env,
     input.provisionModelId ? stripProviderPrefix(input.provisionModelId) : undefined,
     files,
   );
   writePiStallPolicy(dir, files);
-  // ⚠️ KEEP pi's SESSION STORE WHERE IT WAS — read BEFORE the re-point below,
-  // which is the last moment the box's own agent dir is still reachable through
-  // the variable we are about to overwrite (brick ac86eb34; same ordering as the
-  // F-13 discard warning).
-  const sessionDir = resolvePiSessionDir(input.env, input.cwd);
+  // KEEP pi's SESSION STORE IN THE BOX STORE (brick ac86eb34, corrected by
+  // brick://cb214e48): the target is derived from `boxAgentDir` above, so it is
+  // immune to the re-point on the next line — and to whatever an ancestor pi
+  // session left in `PI_CODING_AGENT_DIR`.
+  const sessionDir = resolvePiSessionDir(boxAgentDir, input.cwd);
   input.env.PI_CODING_AGENT_DIR = dir;
   const envNames = ["PI_CODING_AGENT_DIR"];
   if (sessionDir) {
     input.env.PI_CODING_AGENT_SESSION_DIR = sessionDir;
     envNames.push("PI_CODING_AGENT_SESSION_DIR");
+  } else {
+    // ⚠️ ALWAYS DECIDE — NEVER LEAVE AN INHERITED VALUE STANDING (brick://cb214e48).
+    // `resolvePiSessionDir` returns `undefined` on two real legs (no cwd, and a
+    // `mkdirSync` failure). This used to be a bare `if`, so on either leg the
+    // value INHERITED from a parent pi session survived — pointing the child at
+    // *the parent's directory for the PARENT's cwd*, two sessions' stores
+    // colliding in one folder. The existing `with NO cwd …` test cannot see that
+    // leg: it builds `env` fresh, with nothing inherited.
+    delete input.env.PI_CODING_AGENT_SESSION_DIR;
   }
-  return { harness: "pi", dir, envNames, files };
+  return { harness: "pi", dir, sessionDir, envNames, files };
 }
 
 /**
@@ -1400,6 +1528,12 @@ function piAlreadyKnows(
 
 function writePiModelProvisioning(
   dir: string,
+  /** Resolved ONCE by {@link resolveBoxPiAgentDir}, never re-derived from `env`
+   *  here — brick://cb214e48: this site had the identical inherited-dir bug as the
+   *  session store, and would have read the PARENT's catalogue. */
+  boxAgentDir: string,
+  /** Still needed for the two things that genuinely ARE env questions: resolving
+   *  the `pi` binary on `PATH` and the knowledge cache. */
   env: NodeJS.ProcessEnv,
   /** `undefined` ⇒ the session named no model. There is nothing to provision, but
    *  the repair is still written; see the call site. */
@@ -1408,7 +1542,7 @@ function writePiModelProvisioning(
 ): void {
   // The box's catalogue is parsed fresh from disk on every call, so mutating the
   // entries here cannot reach anything else.
-  const boxModels = readBoxPiOpenRouterModels(env);
+  const boxModels = readBoxPiOpenRouterModels(boxAgentDir);
   repairAnthropicBaseUrls(boxModels);
 
   if (modelId === undefined) {
@@ -1802,17 +1936,14 @@ type PiCatalogueModel = {
 };
 
 /**
- * pi's cached OpenRouter catalogue from the BOX agent dir — read before the
- * re-point, like the session store and the F-13 discard warning.
+ * pi's cached OpenRouter catalogue from the BOX agent dir — the dir resolved by
+ * {@link resolveBoxPiAgentDir}, handed in rather than re-derived (brick://cb214e48).
  *
  * An empty result is a legitimate state (pi has never run on this box), not an
  * error: the bundled catalogue still resolves, so the session simply gets the
  * provisioned slug on top of it.
  */
-function readBoxPiOpenRouterModels(env: NodeJS.ProcessEnv): PiCatalogueModel[] {
-  const boxAgentDir = env.PI_CODING_AGENT_DIR?.trim()
-    ? env.PI_CODING_AGENT_DIR.trim()
-    : join(env.HOME?.trim() || homedir(), ".pi", "agent");
+function readBoxPiOpenRouterModels(boxAgentDir: string): PiCatalogueModel[] {
   try {
     const parsed = JSON.parse(readFileSync(join(boxAgentDir, "models-store.json"), "utf8")) as {
       openrouter?: { models?: unknown };
@@ -1862,15 +1993,14 @@ function readBoxPiOpenRouterModels(env: NodeJS.ProcessEnv): PiCatalogueModel[] {
  * **empty stdout AND empty stderr**, no error of any kind. A missing `mkdir` here
  * does not degrade, it wedges the session, and it looks exactly like a slow model.
  */
-function resolvePiSessionDir(env: NodeJS.ProcessEnv, cwd: string | undefined): string | undefined {
+function resolvePiSessionDir(boxAgentDir: string, cwd: string | undefined): string | undefined {
   if (!cwd?.trim()) {
     // No cwd, no mangled name. Better to leave pi's default alone than to invent
     // a path: the session still runs, and the JSONL is merely where it is today.
+    // ⚠️ The CALLER must still DELETE any inherited value — brick://cb214e48; see
+    // `writePiConfigDir`'s `else` branch.
     return undefined;
   }
-  const boxAgentDir = env.PI_CODING_AGENT_DIR?.trim()
-    ? env.PI_CODING_AGENT_DIR.trim()
-    : join(env.HOME?.trim() || homedir(), ".pi", "agent");
   const target = join(boxAgentDir, "sessions", jsonlSessionDirectoryName(cwd.trim()));
   try {
     mkdirSync(target, { recursive: true });

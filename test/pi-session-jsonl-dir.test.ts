@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -187,6 +187,219 @@ test("ac86eb34: the mangling matches pi's, including the drive-colon case", () =
       );
     }
     assert.equal(expectedName("/a/b:c/d"), "--a-b-c-d--", "the colon clause was dropped");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// brick://cb214e48 — a pi child of a pi PARENT inherits the parent's re-pointed
+// `PI_CODING_AGENT_DIR`, which acpx then treated as "the box". Measured on devbox
+// 2026-09-09: eight pi transcripts (four of them GRANDchildren) written into an
+// ancestor's `/tmp/acpx-pi-<id>/sessions/` — a directory removed at that
+// ancestor's close, taking the children's only transcript with it.
+//
+// The rows below are the unit-level pins. The end-to-end one (real spawn, real
+// turns, owner killed) is the acceptance criterion in the brick's TEST-PLAN.
+// ============================================================================
+
+/** A directory shaped exactly like the one acpx re-points a pi parent at. */
+function parentConfigDir(root: string): string {
+  return join(root, "acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13");
+}
+
+test("cb214e48: an inherited acpx-pi-* PI_CODING_AGENT_DIR is REFUSED as the box dir", () => {
+  const { root, cwd } = fixture();
+  try {
+    const parent = parentConfigDir(root);
+    mkdirSync(parent, { recursive: true });
+    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: parent, HOME: root };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-child-of-pi",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.equal(
+      env.PI_CODING_AGENT_SESSION_DIR,
+      join(root, ".pi", "agent", "sessions", expectedName(cwd)),
+      "the child's transcript was aimed at the PARENT's throwaway dir",
+    );
+    // The failure this row exists for, stated as the thing that must NOT be true:
+    // any path under the parent's dir is a transcript with somebody else's
+    // lifecycle.
+    assert.equal(
+      env.PI_CODING_AGENT_SESSION_DIR?.startsWith(parent),
+      false,
+      "the session store is inside another session's throwaway directory",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: the holders marker ALONE is enough to refuse a dir — the prefix is not the only leg", () => {
+  // The `OR` is deliberate: the two legs cover each other. A dir named without the
+  // prefix but carrying acpx's holder bookkeeping is still acpx's own per-session
+  // dir, and a transcript in it is still on somebody else's lifecycle clock.
+  const { root, cwd } = fixture();
+  try {
+    const disguised = join(root, "not-prefixed-at-all");
+    mkdirSync(join(disguised, ".acpx-holders"), { recursive: true });
+    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: disguised, HOME: root };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-holders-leg",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.equal(
+      env.PI_CODING_AGENT_SESSION_DIR,
+      join(root, ".pi", "agent", "sessions", expectedName(cwd)),
+      "a dir carrying .acpx-holders was accepted as the box dir",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: a REAL box dir is still honoured — the refusal is not a blanket ignore", () => {
+  // THE CONTROL. Without it, "always derive from HOME" would pass every row above
+  // while silently breaking every box that legitimately relocates pi's agent dir.
+  const { root, box, cwd } = fixture();
+  try {
+    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: box, HOME: root };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-real-box",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.equal(env.PI_CODING_AGENT_SESSION_DIR, join(box, "sessions", expectedName(cwd)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: ACPX_PI_BOX_AGENT_DIR overrides even an acpx-pi-* inherited value", () => {
+  // The escape hatch for the one shape of box the refusal could otherwise cost
+  // something: pi's agent dir genuinely elsewhere, under a name that trips the
+  // predicate.
+  const { root, box, cwd } = fixture();
+  try {
+    const parent = parentConfigDir(root);
+    mkdirSync(parent, { recursive: true });
+    const env: NodeJS.ProcessEnv = {
+      PI_CODING_AGENT_DIR: parent,
+      ACPX_PI_BOX_AGENT_DIR: box,
+      HOME: root,
+    };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-escape-hatch",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.equal(env.PI_CODING_AGENT_SESSION_DIR, join(box, "sessions", expectedName(cwd)));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: with NO cwd an inherited PI_CODING_AGENT_SESSION_DIR is DELETED, not left standing", () => {
+  // ⚠️ THE EXISTING `with NO cwd …` ROW ABOVE CANNOT SEE THIS LEG. It builds `env`
+  // fresh, with nothing inherited, so `undefined` is true there by construction.
+  // Seed the parent's value and the old `if (sessionDir)` leaves it standing —
+  // aiming the child at the parent's directory for the PARENT's cwd, two sessions'
+  // stores colliding in one folder.
+  const { root, box } = fixture();
+  try {
+    const env: NodeJS.ProcessEnv = {
+      PI_CODING_AGENT_DIR: box,
+      PI_CODING_AGENT_SESSION_DIR: join(root, "acpx-pi-parent", "sessions", "--other-cwd--"),
+      HOME: root,
+    };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-nocwd-inherited",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.equal(
+      env.PI_CODING_AGENT_SESSION_DIR,
+      undefined,
+      "an inherited session dir survived into the child spawn",
+    );
+    assert.deepEqual(plan?.envNames, ["PI_CODING_AGENT_DIR"]);
+    assert.equal(plan?.sessionDir, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: the box CATALOGUE is read from the box dir, not the parent's", () => {
+  // `readBoxPiOpenRouterModels` had the IDENTICAL inherited-dir bug, and it is
+  // invisible in the session-dir rows: plant a distinguishable model in each dir
+  // and assert which one reaches the written `models-store.json`.
+  const { root, box, cwd } = fixture();
+  try {
+    const parent = parentConfigDir(root);
+    mkdirSync(parent, { recursive: true });
+    // `maxTokens` is what makes the entry OBSERVABLE in the written `models.json`
+    // (it lands as a `modelOverrides` key), so this row needs no provisioned slug
+    // and never reaches the `pi --version` spawn.
+    const store = (id: string) =>
+      JSON.stringify({ openrouter: { models: [{ id, name: id, maxTokens: 4096 }] } });
+    writeFileSync(join(box, "models-store.json"), store("box-only/model"));
+    writeFileSync(join(parent, "models-store.json"), store("parent-only/model"));
+
+    const env: NodeJS.ProcessEnv = {
+      PI_CODING_AGENT_DIR: parent,
+      ACPX_PI_BOX_AGENT_DIR: box,
+      HOME: root,
+    };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-catalogue",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.ok(plan, "no plan — the config dir was never created");
+    const written = readFileSync(join(plan.dir, "models.json"), "utf8");
+    assert.match(written, /box-only\/model/, "the box catalogue was not carried forward");
+    assert.doesNotMatch(written, /parent-only\/model/, "the PARENT's catalogue was read");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cb214e48: the plan reports the session dir it handed pi", () => {
+  // The carrier for `acpx.pi_session_dir`. Without it the record cannot record the
+  // directory, and the fallback error message has nothing to name.
+  const { root, box, cwd } = fixture();
+  try {
+    const env: NodeJS.ProcessEnv = { PI_CODING_AGENT_DIR: box, HOME: root };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses-plan-sessiondir",
+      primer: "P",
+      cwd,
+      rootDir: root,
+    });
+    assert.equal(plan?.sessionDir, join(box, "sessions", expectedName(cwd)));
+    assert.equal(plan?.sessionDir, env.PI_CODING_AGENT_SESSION_DIR);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
