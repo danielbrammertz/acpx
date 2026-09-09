@@ -222,3 +222,75 @@ test("runtime reuse policy only keeps compatible records", () => {
     false,
   );
 });
+
+// --- served_via_shim stickiness (brick://a89c3cd4) --------------------------
+// The consumer is the cold-resume transcript gate, which runs AFTER teardown —
+// and teardown produces a snapshot with servedViaShim unset. If the write leg
+// cleared the stored value on a falsy snapshot, the record would read "not
+// shim-served" at exactly the moment the truth is needed, reproducing the defect
+// the field exists to fix. Every assertion below is about that one property.
+
+test("applyLifecycleSnapshotToRecord records served_via_shim when a shim served the session", () => {
+  const record = makeSessionRecord({
+    acpxRecordId: "shim-record",
+    acpSessionId: "sid-shim",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace",
+  });
+
+  applyLifecycleSnapshotToRecord(record, { running: true, servedViaShim: true });
+
+  assert.equal(record.acpx?.session_options?.served_via_shim, true);
+});
+
+test("applyLifecycleSnapshotToRecord does NOT clear served_via_shim on a teardown snapshot", () => {
+  const record = makeSessionRecord({
+    acpxRecordId: "shim-record",
+    acpSessionId: "sid-shim",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace",
+  });
+
+  // 1. a shim serves the session
+  applyLifecycleSnapshotToRecord(record, { running: true, servedViaShim: true });
+  assert.equal(record.acpx?.session_options?.served_via_shim, true);
+
+  // 2. teardown: the client stops the shim, so the snapshot no longer carries it.
+  //    This is the exact snapshot shape `resetAgentState` produces, and the exact
+  //    moment a naive `else` branch would write `false`.
+  applyLifecycleSnapshotToRecord(record, {
+    running: false,
+    lastExit: {
+      exitCode: 0,
+      signal: null,
+      exitedAt: "2026-01-01T00:10:00.000Z",
+      reason: "connection_close",
+      unexpectedDuringPrompt: false,
+    },
+  });
+
+  assert.equal(
+    record.acpx?.session_options?.served_via_shim,
+    true,
+    "the turns a stopped shim already served stay served — the cold-resume gate reads this AFTER teardown",
+  );
+});
+
+test("applyLifecycleSnapshotToRecord leaves served_via_shim ABSENT for a session no shim served", () => {
+  const record = makeSessionRecord({
+    acpxRecordId: "plain-record",
+    acpSessionId: "sid-plain",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace",
+  });
+
+  applyLifecycleSnapshotToRecord(record, { running: true });
+
+  // ABSENT, not `false`: absent means "acpx cannot say" and is what every record
+  // written before this field looks like. Writing `false` here would assert a
+  // fact acpx never observed, and would be indistinguishable from those.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(record.acpx?.session_options ?? {}, "served_via_shim"),
+    false,
+  );
+});

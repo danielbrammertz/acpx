@@ -127,6 +127,7 @@ type SessionOptionBreadcrumbs = {
   subscriptionSwitch: PersistedSessionOptions["subscription_switch"];
   accountSwitch: PersistedSessionOptions["account_switch"];
   provisioningWarning: PersistedSessionOptions["provisioning_warning"];
+  servedViaShim: PersistedSessionOptions["served_via_shim"];
   modelGuard: PersistedSessionOptions["model_guard"];
   fableDegrade: PersistedSessionOptions["fable_degrade"];
   autoFailover: PersistedSessionOptions["auto_failover"];
@@ -145,6 +146,7 @@ function sessionOptionBreadcrumbs(record: SessionRecord): SessionOptionBreadcrum
     subscriptionSwitch: stored.subscription_switch,
     accountSwitch: stored.account_switch,
     provisioningWarning: stored.provisioning_warning,
+    servedViaShim: stored.served_via_shim,
     modelGuard: stored.model_guard,
     fableDegrade: stored.fable_degrade,
     autoFailover: stored.auto_failover,
@@ -188,6 +190,13 @@ function assignBreadcrumbs(
   }
   if (breadcrumbs.provisioningWarning !== undefined) {
     target.provisioning_warning = breadcrumbs.provisioningWarning;
+  }
+  // brick://a89c3cd4 — a pure record-only breadcrumb: carry it across respawns so
+  // the "this session was shim-served" fact survives the process that observed it.
+  // Without this leg the field would be rewritten away on the next spawn and be
+  // absent at cold resume, which is the one moment it is read.
+  if (breadcrumbs.servedViaShim !== undefined) {
+    target.served_via_shim = breadcrumbs.servedViaShim;
   }
   // model_guard is a pure record-only breadcrumb (like subscription_switch) — carry
   // it forward so the "implicit Fable blocked" signal stays visible across respawns.

@@ -923,6 +923,35 @@ export type SessionAcpxState = {
       anchor?: string;
       message: string;
     };
+    /**
+     * `true` once ANY of this session's turns were served through the OpenRouter
+     * shim rather than by Claude credentials (brick://a89c3cd4).
+     *
+     * WHY IT IS PERSISTED AT ALL: acpx knows this at spawn — it is the moment it
+     * starts the shim — and every consumer that needs it runs LATER, on a cold
+     * resume, when the in-memory handle is long gone. The resume gate
+     * (`ensurePendingSwitchTranscript`) previously keyed on
+     * `isClaudeFamilyAgent(agentCommand)`, i.e. the ADAPTER, and so demanded a
+     * Claude SDK transcript from a claude adapter whose turns OpenRouter served —
+     * a transcript that cannot exist. Measured: 0 of 5 such sessions on devbox had
+     * one, against 92–96% for age-matched ordinary claude sessions.
+     *
+     * ⚠️ **STICKY — once `true`, never written back to `false`.** It records what
+     * SERVED THE TURNS, not what is running now. A shim stopping (teardown, an
+     * idle reap) does not un-serve the turns it already served, and the consumer
+     * reads this precisely after teardown. The write path enforces that
+     * structurally rather than by rule: `applyLifecycleSnapshotToRecord` writes
+     * only on a truthy snapshot value, exactly as it does for
+     * `provisioning_warning`, so a falsy one leaves the stored value alone.
+     *
+     * ⚠️ **ABSENT ON RECORDS WRITTEN BEFORE THIS FIELD**, and absent must be read
+     * as *"acpx cannot say"*, never as `false`. Those sessions keep the previous
+     * behaviour — a deliberate decision, not a default: the population is small
+     * and inert (5 bare-slug OpenRouter-served claude sessions on devbox, none
+     * carrying a pending switch, so none reachable by the gate), and inventing a
+     * `false` for them would assert a fact acpx never observed.
+     */
+    served_via_shim?: boolean;
   };
 };
 

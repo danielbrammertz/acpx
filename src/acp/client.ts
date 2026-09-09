@@ -448,6 +448,13 @@ export type AgentLifecycleSnapshot = {
   running: boolean;
   lastExit?: AgentExitInfo;
   provisioningWarning?: ProvisioningWarningBreadcrumb;
+  /**
+   * `true` once ANY turn of this session was served through the OpenRouter shim
+   * (brick://a89c3cd4). Sticky in the client and sticky in the record: the write
+   * leg only fires on a truthy value, so a post-teardown snapshot cannot reset
+   * it. Lands as `session_options.served_via_shim`.
+   */
+  servedViaShim?: boolean;
 };
 
 type ConsoleErrorMethod = typeof console.error;
@@ -721,7 +728,25 @@ export class AcpClient {
   private readonly cancellingSessionIds = new Set<string>();
   private readonly permissionAbortControllers = new Map<string, AbortController>();
   private closing = false;
+  /**
+   * ⚠️ **ASSIGN ONLY THROUGH {@link AcpClient.setShimHandle}** (brick://a89c3cd4).
+   * Every assignment must also record that this session was shim-served, and
+   * there is more than one shim-start site — the picker route and, far less
+   * obviously, `applyProfileAuth` for an `openrouter`-authMode profile.
+   * Recording at the call sites instead of at the assignment is how a
+   * picker-only implementation gets written that looks complete:
+   * `openRouterRouteModelId` below is exactly that, and its own comment says so.
+   */
   private shimHandle?: ShimHandle;
+  /**
+   * STICKY: `true` from the first shim this client starts, and never reset. It
+   * records what SERVED THE TURNS, not what is running now — so clearing
+   * `shimHandle` at teardown must not clear this, because the consumer (the
+   * cold-resume transcript gate) reads it precisely after teardown.
+   * Surfaced via {@link AgentLifecycleSnapshot.servedViaShim} →
+   * `session_options.served_via_shim`.
+   */
+  private servedViaShim = false;
   /**
    * The OpenRouter slug the PICKER route's shim is serving, or undefined. Paired
    * with `shimHandle`'s lifetime: set when that shim starts, cleared when it
@@ -852,6 +877,11 @@ export class AcpClient {
         ? { ...this.latestProvisioningWarning }
         : undefined,
       harnessConfigDir: this.harnessConfigDir,
+      // `undefined` rather than `false` when unset: the write leg is truthy-gated
+      // (like provisioningWarning), so a literal `false` here would be
+      // indistinguishable from "not shim-served" while still being a value acpx
+      // never observed. Absent means "cannot say"; it must not become `false`.
+      servedViaShim: this.servedViaShim ? true : undefined,
     };
   }
 
@@ -1274,12 +1304,14 @@ export class AcpClient {
       throw openRouterBoxCredentialMissing(routeModel);
     }
     const ctx = pickerShimContext(this.options.sessionContext);
-    this.shimHandle = await startOpenRouterShimForSession(
-      env,
-      ctx.sessionId,
-      credential.key,
-      routeModel,
-      ctx.effort,
+    this.setShimHandle(
+      await startOpenRouterShimForSession(
+        env,
+        ctx.sessionId,
+        credential.key,
+        routeModel,
+        ctx.effort,
+      ),
     );
     this.openRouterRouteModelId = routeModel;
     this.log(describePickerRoute(routeModel, credential, profileBypass));
@@ -1329,7 +1361,7 @@ export class AcpClient {
     // uses `randomUUID()` for genuine per-spawn uniqueness.
     const sessionId = shimConfigDirSessionId(ctx, profileId);
     const reasoningEffort = ctx?.reasoningEffort ?? null;
-    this.shimHandle =
+    this.setShimHandle(
       (await applyProfileAuth(
         env,
         profileId,
@@ -1340,7 +1372,35 @@ export class AcpClient {
         (warning) => {
           this.latestProvisioningWarning = warning;
         },
-      )) ?? undefined;
+      )) ?? undefined,
+    );
+  }
+
+  /**
+   * THE ONLY assignment path for {@link shimHandle} (brick://a89c3cd4).
+   *
+   * A shim can be started from two places — the picker route and
+   * `applyProfileAuth` for an `openrouter`-authMode profile — and a fix that
+   * recorded the fact at the sites rather than here would look complete while
+   * missing one. That is not hypothetical: `outOfBandModelId`'s own comment
+   * records the identical asymmetry (*"SET ONLY FOR THE PICKER ROUTE,
+   * DELIBERATELY. The legacy profile route also serves its model out of band"*),
+   * filed 2026-09-06 and still open. Routing every assignment through here makes
+   * a third shim-start site inherit the fact instead of forgetting it.
+   *
+   * ⚠️ The recorded fact is STICKY and this is deliberate: a handle of
+   * `undefined` (teardown, idle reap) clears the live handle and leaves
+   * `servedViaShim` alone. The consumer reads it AFTER teardown, so clearing it
+   * there would report `false` at exactly the moment the truth is needed.
+   *
+   * ⚠️ `ACPX_EFFECTIVE_AUTH_MODE` is not a substitute — it is absent on the
+   * picker route (measured).
+   */
+  private setShimHandle(handle: ShimHandle | undefined): void {
+    this.shimHandle = handle;
+    if (handle !== undefined) {
+      this.servedViaShim = true;
+    }
   }
 
   private logAgentLaunch(plan: AgentLaunchPlan): void {
@@ -2457,7 +2517,9 @@ export class AcpClient {
     this.connection = undefined;
     this.agent = undefined;
     this.shimHandle?.stop();
-    this.shimHandle = undefined;
+    // Through the setter like every other assignment — and note it deliberately
+    // does NOT clear `servedViaShim`: the turns this shim served stay served.
+    this.setShimHandle(undefined);
     this.openRouterRouteModelId = undefined;
   }
 
