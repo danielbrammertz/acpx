@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { isClaudeFamilyAgent } from "../src/acp/agent-command.js";
+import { isClaudeFamilyAgent, sessionUsesClaudeCredentials } from "../src/acp/agent-command.js";
 import { HARNESS_IDS } from "../src/acp/harness-capabilities.js";
 import { AGENT_REGISTRY } from "../src/agent-registry.js";
 import { switchSessionAccount } from "../src/runtime/engine/account-seam.js";
@@ -340,4 +340,60 @@ test("the sweep SKIPS a record with a live queue owner, lists it, and never wait
     assert.match(formatAccountSeamRepairResult(result), /SKIPPED \(live owner/);
     assert.match(formatAccountSeamRepairResult(result), /rec-busy/);
   });
+});
+
+// --- the credential half of the seam (brick://a89c3cd4) ---------------------
+// `isClaudeFamilyAgent` asks which BINARY runs; `sessionUsesClaudeCredentials`
+// asks who SERVED THE TURNS. They agree everywhere except one real, shipped
+// configuration — a claude adapter whose model OpenRouter serves through the
+// shim — and that is exactly the configuration the resume gate wedged on.
+
+const CLAUDE_CMD = "node /opt/claude-agent-acp/dist/index.js";
+
+test("sessionUsesClaudeCredentials: a claude adapter served by the shim is NOT Claude-credentialed", () => {
+  const record = {
+    agentCommand: CLAUDE_CMD,
+    acpx: { session_options: { served_via_shim: true } },
+  };
+
+  // The adapter says Claude-family...
+  assert.equal(isClaudeFamilyAgent(record.agentCommand), true);
+  // ...and the credential says otherwise. This divergence IS the fix.
+  assert.equal(sessionUsesClaudeCredentials(record), false);
+});
+
+test("sessionUsesClaudeCredentials: an ordinary claude session IS Claude-credentialed", () => {
+  assert.equal(
+    sessionUsesClaudeCredentials({
+      agentCommand: CLAUDE_CMD,
+      acpx: { session_options: {} },
+    }),
+    true,
+  );
+});
+
+test("sessionUsesClaudeCredentials: a record predating served_via_shim keeps the PREVIOUS behaviour", () => {
+  // ABSENT means "acpx cannot say", never `false`. Every record written before
+  // the field existed looks like this, and they must keep behaving exactly as
+  // they did — a stated decision, asserted here rather than left to fall out of
+  // a default. A falsy check instead of `!== true` would silently flip this
+  // whole population to exempt.
+  assert.equal(sessionUsesClaudeCredentials({ agentCommand: CLAUDE_CMD }), true);
+  assert.equal(sessionUsesClaudeCredentials({ agentCommand: CLAUDE_CMD, acpx: {} }), true);
+  assert.equal(
+    sessionUsesClaudeCredentials({ agentCommand: CLAUDE_CMD, acpx: { session_options: {} } }),
+    true,
+  );
+});
+
+test("sessionUsesClaudeCredentials: non-Claude adapters stay exempt for their OWN reason", () => {
+  // The adapter check runs FIRST, so pi/codex never depend on shim bookkeeping —
+  // they are exempt whether or not served_via_shim was ever recorded.
+  for (const cmd of ["node /opt/pi-acp/dist/index.js", "node /opt/codex-acp/dist/index.js"]) {
+    assert.equal(sessionUsesClaudeCredentials({ agentCommand: cmd }), false);
+    assert.equal(
+      sessionUsesClaudeCredentials({ agentCommand: cmd, acpx: { session_options: {} } }),
+      false,
+    );
+  }
 });

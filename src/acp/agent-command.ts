@@ -234,6 +234,53 @@ export function isClaudeFamilyAgent(agentCommand: string | undefined): boolean {
 }
 
 /**
+ * Whether this session's turns are served by CLAUDE CREDENTIALS — and therefore
+ * whether a Claude SDK transcript can exist for it at all (brick://a89c3cd4).
+ *
+ * ⚠️ **THE ADAPTER IS NOT THE ANSWER, AND THAT IS THE WHOLE POINT.**
+ * {@link isClaudeFamilyAgent} above asks which BINARY runs; this asks who SERVED
+ * THE TURNS. They diverge on one real, shipped configuration: a claude adapter
+ * whose model OpenRouter serves through the shim. Such a session is
+ * Claude-family by command and writes no Claude SDK transcript, ever — measured
+ * on devbox, 0 of 5 had one, against 92-96% for age-matched ordinary claude
+ * sessions.
+ *
+ * The consumer is `ensurePendingSwitchTranscript` (`reconnect.ts`), which keyed
+ * on the adapter and so demanded a transcript that cannot come into existence,
+ * wedging the session at SESSION_RESUME_REQUIRED.
+ *
+ * ⚠️ **`served_via_shim` ABSENT MEANS "acpx cannot say" — NOT `false`.** Records
+ * written before that field existed carry nothing, and they keep the previous
+ * behaviour by design: a stated decision, not an emergent one, and asserted in
+ * `claude-family-seam.test.ts` rather than left to fall out of a default.
+ *
+ * The `!== true` spelling states that intent — only a recorded `true` exempts —
+ * but it is NOT a safeguard: for `boolean | undefined` it is behaviourally
+ * IDENTICAL to `!x` on all three values, which a mutation probe confirmed by
+ * failing to fail. What WOULD break the population is inverting the sense (an
+ * `=== false` test, or defaulting absent to shim-served); that is what the test
+ * pins, and no spelling of this line prevents it.
+ *
+ * ⚠️ **Do NOT re-derive this from `resolveOpenRouterRoute`.** Measured: it
+ * answers *"which mechanism selects the credential for a NEW spawn"*, where
+ * standing aside is safe — not *"were this session's past turns Claude-served"*,
+ * where it is not. On a claude command it returns `kind:"profile"` for an
+ * `openrouter/`-prefixed model, and the bare-slug form needs a catalogue read
+ * that is explicitly allowed to fail; both misclassify toward the wedge.
+ */
+export function sessionUsesClaudeCredentials(record: {
+  agentCommand: string | undefined;
+  acpx?: { session_options?: { served_via_shim?: boolean } };
+}): boolean {
+  // Adapter check FIRST and unchanged: pi/codex stay exempt for their own reason
+  // and must never start depending on shim bookkeeping.
+  if (!isClaudeFamilyAgent(record.agentCommand)) {
+    return false;
+  }
+  return record.acpx?.session_options?.served_via_shim !== true;
+}
+
+/**
  * Compose the primer `_meta` fragment for a session request (CONCEPTION §4.4).
  * The fragment OWNS `systemPrompt` / `codex.developerInstructions`, so the
  * caller must merge it AFTER `optionsMeta` to win.

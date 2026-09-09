@@ -1,4 +1,4 @@
-import { isClaudeFamilyAgent } from "../../acp/agent-command.js";
+import { sessionUsesClaudeCredentials } from "../../acp/agent-command.js";
 import type { AcpClient } from "../../acp/client.js";
 import {
   extractAcpError,
@@ -894,7 +894,19 @@ async function ensurePendingSwitchTranscript(
   // alone stops the refusal and leaves the meaningless fields being written. The
   // conception is explicit that both ends are needed, and this is the end that
   // makes the one-shot sweep a cleanup rather than a rescue.
-  if (!isClaudeFamilyAgent(record.agentCommand)) {
+  // brick://a89c3cd4 — THE CREDENTIAL, NOT THE ADAPTER. This used to read
+  // `isClaudeFamilyAgent(record.agentCommand)`, which asks which BINARY runs. A
+  // claude adapter whose model OpenRouter serves through the shim is
+  // Claude-family by command and writes no Claude SDK transcript, so everything
+  // below demanded one that could not exist and wedged the session at
+  // SESSION_RESUME_REQUIRED. That is the class Daniel hit (bug 3, 2026-09-08:
+  // "pending account switch sub5 -> sub7 cannot resume: missing transcript" on a
+  // claude session running qwen/qwen3.8-flash).
+  //
+  // The exemption for pi/codex is UNCHANGED — it is the first branch inside the
+  // predicate, so those harnesses stay exempt for their own reason and never
+  // depend on shim bookkeeping.
+  if (!sessionUsesClaudeCredentials(record)) {
     return;
   }
   // Real turns only (brick://509b4ee1): a breadcrumb-only session has no
