@@ -46,6 +46,7 @@ import type { AcpClientOptions } from "../types.js";
 import { isClaudeFamilyAgent, isClaudePtyAgentCommand } from "./agent-command.js";
 import { splitCommandLine } from "./client-process.js";
 import { isCodexAcpCommand } from "./codex-compat.js";
+import { harnessIdForAgentCommand } from "./harness-capabilities.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import { spawnOpenRouterShim } from "./openrouter-shim.js";
 
@@ -499,6 +500,46 @@ export type AgentSessionContext = {
   reasoningEffort?: string | null;
 };
 
+/**
+ * `ACPX_AGENT_TYPE` — the harness the session's agent process is, named at the
+ * acpx layer for the agent itself (brick://aa74cb34).
+ *
+ * WHY this exists: acpx injected nine session facts and never the one an agent
+ * needs to reason about its own spawns. Measured on the deployed build, the
+ * environment of a live pi session named its box, its session, its parent and
+ * its brick, but nothing named its harness — so the only cross-harness
+ * self-identification an agent had was inference.
+ *
+ * `ACPX_EFFECTIVE_ADAPTER` is NOT that signal and must not be mistaken for it.
+ * It is stamped by `stampEffectiveAccount` on the Claude-credential path and
+ * names the AUTH adapter, not the harness. Measured against live pi adapters'
+ * /proc environs it fails in BOTH directions: **absent** in a pi session
+ * spawned from the UI, and **present, reading `claude`**, in a pi session
+ * spawned by a claude parent — it is not cleared below, so it survives the
+ * `{...process.env}` copy. A variable that looks authoritative, is right for
+ * one harness, and is either missing or confidently wrong for the rest. (That
+ * leak is a separate defect and is deliberately NOT fixed here.)
+ *
+ * The value is the {@link HarnessId} for `agentCommand`, resolved through the
+ * single adapter classifier. This is deliberately NOT a second classifier and
+ * must not become one — `harnessIdForAgentCommand` delegates to
+ * `acpAdapterKind`, and re-deriving the answer here is exactly the duplication
+ * that module's own contract forbids.
+ *
+ * ⚠️ UNSET IS THE HONEST ANSWER for an adapter the descriptor does not
+ * classify — never a default, never a guess. `harnessIdForAgentCommand` returns
+ * `undefined` meaning *"acpx cannot say"*, and an agent that reads a confidently
+ * WRONG harness is worse off than one that reads nothing: absence is legible as
+ * "I must find out another way", while a wrong value is acted upon. That is the
+ * same failure this variable exists to end, so it must not be reintroduced here.
+ */
+function applyAgentTypeEnvironment(env: NodeJS.ProcessEnv, agentCommand: string | undefined): void {
+  const harnessId = harnessIdForAgentCommand(agentCommand);
+  if (harnessId !== undefined) {
+    env.ACPX_AGENT_TYPE = harnessId;
+  }
+}
+
 // eslint-disable-next-line complexity -- fork integration function; intentionally over budget, refactor would risk verified merge semantics
 function buildAgentEnvironment(
   authCredentials: Record<string, string> | undefined,
@@ -520,6 +561,76 @@ function buildAgentEnvironment(
   delete env.ACPX_BRICK;
   delete env.ACPX_BRICK_PATH;
   delete env.ACPX_OWNER_LOG;
+  delete env.ACPX_AGENT_TYPE;
+  // brick://6530d3b4 — the ACCOUNT stamp is spawn context too, and was missing
+  // from the list above. Measured on devbox: a pi child of a claude parent
+  // inherited ACPX_SUBSCRIPTION=sub7, ACPX_EFFECTIVE_ACCOUNT=sub7,
+  // ACPX_EFFECTIVE_ADAPTER=claude, ACPX_EFFECTIVE_PROFILE=sub7 and
+  // ACPX_EFFECTIVE_ANCHOR=…/subscriptions/sub7 — a full Claude credential
+  // identity, for a session authenticated by an OpenRouter box key that never
+  // touched that account. Worse than useless: ACPX_EFFECTIVE_ADAPTER then reads
+  // `claude` INSIDE a pi session, so an agent using it to identify its own
+  // harness is told the wrong answer with no way to tell (brick://aa74cb34).
+  //
+  // The rule already exists elsewhere and simply never reached here:
+  // applyClaudeHomeProfileAuth and applyChatGptProfileAuth both drop
+  // ACPX_SUBSCRIPTION for the same reason, and the non-Claude branch below
+  // warns that a subscription is inert for a non-Claude agent — but that guard
+  // only fires for an explicitly STORED selection, so a leak through the env
+  // passes underneath it silently.
+  //
+  // Safe to clear unconditionally because every legitimate value is written
+  // AFTER this point, by whichever path applies a selection:
+  // applySubscriptionConfigDir → verifyAppliedSubscription →
+  // verifySubscriptionEffectiveAccount → stampEffectiveAccount (sync,
+  // subscription sessions), or applyProfileAuth → stampProfileEffectiveAccount
+  // (async, profile sessions — client.ts calls it before the adapter spawns).
+  // The one in-file READER, ensureProvisioningForResolvedSubscription, consumes
+  // ACPX_EFFECTIVE_PROFILE two lines after applySubscriptionConfigDir writes it,
+  // never the inherited value. A session with neither selection legitimately has
+  // no account identity, and absent is the truthful answer for it.
+  delete env.ACPX_SUBSCRIPTION;
+  delete env[ACPX_EFFECTIVE_PROFILE_ENV];
+  delete env[ACPX_EFFECTIVE_ACCOUNT_ENV];
+  delete env[ACPX_EFFECTIVE_ADAPTER_ENV];
+  delete env[ACPX_EFFECTIVE_AUTH_MODE_ENV];
+  delete env[ACPX_EFFECTIVE_ANCHOR_ENV];
+  // brick://1820be37 — and CLAUDE_CONFIG_DIR with them, which is the OPERATIVE
+  // one. The six above are descriptive: they mislead a reader about which
+  // account a session used. This one POINTS AT THE CREDENTIALS — measured on
+  // devbox, a pi child of a claude parent inherited
+  // `CLAUDE_CONFIG_DIR=/home/node/.acpx/subscriptions/sub7`, a directory holding
+  // that subscription's `.credentials.json`, for a session authenticated by an
+  // OpenRouter box key that never touched the account.
+  //
+  // ⚠️ NOT a privilege escalation, and it should not be described as one: every
+  // agent on a box runs as the same uid and the path is conventional, so the
+  // variable grants no access the process did not already have. It is a SCOPING
+  // defect — and it is one acpx already legislated against elsewhere and never
+  // generalised here: `applyChatGptProfileAuth` deletes exactly this variable,
+  // its comment reading *"the bridge strips leaked SDK env defensively, but acpx
+  // must not emit it"*, and `applyClaudeHomeProfileAuth` does the same.
+  //
+  // Safe to clear for the same reason as the six above — every legitimate value
+  // is written after this point, `applySubscriptionConfigDir` (sync) or
+  // `applyProfileAuth` (async, before the adapter spawns). Measured before
+  // changing it: 1456 of 1458 claude sessions on devbox carry a profile or
+  // subscription, so default-account-binding really does bind before spawn as
+  // the branch below claims; the 2 unbound are closed OpenRouter-model sessions
+  // that never used a Claude account at all.
+  //
+  // It also makes claude-pty match its own documentation. The branch below says
+  // a claude-pty session gets "no CLAUDE_CONFIG_DIR" because the bridge owns
+  // auth via its HOME selector — but it never cleared the INHERITED one, so a
+  // claude-pty child of a subscription-bound parent silently received one.
+  //
+  // The `CLAUDE_CODE_*` family (CLAUDECODE, CLAUDE_CODE_MESSAGING_SOCKET/TOKEN,
+  // CLAUDE_CODE_EXECPATH …) leaks the same way and is DELIBERATELY LEFT ALONE:
+  // acpx does not emit those — it inherits them from a parent Claude Code SDK
+  // process — and some are plausibly load-bearing for a claude child. Stripping
+  // them is a separate, larger question than this one.
+  delete env.CLAUDE_CONFIG_DIR;
+  applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {
     const trimmed = sessionContext.acpxRecordId.trim();
