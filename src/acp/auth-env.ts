@@ -46,6 +46,7 @@ import type { AcpClientOptions } from "../types.js";
 import { isClaudeFamilyAgent, isClaudePtyAgentCommand } from "./agent-command.js";
 import { splitCommandLine } from "./client-process.js";
 import { isCodexAcpCommand } from "./codex-compat.js";
+import { harnessIdForAgentCommand } from "./harness-capabilities.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import { spawnOpenRouterShim } from "./openrouter-shim.js";
 
@@ -499,6 +500,40 @@ export type AgentSessionContext = {
   reasoningEffort?: string | null;
 };
 
+/**
+ * `ACPX_AGENT_TYPE` — the harness the session's agent process is, named at the
+ * acpx layer for the agent itself (brick://aa74cb34).
+ *
+ * WHY this exists: acpx injected nine session facts and never the one an agent
+ * needs to reason about its own spawns. Measured on the deployed build, the
+ * environment of a live pi session named its box, its session, its parent and
+ * its brick, but nothing named its harness — so the only cross-harness
+ * self-identification an agent had was inference. `ACPX_EFFECTIVE_ADAPTER` is
+ * NOT that signal and must not be mistaken for it: it is stamped by
+ * `stampEffectiveAccount` on the Claude-credential path and is absent from an
+ * OpenRouter-auth pi session (verified against a live adapter's /proc environ) —
+ * a discriminator that only exists for one harness cannot identify the others.
+ *
+ * The value is the {@link HarnessId} for `agentCommand`, resolved through the
+ * single adapter classifier. This is deliberately NOT a second classifier and
+ * must not become one — `harnessIdForAgentCommand` delegates to
+ * `acpAdapterKind`, and re-deriving the answer here is exactly the duplication
+ * that module's own contract forbids.
+ *
+ * ⚠️ UNSET IS THE HONEST ANSWER for an adapter the descriptor does not
+ * classify — never a default, never a guess. `harnessIdForAgentCommand` returns
+ * `undefined` meaning *"acpx cannot say"*, and an agent that reads a confidently
+ * WRONG harness is worse off than one that reads nothing: absence is legible as
+ * "I must find out another way", while a wrong value is acted upon. That is the
+ * same failure this variable exists to end, so it must not be reintroduced here.
+ */
+function applyAgentTypeEnvironment(env: NodeJS.ProcessEnv, agentCommand: string | undefined): void {
+  const harnessId = harnessIdForAgentCommand(agentCommand);
+  if (harnessId !== undefined) {
+    env.ACPX_AGENT_TYPE = harnessId;
+  }
+}
+
 // eslint-disable-next-line complexity -- fork integration function; intentionally over budget, refactor would risk verified merge semantics
 function buildAgentEnvironment(
   authCredentials: Record<string, string> | undefined,
@@ -520,6 +555,8 @@ function buildAgentEnvironment(
   delete env.ACPX_BRICK;
   delete env.ACPX_BRICK_PATH;
   delete env.ACPX_OWNER_LOG;
+  delete env.ACPX_AGENT_TYPE;
+  applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {
     const trimmed = sessionContext.acpxRecordId.trim();

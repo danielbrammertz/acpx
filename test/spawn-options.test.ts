@@ -1229,3 +1229,66 @@ test("buildQueueOwnerSpawnOptions routes stdout+stderr to the owner-log fd when 
   assert.equal(buildQueueOwnerSpawnOptions('{"sessionId":"queue-session"}', null).stdio, "ignore");
   assert.equal(buildQueueOwnerSpawnOptions('{"sessionId":"queue-session"}').stdio, "ignore");
 });
+
+// --- ACPX_AGENT_TYPE (brick://aa74cb34) -------------------------------------
+// The environment named the box, the session, the parent and the brick, and
+// never the harness — so an agent's only cross-harness self-identification was
+// inference. A pi agent inferred wrong, copied a claude-shaped spawn block, and
+// its child diverged on agent-type, model and effort at once.
+
+test("buildAgentSpawnOptions injects ACPX_AGENT_TYPE for every classified harness", () => {
+  for (const [agentCommand, expected] of [
+    ["node /opt/claude-agent-acp/dist/index.js", "claude"],
+    ["node /opt/pi-acp/dist/index.js", "pi"],
+    ["node /opt/codex-acp/dist/index.js", "codex"],
+  ] as const) {
+    const options = buildAgentSpawnOptions(
+      "/tmp/acpx-agent",
+      undefined,
+      { acpxRecordId: "11111111-2222-3333-4444-555555555555" },
+      undefined,
+      agentCommand,
+    );
+    // Present for claude too, deliberately: a discriminator that appears only in
+    // the non-default case teaches agents to infer from ABSENCE — the exact flaw
+    // in ACPX_EFFECTIVE_ADAPTER, which reads "claude" and is absent under pi.
+    assert.equal(options.env.ACPX_AGENT_TYPE, expected);
+  }
+});
+
+test("buildAgentSpawnOptions leaves ACPX_AGENT_TYPE UNSET for an unclassifiable agent command", () => {
+  const previous = process.env.ACPX_AGENT_TYPE;
+  // Poison the ambient env: the point is that a stale inherited value must not
+  // survive into a session acpx cannot classify (FW-07), because a confidently
+  // WRONG harness id is worse than none — absence reads as "find out another
+  // way", a wrong value gets acted on.
+  process.env.ACPX_AGENT_TYPE = "claude";
+  try {
+    // `undefined` = no agent command reached the env builder at all; the second
+    // is a well-formed command for an adapter no detector knows.
+    // NOT covered: an EMPTY agentCommand — `buildAgentEnvironment` throws
+    // "Invalid --agent command: empty command" from `isClaudePtyAgentCommand`
+    // further down, pre-existing behavior unrelated to this variable
+    // (`harnessIdForAgentCommand` short-circuits an empty command by contract).
+    for (const agentCommand of [undefined, "node /opt/some-unknown-acp/dist/index.js"]) {
+      const options = buildAgentSpawnOptions(
+        "/tmp/acpx-agent",
+        undefined,
+        { acpxRecordId: "11111111-2222-3333-4444-555555555555" },
+        undefined,
+        agentCommand,
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(options.env, "ACPX_AGENT_TYPE"),
+        false,
+        `expected ACPX_AGENT_TYPE unset for agentCommand ${JSON.stringify(agentCommand)}`,
+      );
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACPX_AGENT_TYPE;
+    } else {
+      process.env.ACPX_AGENT_TYPE = previous;
+    }
+  }
+});
