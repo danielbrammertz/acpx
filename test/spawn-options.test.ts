@@ -1473,8 +1473,11 @@ function withPoisonedConfigDir(run: () => void): void {
   try {
     run();
   } finally {
-    if (previous === undefined) {delete process.env.CLAUDE_CONFIG_DIR;}
-    else {process.env.CLAUDE_CONFIG_DIR = previous;}
+    if (previous === undefined) {
+      delete process.env.CLAUDE_CONFIG_DIR;
+    } else {
+      process.env.CLAUDE_CONFIG_DIR = previous;
+    }
   }
 }
 

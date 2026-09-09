@@ -151,7 +151,7 @@ test("5026423b ⚠️ THE ALLOWLIST LEG: cost and cost_units survive cloneSessio
 
   // And it is a COPY, not a shared reference — a later mutation of the clone must
   // not reach back into the record the turn path is still holding.
-  cloned!.cost!.amount = 999;
+  cloned.cost.amount = 999;
   assert.notEqual(acpx.cost?.amount, 999, "the clone aliased the original instead of copying it");
 });
 
@@ -206,7 +206,7 @@ test("5026423b THE WIRE: a REAL pi usage_update envelope lands a cost through re
     1,
     "the real envelope produced no unit — the extraction is wrong or unwired",
   );
-  const unit = out.cost_units![0];
+  const unit = out.cost_units[0];
   assert.deepEqual(
     {
       input: unit.input,

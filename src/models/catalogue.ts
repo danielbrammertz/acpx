@@ -72,13 +72,35 @@ function perMillion(price: string | undefined): number | null {
   return value * 1_000_000;
 }
 
+/**
+ * The cache rates, read from the SAME upstream row as the prompt/completion rates
+ * so they can never disagree with them about which model they describe
+ * (brick 6253611b). They ride along on every branch of {@link deriveBilling}.
+ */
+function deriveCacheRates(model: OpenRouterRawModel): {
+  cacheReadPerM: number | null;
+  cacheWritePerM: number | null;
+} {
+  return {
+    cacheReadPerM: perMillion(model.pricing?.input_cache_read),
+    cacheWritePerM: perMillion(model.pricing?.input_cache_write),
+  };
+}
+
+/**
+ * A MEASURED zero — the upstream row quotes zero for both directions.
+ *
+ * ⚠️ Distinct from "no price is known", which is `variable`/absent (see
+ * `ModelBilling`). An absent completion rate beside a zero prompt rate still counts
+ * as measured-zero, which is what the `?? 0` states.
+ */
+function isMeasuredZeroPrice(inPerM: number | null, outPerM: number | null): boolean {
+  return inPerM === 0 && (outPerM ?? 0) === 0;
+}
+
 export function deriveBilling(model: OpenRouterRawModel): ModelBilling {
   const prompt = model.pricing?.prompt;
-  // The cache rates ride along on every branch (brick 6253611b). They are read
-  // from the SAME upstream row as the prompt/completion rates, so they can never
-  // disagree with them about which model they describe.
-  const cacheReadPerM = perMillion(model.pricing?.input_cache_read);
-  const cacheWritePerM = perMillion(model.pricing?.input_cache_write);
+  const { cacheReadPerM, cacheWritePerM } = deriveCacheRates(model);
   if (prompt === "-1") {
     return {
       kind: "variable",
@@ -91,9 +113,7 @@ export function deriveBilling(model: OpenRouterRawModel): ModelBilling {
   }
   const inPerM = perMillion(prompt);
   const outPerM = perMillion(model.pricing?.completion);
-  if (inPerM === 0 && (outPerM ?? 0) === 0) {
-    // A MEASURED zero: the upstream row quotes zero. Distinct from "no price is
-    // known", which is `variable`/absent — see `ModelBilling`.
+  if (isMeasuredZeroPrice(inPerM, outPerM)) {
     return {
       kind: "free",
       inPerM: 0,

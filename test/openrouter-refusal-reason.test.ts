@@ -24,7 +24,7 @@ const SPECIMEN_PATH =
 
 /** The specimen lives on an NFS mount that a test host may not have. Skipping loudly
  *  is right: a silently-skipped row is indistinguishable from a passing one. */
-function specimen(): unknown | undefined {
+function specimen(): unknown {
   try {
     return JSON.parse(readFileSync(SPECIMEN_PATH, "utf8"));
   } catch {

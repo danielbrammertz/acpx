@@ -42,6 +42,24 @@ function turnErrorFromMeta(meta: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Wait for late `session/update` notifications to go quiet, best effort.
+ *
+ * Both legs of {@link runPromptTurn} drain identically — the success leg keeps its
+ * stop reason if the drain times out, the timeout leg falls back to the prompt
+ * error — so a single call site is what keeps the two from drifting apart. The
+ * `.catch` is deliberately empty in both: a drain that times out is not itself a
+ * failure of the turn.
+ */
+async function drainLateSessionUpdates(client: PromptTurnClient): Promise<void> {
+  await client
+    .waitForSessionUpdatesIdle?.({
+      idleMs: SESSION_REPLY_IDLE_MS,
+      timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
+    })
+    .catch(() => {});
+}
+
 export async function runPromptTurn(params: {
   client: PromptTurnClient;
   sessionId: string;
@@ -62,15 +80,7 @@ export async function runPromptTurn(params: {
     });
     await params.onPromptStarted?.();
     const response = await withTimeout(promptPromise, params.timeoutMs);
-    await params.client
-      .waitForSessionUpdatesIdle?.({
-        idleMs: SESSION_REPLY_IDLE_MS,
-        timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
-      })
-      .catch(() => {
-        // Best effort. The prompt already completed successfully, so keep the
-        // original stop reason if late update draining itself times out.
-      });
+    await drainLateSessionUpdates(params.client);
     const turnError = turnErrorFromMeta(response._meta);
     return {
       stopReason: response.stopReason,
@@ -82,14 +92,7 @@ export async function runPromptTurn(params: {
       throw error;
     }
 
-    await params.client
-      .waitForSessionUpdatesIdle?.({
-        idleMs: SESSION_REPLY_IDLE_MS,
-        timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS,
-      })
-      .catch(() => {
-        // Best effort. If the update drain itself times out, fall back to the prompt error.
-      });
+    await drainLateSessionUpdates(params.client);
 
     if (hasAgentReplyAfterPrompt(params.conversation, params.promptMessageId)) {
       return {
