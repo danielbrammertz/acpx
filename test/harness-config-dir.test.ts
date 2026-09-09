@@ -21,6 +21,7 @@ import {
   applyHarnessConfigDir,
   pruneOrphanHarnessConfigDirs,
   removeHarnessConfigDir,
+  rescueStrandedPiTranscriptForResume,
 } from "../src/acp/harness-config-dir.js";
 import { resetPiKnowledgeMemo } from "../src/acp/pi-model-knowledge.js";
 import { AGENT_REGISTRY } from "../src/agent-registry.js";
@@ -30,8 +31,10 @@ import {
   modelSetMethodKnownUnsupported,
   setModelSetMethodUnsupported,
 } from "../src/session/mode-preference.js";
+import { parseSessionRecord, serializeSessionRecordForDisk } from "../src/session/persistence.js";
 import { toSessionIndexEntry } from "../src/session/persistence/index.js";
 import type { SessionRecord } from "../src/types.js";
+import { makeSessionRecord } from "./runtime-test-helpers.js";
 
 // B3 deliverable 5 — ONE per-session config dir serving primer + model pin +
 // catalogue fragment, GATED PER HARNESS off the descriptor.
@@ -1008,6 +1011,89 @@ test("RS-14: the recorded path SURVIVES the per-turn acpx-state clone", () => {
   assert.equal(cloned?.harness_config_dir, "/tmp/acpx-pi-survives");
 });
 
+// ── brick://cb214e48: `pi_session_dir`, the same field on the same three legs ──
+
+test("cb214e48: pi_session_dir SURVIVES the per-turn acpx-state clone", () => {
+  // ⚠️ THE LEG THAT HAS EATEN FOUR FIELDS. `cloneSessionAcpxState` is an allowlist
+  // the turn path re-bases `record.acpx` off, so a field it does not name is
+  // present at `sessions new` and NULL AFTER ONE PROMPT — with typecheck, lint and
+  // the whole unit suite green, because no in-memory test takes the turn leg.
+  // Asserted as a PROPERTY here; proven through a REAL TURN in the brick's
+  // verification evidence, because this row alone cannot see the turn path.
+  const record = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", "/home/node/.pi/agent/sessions/--workspace--");
+  const cloned = cloneSessionAcpxState(record.acpx);
+  assert.equal(cloned?.pi_session_dir, "/home/node/.pi/agent/sessions/--workspace--");
+  // And the field it sits beside must not have been traded for it.
+  assert.equal(cloned?.harness_config_dir, "/tmp/acpx-pi-dir");
+});
+
+test("cb214e48: a spawn that hands pi no session dir CLEARS a stale one", () => {
+  // Same rule as harness_config_dir above, and for the same reason: a stale path
+  // that still resolves is a silent WRONG answer. The resume-failure message names
+  // this directory, so a stale value would send the reader to the wrong store.
+  const record = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", "/home/node/.pi/agent/sessions/--old--");
+  assert.equal(record.acpx?.pi_session_dir, "/home/node/.pi/agent/sessions/--old--");
+  setHarnessConfigDir(record, "/tmp/acpx-pi-dir", undefined);
+  assert.equal(record.acpx?.pi_session_dir, undefined);
+  assert.equal(pathsContainKey(record, "pi_session_dir"), 0);
+});
+
+test("cb214e48: a record that gets NEITHER dir is still left COMPLETELY untouched", () => {
+  // The RS-14 guarantee, re-asserted for the widened setter. Adding a second field
+  // to the guard is exactly how "touch nothing" quietly becomes "give every claude
+  // record an empty acpx object".
+  for (const acpx of [undefined, {}, { current_model_id: "x" }]) {
+    const record = { agentCommand: CLAUDE, ...(acpx ? { acpx } : {}) } as unknown as SessionRecord;
+    const before = JSON.stringify(record);
+    setHarnessConfigDir(record, undefined, undefined);
+    assert.equal(JSON.stringify(record), before, `record changed for acpx=${JSON.stringify(acpx)}`);
+  }
+  // PLANTED CONTROL, same scanner: it CAN see the key when it is there.
+  const planted = { agentCommand: AGENT_REGISTRY.pi } as unknown as SessionRecord;
+  setHarnessConfigDir(planted, undefined, "/home/node/.pi/agent/sessions/--x--");
+  assert.equal(pathsContainKey(planted, "pi_session_dir"), 1, "the scanner is blind");
+  assert.equal(pathsContainKey(planted, "harness_config_dir"), 0);
+});
+
+test("cb214e48: pi_session_dir round-trips a cold disk reload", () => {
+  // `parseAcpxState` is an allowlist TOO — a field serialize passes through but
+  // parse does not name is written to disk and silently dropped on the next cold
+  // reload. That reload is exactly when the resume-failure message is produced, so
+  // the field would be absent at the one moment it is read.
+  const record = makeSessionRecord({
+    acpxRecordId: "cb214e48-roundtrip",
+    acpSessionId: "01a0875c-c60c-7e06-84de-6873ea4d3176",
+    agentCommand: AGENT_REGISTRY.pi,
+    cwd: "/workspace/projects/acpx",
+  });
+  setHarnessConfigDir(record, "/tmp/acpx-pi-rt", "/home/node/.pi/agent/sessions/--workspace--");
+  const parsed = parseSessionRecord(serializeSessionRecordForDisk(record));
+  assert.equal(parsed?.acpx?.pi_session_dir, "/home/node/.pi/agent/sessions/--workspace--");
+  assert.equal(parsed?.acpx?.harness_config_dir, "/tmp/acpx-pi-rt");
+});
+
+/** Collect `process.stderr` writes made by `body`, synchronously. The shared
+ *  `withCapturedStderrWrites` is async, which does not compose with the sync
+ *  `withTempRoot` fixture above. */
+function captureStderrSync(body: () => void): string {
+  const original = process.stderr.write.bind(process.stderr);
+  const writes: string[] = [];
+  (process.stderr as unknown as { write: typeof process.stderr.write }).write = ((
+    chunk: string,
+  ) => {
+    writes.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    body();
+  } finally {
+    (process.stderr as unknown as { write: typeof process.stderr.write }).write = original;
+  }
+  return writes.join("");
+}
+
 /** Count paths whose final key is `key`, at ANY depth — the `paths(..)` scan a
  *  tester runs with jq, expressed in-process. Never a field probe: a wrong path
  *  returns a silent undefined indistinguishable from the pass condition. */
@@ -1136,4 +1222,309 @@ test("F-12: clearing on a record that never learned touches NOTHING", () => {
     setModelSetMethodUnsupported(record, false);
     assert.equal(JSON.stringify(record), before, `${id}: the record shape moved`);
   }
+});
+
+// ============================================================================
+// brick://cb214e48 §5.3 + §5.2 — a stranded pi transcript must survive the
+// destruction of the directory it was wrongly written into, and must be findable
+// again afterwards.
+//
+// Before R1, a pi child of a pi parent wrote its ONLY JSONL into the PARENT's
+// per-session dir. The parent's terminal close (and the age-based orphan sweep)
+// then removed that directory recursively — an unguarded `rm -rf` over other
+// sessions' transcripts, which the holder refcount cannot see because a child
+// registers as a holder of its OWN dir and its reference to the parent's travels
+// on `PI_CODING_AGENT_SESSION_DIR`, deliberately not an ownership marker.
+//
+// ⚠️ EVERY ROW BELOW SCOPES THE BOX STORE WITH `ACPX_PI_BOX_AGENT_DIR`, AND THAT
+// IS A SAFETY REQUIREMENT, NOT TIDINESS. The rescue's destination is the real
+// `~/.pi/agent` when nothing overrides it, and this suite already writes 242
+// fixture slugs into that real store (measured on devbox 2026-09-09) — a rescue
+// that COPIES A FILE there is worse than the empty directories already leaking.
+// ============================================================================
+
+/** Run `body` with the box pi store pointed at `boxDir`, restored afterwards. */
+function withBoxPiAgentDir<T>(boxDir: string, body: () => T): T {
+  const previous = process.env.ACPX_PI_BOX_AGENT_DIR;
+  process.env.ACPX_PI_BOX_AGENT_DIR = boxDir;
+  try {
+    return body();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACPX_PI_BOX_AGENT_DIR;
+    } else {
+      process.env.ACPX_PI_BOX_AGENT_DIR = previous;
+    }
+  }
+}
+
+/** A legacy-shaped config dir holding one child's JSONL at a cwd slug — the exact
+ *  shape measured under `/tmp/acpx-pi-01a08744-…` on devbox. */
+function plantStrandedTranscript(
+  root: string,
+  sessionId: string,
+  slug: string,
+  fileName: string,
+  content: string,
+): { dir: string; file: string } {
+  const dir = join(root, `acpx-pi-${sessionId}`);
+  const sessionDir = join(dir, "sessions", slug);
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(join(sessionDir, fileName), content);
+  return { dir, file: join(sessionDir, fileName) };
+}
+
+const STRANDED_SLUG = "--workspace-projects-acpx-ui-w8-depth-gate--";
+const STRANDED_FILE = "2026-09-09T18-09-59-308Z_01a08754-4154-7aa4-9f0c-d7687033f15d.jsonl";
+
+test("cb214e48: a stranded child transcript is RESCUED before the dir is removed", () => {
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    const { dir } = plantStrandedTranscript(
+      root,
+      "parent-1",
+      STRANDED_SLUG,
+      STRANDED_FILE,
+      '{"child":"only copy"}\n',
+    );
+    withBoxPiAgentDir(box, () => {
+      removeHarnessConfigDir(dir);
+    });
+    const rescued = join(box, "sessions", STRANDED_SLUG, STRANDED_FILE);
+    assert.equal(existsSync(rescued), true, "the child's ONLY transcript was destroyed");
+    assert.equal(readFileSync(rescued, "utf8"), '{"child":"only copy"}\n');
+    // And the directory still goes — this is a rescue, not a refusal to clean up.
+    assert.equal(existsSync(dir), false, "the config dir leaked after a successful rescue");
+  });
+});
+
+test("cb214e48: a LIVE destination file is NEVER overwritten — the destination is authoritative", () => {
+  // ⚠️ THE ROW THAT STOPS A ROLLBACK IN TIME. Both manually-recovered Wave 8
+  // children have a LIVE, LARGER file at the destination and a STALE, FROZEN one
+  // in /tmp — two divergent files carrying ONE pi session id. Copying the stale one
+  // over the live one would roll the session back, which is exactly the failure
+  // `subscription-transcript.ts` was rewritten to prevent.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    const liveDir = join(box, "sessions", STRANDED_SLUG);
+    mkdirSync(liveDir, { recursive: true });
+    writeFileSync(join(liveDir, STRANDED_FILE), '{"live":1}\n{"live":2}\n{"live":3}\n');
+    const { dir } = plantStrandedTranscript(
+      root,
+      "parent-2",
+      STRANDED_SLUG,
+      STRANDED_FILE,
+      '{"stale":1}\n',
+    );
+    // ⚠️ AND THE SKIP MUST SAY SO — brick://cb214e48 F1 (TE finding). "Do nothing"
+    // silently is indistinguishable from a rescue that never ran, and THIS is the
+    // branch where a divergent pair lives: a LIVE file at the destination and a
+    // STALE one in the directory about to be deleted. A reader who is not told
+    // which copy was kept cannot tell a correct skip from a lost transcript.
+    // Captured SYNCHRONOUSLY on purpose: `withTempRoot`'s callback is sync, and an
+    // async one would let its `finally` delete the fixture root before the body
+    // settled — a passing row measuring a directory that no longer exists.
+    const writes = captureStderrSync(() => {
+      withBoxPiAgentDir(box, () => {
+        removeHarnessConfigDir(dir);
+      });
+    });
+    assert.equal(
+      readFileSync(join(liveDir, STRANDED_FILE), "utf8"),
+      '{"live":1}\n{"live":2}\n{"live":3}\n',
+      "the live destination file was rolled back to a stale /tmp copy",
+    );
+    assert.equal(existsSync(dir), false);
+    assert.match(writes, /kept 1 existing pi transcript/, "the skip was SILENT");
+    // Both paths named: the one kept, and the one discarded with the directory.
+    assert.ok(
+      writes.includes(join(liveDir, STRANDED_FILE)),
+      "the line does not name the destination that was kept",
+    );
+    assert.ok(
+      writes.includes(join(dir, "sessions", STRANDED_SLUG, STRANDED_FILE)),
+      "the line does not name the stale copy being discarded",
+    );
+    assert.match(writes, /destination is authoritative/, "the line does not say WHY it was kept");
+  });
+});
+
+test("cb214e48: an UNRESCUABLE transcript REFUSES the removal rather than losing it", () => {
+  // A leaked directory loses nothing; a silent removal loses a session's only
+  // history. The destination is made uncreatable by putting a FILE where the
+  // sessions directory would have to be.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    writeFileSync(join(box, "sessions"), "not a directory");
+    const { dir, file } = plantStrandedTranscript(
+      root,
+      "parent-3",
+      STRANDED_SLUG,
+      STRANDED_FILE,
+      '{"child":"only copy"}\n',
+    );
+    withBoxPiAgentDir(box, () => {
+      removeHarnessConfigDir(dir);
+    });
+    assert.equal(existsSync(dir), true, "removed a dir holding a transcript that exists nowhere");
+    assert.equal(existsSync(file), true, "the unrescuable transcript is gone");
+  });
+});
+
+test("cb214e48: a dir with NO stranded transcript is removed exactly as before", () => {
+  // THE CONTROL, and the post-R1 steady state: after R1+R2 no newly-created config
+  // dir can contain a `sessions/**` JSONL, so this is the path every real removal
+  // takes. A rescue that started refusing here would be a leak in every session.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    const plan = applyHarnessConfigDir({
+      env: { HOME: root, ACPX_PI_BOX_AGENT_DIR: box },
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "no-stranded",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(plan, "control: the config dir was never created");
+    withBoxPiAgentDir(box, () => {
+      removeHarnessConfigDir(plan.dir);
+    });
+    assert.equal(existsSync(plan.dir), false, "an ordinary config dir was refused");
+  });
+});
+
+test("cb214e48: the ORPHAN SWEEP rescues too — it is a second way to lose the same file", () => {
+  // Guarding only the close path would leave the age-based sweep as a quieter route
+  // to the same loss. Both recursive removals in the module route through the
+  // rescue; this row proves the sweep leg behaviourally rather than by reading the
+  // source for a helper's name.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    plantStrandedTranscript(root, "swept-1", STRANDED_SLUG, STRANDED_FILE, '{"child":"swept"}\n');
+    const result = withBoxPiAgentDir(box, () =>
+      pruneOrphanHarnessConfigDirs({
+        records: new Map([["swept-1", { closed: true }]]),
+        liveScan: {
+          scanned: 40,
+          environRead: 9,
+          pids: new Set([1]),
+          referencedDirs: new Set<string>(),
+          referencedSessionIds: new Set<string>(),
+        },
+        rootDir: root,
+      }),
+    );
+    assert.equal(result.removed.length, 1, "the sweep did not remove the closed session's dir");
+    assert.equal(
+      existsSync(join(box, "sessions", STRANDED_SLUG, STRANDED_FILE)),
+      true,
+      "the SWEEP destroyed a stranded transcript",
+    );
+  });
+});
+
+// ── §5.2: finding it again, on an already-failing pi resume ──────────────────
+
+test("cb214e48: the resume rescue finds a transcript stranded in ANOTHER session's dir", () => {
+  // ⚠️ IT SCANS BY SHAPE BECAUSE THE RECORD CANNOT HELP. `harness_config_dir` on the
+  // wedged child is the CHILD's own dir; nothing on the record names the parent's.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    const cwd = "/workspace/projects/acpx-ui/w8/depth-gate";
+    const sessionId = "01a08754-4154-7aa4-9f0c-d7687033f15d";
+    const slug = `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`;
+    const fileName = `2026-09-09T18-09-59-308Z_${sessionId}.jsonl`;
+    plantStrandedTranscript(root, "some-ancestor", slug, fileName, '{"stranded":true}\n');
+
+    const rescue = rescueStrandedPiTranscriptForResume({
+      cwd,
+      acpSessionId: sessionId,
+      env: { ACPX_PI_BOX_AGENT_DIR: box },
+      rootDir: root,
+    });
+    assert.ok(rescue, "the stranded transcript was not found");
+    assert.equal(rescue.copiedTo, join(box, "sessions", slug, fileName));
+    assert.equal(readFileSync(rescue.copiedTo, "utf8"), '{"stranded":true}\n');
+    // COPY, never move: a move would destroy the only copy if the retry fails.
+    assert.equal(existsSync(rescue.copiedFrom), true, "the source was MOVED, not copied");
+  });
+});
+
+test("cb214e48: the resume rescue stands down when the box store already has the session", () => {
+  // Short-circuits BEFORE any scan. Without this it would race the live file and,
+  // but for COPYFILE_EXCL, roll a session back in time.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    const cwd = "/workspace/projects/acpx-ui/w8/depth-gate";
+    const sessionId = "01a08754-4154-7aa4-9f0c-d7687033f15d";
+    const slug = `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`;
+    const fileName = `2026-09-09T18-09-59-308Z_${sessionId}.jsonl`;
+    mkdirSync(join(box, "sessions", slug), { recursive: true });
+    writeFileSync(join(box, "sessions", slug, fileName), '{"live":true}\n');
+    plantStrandedTranscript(root, "some-ancestor", slug, fileName, '{"stale":true}\n');
+
+    assert.equal(
+      rescueStrandedPiTranscriptForResume({
+        cwd,
+        acpSessionId: sessionId,
+        env: { ACPX_PI_BOX_AGENT_DIR: box },
+        rootDir: root,
+      }),
+      undefined,
+      "the rescue ran against a session the box store already holds",
+    );
+    assert.equal(readFileSync(join(box, "sessions", slug, fileName), "utf8"), '{"live":true}\n');
+  });
+});
+
+test("cb214e48: the resume rescue matches the EXACT session id, never a sibling in the same slug", () => {
+  // The filename carries the pi session id, so the match is an exact suffix — no
+  // header parsing, no heuristics. Two sessions legitimately share a cwd slug, and
+  // copying the wrong one would resume a session into another session's history.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    const cwd = "/workspace/projects/temp/pi-steer-rig";
+    const slug = `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`;
+    plantStrandedTranscript(
+      root,
+      "ancestor-x",
+      slug,
+      "2026-09-09T18-31-17-000Z_01a0876e-a267-73da-b5c3-0cbe48306cc3.jsonl",
+      '{"sibling":true}\n',
+    );
+    assert.equal(
+      rescueStrandedPiTranscriptForResume({
+        cwd,
+        acpSessionId: "01a0877f-d545-7c49-864c-c849721fb353",
+        env: { ACPX_PI_BOX_AGENT_DIR: box },
+        rootDir: root,
+      }),
+      undefined,
+      "a SIBLING session's transcript was rescued as this session's",
+    );
+    assert.equal(existsSync(join(box, "sessions", slug)), false, "a wrong-session copy was made");
+  });
+});
+
+test("cb214e48: the resume rescue finds nothing when nothing is stranded", () => {
+  // The ordinary case for a session that genuinely has no transcript anywhere —
+  // which must stay a truthful miss, not an invented one.
+  withTempRoot((root) => {
+    const box = join(root, "box-agent");
+    mkdirSync(box, { recursive: true });
+    assert.equal(
+      rescueStrandedPiTranscriptForResume({
+        cwd: "/workspace/nothing/here",
+        acpSessionId: "01a0aaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        env: { ACPX_PI_BOX_AGENT_DIR: box },
+        rootDir: root,
+      }),
+      undefined,
+    );
+  });
 });

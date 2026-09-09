@@ -987,16 +987,32 @@ test("FlowRunner fails persistent ACP sessions when session/load cannot resume t
         edges: [{ from: "first", to: "second" }],
       });
 
+      // ⚠️ THE INVARIANT IS LOUDNESS, NOT THE WORDING — brick://cb214e48.
+      //
+      // This row used to require `missing transcript at <…>.jsonl`, which is a
+      // CLAUDE-SPECIFIC artifact: it comes from `ensureTranscriptAtActiveConfigDir`,
+      // the Claude SDK transcript recovery. The agent here is the MOCK agent, which
+      // is not Claude-family and can never have a Claude SDK transcript — so the old
+      // expectation was the defect cb214e48 removes, asserted as a requirement. (The
+      // fixture cannot take the usual remedy of a real `AGENT_REGISTRY.claude`
+      // command: this row needs the mock's `--load-session-not-found` behaviour, and
+      // a real claude binary cannot be made to produce it.)
+      //
+      // 🛑 THE GATE IS NOT WEAKENED HERE, IT IS RE-AIMED, AND THE ROW GETS STRICTER:
+      // the loud failure, the failed run state and the named session are all still
+      // required, AND the message must now NOT claim a Claude transcript for a
+      // non-Claude agent — which is the property this brick adds.
       await assert.rejects(
         async () => await runner.run(flow, {}),
-        /Persistent ACP session .* could not be resumed: missing transcript at .*\.jsonl/i,
+        /Persistent ACP session .* could not be resumed: Resource not found/i,
       );
 
       const runDir = await waitForRunDir(outputRoot, "persistent-resume-not-found-test");
       const state = await readRunJson(runDir);
       assert.equal(state.status, "failed");
       assert.match(String(state.error), /Persistent ACP session .* could not be resumed/i);
-      assert.match(String(state.error), /missing transcript at .*\.jsonl/i);
+      assert.doesNotMatch(String(state.error), /missing transcript at/i);
+      assert.doesNotMatch(String(state.error), /subscriptions|\.claude\/projects/i);
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }

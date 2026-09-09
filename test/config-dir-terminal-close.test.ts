@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { AcpClient } from "../src/acp/client.js";
 import { applyHarnessConfigDir, releaseHarnessConfigDir } from "../src/acp/harness-config-dir.js";
 import { AGENT_REGISTRY } from "../src/agent-registry.js";
+import { connectAndLoadSession } from "../src/runtime/engine/reconnect.js";
 import { withTempHome } from "./queue-test-helpers.js";
 import { makeSessionRecord, writeSessionRecordFile } from "./runtime-test-helpers.js";
 
@@ -311,5 +312,254 @@ test("433f6bf8: a record with NO recorded config dir closes cleanly and touches 
 
     const result = await closeSession("rec-433-none");
     assert.equal(result.record.closed, true, "the close itself must still succeed");
+  });
+});
+
+// ===========================================================================
+// brick://cb214e48 §7.4 — THE END-TO-END ROW THAT WOULD ACTUALLY HAVE CAUGHT IT.
+//
+// The unit rows in `pi-session-jsonl-dir.test.ts` pin the DERIVATION; these two
+// pin the same property through a REAL SPAWN, i.e. through
+// `AcpClient.start()` → `buildAgentEnvironment` (R3) → `applyHarnessConfigDirEnv`
+// (R1) → the adapter process, and read the answer out of the ADAPTER'S OWN
+// ENVIRONMENT rather than out of the object acpx just built.
+//
+// ## The shape, and why the obvious one does not reproduce the incident
+//
+// ⚠️ `sessions recover` ALONE DOES NOT REACH THE FAILING PATH. The per-session
+// config dir — and pi-acp's session map inside it — survive an owner kill, so the
+// next spawn's `findStoredSession` short-circuits on the map and never scans for a
+// JSONL. Measured by the test-engineer on this branch. The shape that reproduces
+// the incident is:
+//
+//   1. the child is spawned from a PARENT-SHAPED env (the parent pi session
+//      exports its own re-pointed `PI_CODING_AGENT_DIR` into every tool
+//      subprocess, so the nested `acpx` inherits it),
+//   2. the owner dies AND the child's OWN `/tmp/acpx-pi-<child>` dir is removed —
+//      what a terminal close and the idle release both do,
+//   3. the respawn comes from a CLEAN env, which is what the acpx-ui server has.
+//
+// On the unfixed code the transcript was inside the PARENT's directory and step 3
+// died with `missing transcript at ~/.acpx/subscriptions/…`. Here it must survive
+// step 2 and resume in step 3.
+//
+// ## What the mock CAN and CANNOT stand in for — stated, not glossed
+//
+// The mock agent is used so the gate runs with no model credentials, and it makes
+// these rows about **acpx's placement and resume plumbing**. It has no JSONL store,
+// so it cannot model pi-acp's `findPiSession` scan: the transcript below is a file
+// this test writes at the path acpx pointed the adapter at. That is precisely the
+// contract acpx owns — *"the directory acpx hands pi is in the box store and
+// outlives the config dir"* — and it is the half that was broken. The other half,
+// a real pi recalling a canary through a real resumed turn, is in the brick's
+// `IMPL-SELFTEST.md` §3 as a live measurement.
+// ===========================================================================
+
+/** pi's own cwd mangling, transcribed rather than imported, so this row notices
+ *  the implementation drifting away from it. */
+function piSlug(cwd: string): string {
+  return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+/** Run `body` with `process.env.PI_CODING_AGENT_DIR` set to a PARENT's per-session
+ *  config dir — the inherited value that is the whole defect — and restore it. */
+async function withParentShapedEnv<T>(parentDir: string, body: () => Promise<T>): Promise<T> {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = parentDir;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previous;
+    }
+  }
+}
+
+/** A `node <…>/pi-acp/mock-agent.js` command: the mock BINARY under a path that
+ *  `harnessIdForAgentCommand` classifies as **pi**, which is what earns it a
+ *  config dir at all. Same trick the 4a6fdda0 row uses. */
+async function piClassifiedMockCommand(root: string, args: string[]): Promise<string> {
+  const linkDir = path.join(root, "pi-acp");
+  await fs.mkdir(linkDir, { recursive: true });
+  const mockLink = path.join(linkDir, "mock-agent.js");
+  if (!existsSync(mockLink)) {
+    await fs.symlink(MOCK_AGENT_PATH, mockLink);
+  }
+  return [`node ${JSON.stringify(mockLink)}`, ...args].join(" ");
+}
+
+test("cb214e48 REAL SPAWN: a child of a PARENT-shaped env is pointed at the BOX store, and its transcript outlives its own config dir", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "child-work");
+    await fs.mkdir(cwd, { recursive: true });
+    const configRoot = process.env.ACPX_HARNESS_CONFIG_DIR_ROOT ?? os.tmpdir();
+    // The ancestor's throwaway dir, exactly as acpx names one.
+    const parentDir = path.join(configRoot, "acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13");
+    await fs.mkdir(parentDir, { recursive: true });
+    const envDump = path.join(homeDir, "child-env.json");
+
+    const client = new AcpClient({
+      agentCommand: await piClassifiedMockCommand(homeDir, [
+        "--supports-load-session",
+        `--env-dump-file ${JSON.stringify(envDump)}`,
+        "--env-dump-extra PI_CODING_AGENT_DIR,PI_CODING_AGENT_SESSION_DIR",
+      ]),
+      cwd,
+      permissionMode: "approve-reads",
+      sessionContext: { acpxRecordId: "rec-cb214e48-child" },
+    });
+
+    try {
+      await withParentShapedEnv(parentDir, async () => {
+        await client.start();
+      });
+
+      // ⚠️ READ THE ADAPTER'S OWN ENVIRONMENT, not the object acpx just built.
+      // This is what makes it an end-to-end row: it goes through the FW-07 scrub
+      // and the config-dir writer together, exactly as a real spawn does.
+      const spawned = JSON.parse(await fs.readFile(envDump, "utf8")) as Record<string, string>;
+      const sessionDir = spawned.PI_CODING_AGENT_SESSION_DIR;
+
+      const expected = path.join(homeDir, ".pi", "agent", "sessions", piSlug(cwd));
+      assert.equal(sessionDir, expected, "the child was not pointed at the BOX store");
+      // The failure this row exists for, stated as the thing that must NOT be true.
+      assert.equal(
+        sessionDir?.startsWith(parentDir),
+        false,
+        "the child's transcript was aimed INSIDE the parent's throwaway config dir",
+      );
+      // ⚠️ AND IT MUST EXIST BEFORE pi STARTS — a missing target hangs pi with
+      // rc=124 and empty stdout AND stderr, which reads as a slow model.
+      assert.equal(existsSync(sessionDir), true, `pi would HANG: ${sessionDir} does not exist`);
+
+      // CONTROL: the config dir really was re-pointed, so this row is about the
+      // store surviving that move and not about a spawn that never happened.
+      const childConfigDir = client.harnessConfigDirPath;
+      assert.ok(childConfigDir, "no config dir was created — the row is vacuous");
+      assert.notEqual(childConfigDir, parentDir, "the child reused the PARENT's dir");
+      assert.equal(spawned.PI_CODING_AGENT_DIR, childConfigDir);
+
+      // pi is the only writer of this file; stand in for it at the exact path acpx
+      // handed the adapter.
+      const transcript = path.join(sessionDir, "2026-09-09T18-09-59-308Z_01a0875c-c60c.jsonl");
+      await fs.writeFile(transcript, '{"child":"only copy"}\n', "utf8");
+
+      // Step 2 of the shape: the child's OWN config dir goes, as a terminal close
+      // and the idle release both do.
+      await client.close();
+      assert.equal(existsSync(childConfigDir), false, "control: the config dir was not removed");
+
+      // THE POINT: the transcript is not in the directory that just went.
+      assert.equal(
+        existsSync(transcript),
+        true,
+        "the child's ONLY transcript was destroyed with its config dir",
+      );
+      assert.equal(await fs.readFile(transcript, "utf8"), '{"child":"only copy"}\n');
+    } finally {
+      await client.close().catch(() => {});
+    }
+  });
+});
+
+test("cb214e48 REAL SPAWN: after the config dir is removed, a CLEAN-env respawn resumes and lands on the SAME box store", async () => {
+  // Step 3 of the shape. The respawn carries no PI_* vars at all — that is the
+  // production respawn shape, the acpx-ui server's own environment, and it is the
+  // path session 01a0875c wedged on.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "child-work");
+    await fs.mkdir(cwd, { recursive: true });
+    const configRoot = process.env.ACPX_HARNESS_CONFIG_DIR_ROOT ?? os.tmpdir();
+    const parentDir = path.join(configRoot, "acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13");
+    await fs.mkdir(parentDir, { recursive: true });
+
+    const firstDump = path.join(homeDir, "first-env.json");
+    const secondDump = path.join(homeDir, "second-env.json");
+    const command = async (dump: string) =>
+      await piClassifiedMockCommand(homeDir, [
+        "--supports-load-session",
+        `--env-dump-file ${JSON.stringify(dump)}`,
+        "--env-dump-extra PI_CODING_AGENT_DIR,PI_CODING_AGENT_SESSION_DIR",
+      ]);
+
+    const first = new AcpClient({
+      agentCommand: await command(firstDump),
+      cwd,
+      permissionMode: "approve-reads",
+      sessionContext: { acpxRecordId: "rec-cb214e48-resume" },
+    });
+    let sessionId = "";
+    let firstConfigDir: string | undefined;
+    try {
+      await withParentShapedEnv(parentDir, async () => {
+        await first.start();
+        const created = await first.createSession(cwd);
+        sessionId = created.sessionId;
+      });
+      firstConfigDir = first.harnessConfigDirPath;
+    } finally {
+      await first.close().catch(() => {});
+    }
+
+    const spawned = JSON.parse(await fs.readFile(firstDump, "utf8")) as Record<string, string>;
+    const boxSessionDir = path.join(homeDir, ".pi", "agent", "sessions", piSlug(cwd));
+    assert.equal(spawned.PI_CODING_AGENT_SESSION_DIR, boxSessionDir);
+    const transcript = path.join(boxSessionDir, `2026-09-09T18-09-59-308Z_${sessionId}.jsonl`);
+    await fs.writeFile(transcript, '{"child":"only copy"}\n', "utf8");
+
+    // The config dir is gone (the close removed it) — the state a cold respawn
+    // actually finds, and the state in which the old code went looking for a
+    // Claude transcript.
+    assert.ok(firstConfigDir);
+    assert.equal(existsSync(firstConfigDir), false, "control: the config dir survived the close");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "rec-cb214e48-resume",
+      acpSessionId: sessionId,
+      agentCommand: await command(secondDump),
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    const second = new AcpClient({
+      agentCommand: record.agentCommand,
+      cwd,
+      permissionMode: "approve-reads",
+      sessionContext: { acpxRecordId: "rec-cb214e48-resume" },
+    });
+    try {
+      // NO PI_* in the environment — deliberately not wrapped in withParentShapedEnv.
+      const result = await connectAndLoadSession({
+        client: second,
+        record,
+        timeoutMs: 30_000,
+        activeController: {
+          hasActivePrompt: () => false,
+          requestCancelActivePrompt: async () => false,
+          setSessionMode: async () => {},
+          setSessionModel: async () => {},
+          setSessionConfigOption: async () => ({ configOptions: [] }) as never,
+        },
+      });
+
+      assert.equal(result.resumed, true, "the clean-env respawn did not resume the session");
+      assert.equal(result.sessionId, sessionId);
+      // ⚠️ AND IT MUST NOT HAVE ASKED FOR A CLAUDE TRANSCRIPT. `loadError` is where
+      // the old path's `missing transcript at ~/.acpx/subscriptions/…` surfaced.
+      assert.equal(result.loadError, undefined, `the resume reported: ${result.loadError}`);
+
+      // The respawn landed on the SAME box store, from an env that carried nothing.
+      const respawned = JSON.parse(await fs.readFile(secondDump, "utf8")) as Record<string, string>;
+      assert.equal(
+        respawned.PI_CODING_AGENT_SESSION_DIR,
+        boxSessionDir,
+        "the respawn resolved a DIFFERENT store than the spawn that wrote the transcript",
+      );
+      assert.equal(existsSync(transcript), true, "the transcript did not survive the round trip");
+    } finally {
+      await second.close().catch(() => {});
+    }
   });
 });

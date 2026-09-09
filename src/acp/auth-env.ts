@@ -47,6 +47,7 @@ import { isClaudeFamilyAgent, isClaudePtyAgentCommand } from "./agent-command.js
 import { splitCommandLine } from "./client-process.js";
 import { isCodexAcpCommand } from "./codex-compat.js";
 import { harnessIdForAgentCommand } from "./harness-capabilities.js";
+import { isAcpxPerSessionConfigDir } from "./harness-config-dir.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import { spawnOpenRouterShim } from "./openrouter-shim.js";
 
@@ -630,6 +631,37 @@ function buildAgentEnvironment(
   // process — and some are plausibly load-bearing for a claude child. Stripping
   // them is a separate, larger question than this one.
   delete env.CLAUDE_CONFIG_DIR;
+  // brick://cb214e48 — pi's DATA dir is spawn context too, and it is OPERATIVE in
+  // the same way CLAUDE_CONFIG_DIR above is. Measured on devbox 2026-09-09: a pi
+  // child of a pi parent inherited `PI_CODING_AGENT_DIR=/tmp/acpx-pi-<parent>`
+  // (pi exports its whole environment into every tool subprocess, and this
+  // function starts from `{...process.env}`), and acpx then treated it as the BOX
+  // agent dir — writing the child's ONLY transcript into a directory removed at
+  // the parent's close. Eight JSONLs, three ancestor dirs, four of them
+  // grandchildren.
+  //
+  // `PI_CODING_AGENT_SESSION_DIR` goes UNCONDITIONALLY: `writePiConfigDir` is its
+  // only writer in this system and its value is inherently cwd-specific, so a
+  // box-level one would force every session of every cwd into one folder. Deleting
+  // it also cleans a claude/codex child of a pi parent, which carries it today for
+  // no reason at all.
+  //
+  // `PI_CODING_AGENT_DIR` goes CONDITIONALLY — an unconditional delete would break
+  // a box that legitimately relocates pi's agent dir. Same predicate as the writer
+  // ({@link isAcpxPerSessionConfigDir}), ONE implementation: two spellings of one
+  // rule is how the writer and the scrubber come to disagree.
+  //
+  // Deliberately NOT scrubbed here: PI_SESSION_ID, PI_SESSION_FILE, PI_PROVIDER,
+  // PI_MODEL, PI_REASONING_LEVEL. Measured against pi 0.84.4's bundle: pi DELETES
+  // all five from the shell env it builds for tool subprocesses and re-sets them
+  // from the current session, so they self-heal at every pi boundary and cannot
+  // mis-steer a child pi. They do mislead /proc-based forensics — the same class
+  // as the ACPX_EFFECTIVE_ADAPTER leak above — and that is a follow-up brick, not
+  // behaviour to change inside a P0.
+  delete env.PI_CODING_AGENT_SESSION_DIR;
+  if (isAcpxPerSessionConfigDir(env.PI_CODING_AGENT_DIR)) {
+    delete env.PI_CODING_AGENT_DIR;
+  }
   applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {

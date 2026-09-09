@@ -2,12 +2,17 @@ import { sessionUsesClaudeCredentials } from "../../acp/agent-command.js";
 import type { AcpClient } from "../../acp/client.js";
 import {
   extractAcpError,
+  extractAcpErrorDetails,
   formatAcpErrorMessage,
   formatErrorMessage,
   isAcpQueryClosedBeforeResponseError,
   isAcpResourceNotFoundError,
 } from "../../acp/error-normalization.js";
-import { depthMechanismForAgentCommand } from "../../acp/harness-capabilities.js";
+import {
+  depthMechanismForAgentCommand,
+  harnessIdForAgentCommand,
+} from "../../acp/harness-capabilities.js";
+import { rescueStrandedPiTranscriptForResume } from "../../acp/harness-config-dir.js";
 import { RequestedModelUnsupportedError } from "../../acp/model-support.js";
 import { InterruptedError, TimeoutError, withTimeout } from "../../async-control.js";
 import { findProfile, loadProfileRegistry, transcriptAnchorDir } from "../../config/profiles.js";
@@ -857,6 +862,29 @@ async function recoverMissingTranscriptAndRetry(
     return undefined;
   }
 
+  // brick://cb214e48 — THE CREDENTIAL GATE, MISSING ONLY HERE. Everything below
+  // resolves a CLAUDE SDK transcript, which only a Claude-credentialed session ever
+  // writes. Its sibling `ensurePendingSwitchTranscript` was gated for exactly this
+  // reason four hours earlier (brick://a89c3cd4); this path had no harness gate at
+  // all, so a pi record failing `session/load` was run through the Claude recovery,
+  // found nothing under the subscription config dirs, and — because it had real
+  // agent turns — was thrown as SESSION_RESUME_REQUIRED naming
+  // `~/.acpx/subscriptions/…` paths and `~/.claude/projects` at a session that has
+  // no relationship to either. Verified against the REAL wedged record, not a
+  // fixture: `agent_command` was `"node /opt/pi-acp/dist/index.js"`, which
+  // `acpAdapterKind` classifies `pi`, so this returns false and the caller reports
+  // the truth instead.
+  //
+  // ⚠️ DO NOT INVENT A SECOND PREDICATE HERE. `sessionUsesClaudeCredentials`
+  // already answers *"can a Claude SDK transcript exist for this session?"*, which
+  // is precisely what this call site is implicitly asking.
+  if (!sessionUsesClaudeCredentials(params.record)) {
+    // pi has its OWN stranded-transcript case, and this is where it belongs: same
+    // trigger (a resource-not-found on resume), same shape (rescue, then retry
+    // once), different store. See `rescueStrandedPiTranscriptForResume`.
+    return await recoverStrandedPiTranscriptAndRetry(params, retry);
+  }
+
   const recovery = await ensureTranscriptAtActiveConfigDir(params.record);
   if (recovery.status === "ported") {
     logTranscriptRecovery(params.record, recovery, params.verbose);
@@ -876,6 +904,59 @@ async function recoverMissingTranscriptAndRetry(
   }
 
   return undefined;
+}
+
+/**
+ * pi's half of the stranded-transcript recovery (brick://cb214e48 §5.2).
+ *
+ * Before this brick a pi child of a pi parent wrote its ONLY JSONL into the
+ * PARENT's per-session config dir. R1 stops that happening again; this is what
+ * rescues the sessions it already happened to — measured, eight files across three
+ * ancestor dirs on devbox — on the one path that knows they are needed: a resume
+ * that has just failed with a resource-not-found.
+ *
+ * `undefined` (nothing found) is the normal answer, including for a session that
+ * genuinely has no transcript anywhere. The caller then reports the truthful pi
+ * message rather than a Claude one.
+ *
+ * ⚠️ NOT gated on `harnessIdForAgentCommand === "pi"` here, because the rescue
+ * itself is: it looks only in `acpx-pi-*` dirs, for a filename carrying THIS
+ * record's pi session id, under THIS record's cwd slug. A codex record reaching it
+ * finds nothing and pays one `readdirSync`.
+ */
+async function recoverStrandedPiTranscriptAndRetry(
+  params: {
+    client: AcpClient;
+    record: SessionRecord;
+    sameSessionOnly: boolean;
+    timeoutMs?: number;
+    verbose?: boolean;
+  },
+  retry: (params: {
+    client: AcpClient;
+    record: SessionRecord;
+    timeoutMs?: number;
+  }) => Promise<RuntimeSessionLoadState>,
+): Promise<RuntimeSessionLoadState | undefined> {
+  const rescue = rescueStrandedPiTranscriptForResume({
+    cwd: params.record.cwd,
+    acpSessionId: params.record.acpSessionId,
+  });
+  if (!rescue) {
+    return undefined;
+  }
+  // Unconditional, not `verbose`-gated: a file was COPIED on disk. A mutation the
+  // operator cannot see is how "the fix did nothing" and "the fix worked" become
+  // indistinguishable afterwards.
+  process.stderr.write(
+    `[acpx] rescued a stranded pi transcript for session ${params.record.acpSessionId} from ` +
+      `${rescue.copiedFrom} to ${rescue.copiedTo}; retrying the resume (brick cb214e48)\n`,
+  );
+  try {
+    return await retry(params);
+  } catch (retryError) {
+    return await recoverRuntimeSessionLoadFailure(params, retryError);
+  }
 }
 
 async function ensurePendingSwitchTranscript(
@@ -1017,6 +1098,59 @@ function logTranscriptRecovery(
   );
 }
 
+/**
+ * The reason string a load failure surfaces to the user (brick://cb214e48).
+ *
+ * ## ⚠️ THE GATE ALONE MAKES THE MESSAGE WORSE, WHICH IS WHY THIS IS NOT POLISH
+ *
+ * With the credential gate above in place, a pi resume failure falls through to
+ * here — and `formatErrorMessage`, which this replaced, returns only `message`.
+ * Measured: pi-acp raises `RequestError.invalidParams(\`Unknown sessionId: ${id}\`)`
+ * while the pinned SDK signature is `invalidParams(data?, additionalMessage?)`, so
+ * the human string lands in **`data`** and `message` is the bare `"Invalid params"`.
+ * The user would go from a MISLEADING message (Claude subscription paths) to a
+ * USELESS one:
+ *
+ *     Persistent ACP session 01a0875c-c60c-… could not be resumed: Invalid params
+ *
+ * {@link formatAcpErrorMessage} is the composition `message` + `data.details` that
+ * `error-shapes.ts` exists for, and it is a strict widening: byte-identical output
+ * when the payload carries no `details`.
+ *
+ * ## The pi fallback, for an adapter too old to say it itself
+ *
+ * A box running a pi-acp that has not yet learned to send `data.details` yields no
+ * details at all. Rather than print `"Invalid params"` alone, acpx names what IT
+ * knows — the directory it handed pi as `PI_CODING_AGENT_SESSION_DIR` this spawn
+ * (`acpx.pi_session_dir`, refreshed before the load; see `connectAndLoadSession`).
+ *
+ * Three conditions, each load-bearing:
+ *
+ *  - **pi only.** Keyed on `harnessIdForAgentCommand`, the same resolver the rest of
+ *    the module uses. No other harness's store is named by this field.
+ *  - **Resource-not-found only.** A timeout or a transport fault must NOT be
+ *    annotated "no pi session JSONL" — that would be a confident wrong diagnosis,
+ *    which is the failure mode this whole change is removing.
+ *  - **Only when the adapter said nothing.** A pi-acp that DOES send `details`
+ *    already named its own search paths, including the session-map path acpx cannot
+ *    know; appending a second, poorer sentence would bury it.
+ */
+function resumeFailureReason(record: SessionRecord, error: unknown): string {
+  const base = formatAcpErrorMessage(error);
+  if (
+    harnessIdForAgentCommand(record.agentCommand) !== "pi" ||
+    !isAcpResourceNotFoundError(error) ||
+    extractAcpErrorDetails(error) !== undefined
+  ) {
+    return base;
+  }
+  const searched = record.acpx?.pi_session_dir?.trim();
+  if (!searched) {
+    return base;
+  }
+  return `${base}: no pi session JSONL for ${record.acpSessionId}: searched ${searched}`;
+}
+
 async function recoverRuntimeSessionLoadFailure(
   params: {
     client: AcpClient;
@@ -1027,7 +1161,7 @@ async function recoverRuntimeSessionLoadFailure(
   },
   error: unknown,
 ): Promise<RuntimeSessionLoadState> {
-  const loadError = formatErrorMessage(error);
+  const loadError = resumeFailureReason(params.record, error);
   if (params.sameSessionOnly) {
     throw makeSessionResumeRequiredError({
       record: params.record,

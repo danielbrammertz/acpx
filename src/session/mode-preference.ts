@@ -332,8 +332,22 @@ export function syncAdvertisedModelState(
  * `undefined` CLEARS the field rather than leaving the previous value: a harness
  * that stops getting a config dir must not keep advertising a path.
  */
-export function setHarnessConfigDir(record: SessionRecord, dir: string | undefined): void {
+export function setHarnessConfigDir(
+  record: SessionRecord,
+  dir: string | undefined,
+  /**
+   * The pi session store this spawn handed pi (brick://cb214e48). Written HERE,
+   * through the same guard and the same clone, because it is the same KIND of
+   * fact from the same snapshot: per-spawn, refreshed not written-once, and
+   * `undefined` must CLEAR rather than leave a stale path. A second setter would
+   * mean a second "touch nothing" guard, and two guards that must agree about
+   * when a record may gain an `acpx` object is exactly the drift this file's
+   * comments keep warning about.
+   */
+  piSessionDir?: string,
+): void {
   const normalized = dir?.trim();
+  const normalizedSessionDir = piSessionDir?.trim();
   // ⚠️ NOTHING TO WRITE ⇒ TOUCH NOTHING (RS-14). Only pi ever gets a
   // config dir, so this runs with `undefined` on every claude / claude-pty /
   // codex spawn — and those records must not gain the key, be it a value, a
@@ -342,19 +356,41 @@ export function setHarnessConfigDir(record: SessionRecord, dir: string | undefin
   // record SHAPE for three harnesses the programme requires untouched. Record
   // shape is consumed by parse, serialize, the index projection and the UI, so
   // "we added a field but it is empty for you" is still a behaviour change.
-  if (!normalized && record.acpx?.harness_config_dir === undefined) {
+  const nothingToWrite = !normalized && !normalizedSessionDir;
+  if (nothingToWrite && recordCarriesNoSpawnDir(record.acpx)) {
     return;
   }
   const acpx = cloneSessionAcpxState(record.acpx) ?? {};
-  if (normalized) {
-    acpx.harness_config_dir = normalized;
-  } else {
-    // A spawn that wrote no dir CLEARS a previous value rather than leaving it:
-    // a stale path that still resolves is a silent wrong answer, which is worse
-    // than a miss (see AgentLifecycleSnapshot.harnessConfigDir).
-    delete acpx.harness_config_dir;
-  }
+  assignOrClearSpawnDir(acpx, "harness_config_dir", normalized);
+  assignOrClearSpawnDir(acpx, "pi_session_dir", normalizedSessionDir);
   record.acpx = acpx;
+}
+
+/** Neither per-spawn directory is recorded — so a spawn that writes neither has
+ *  genuinely nothing to do, and RS-14's "touch nothing" applies. */
+function recordCarriesNoSpawnDir(acpx: SessionAcpxState | undefined): boolean {
+  return acpx?.harness_config_dir === undefined && acpx?.pi_session_dir === undefined;
+}
+
+/**
+ * Write a per-spawn directory field, or CLEAR it.
+ *
+ * ⚠️ THE `else` IS THE POINT, NOT AN OMITTED-VALUE SHORTCUT. A spawn that wrote no
+ * directory must not leave the PREVIOUS spawn's path standing: a stale path that
+ * still resolves is a silent WRONG answer, which is worse than a miss (see
+ * `AgentLifecycleSnapshot.harnessConfigDir`). Extracted so the two fields cannot
+ * be given two different answers to that question.
+ */
+function assignOrClearSpawnDir(
+  acpx: SessionAcpxState,
+  key: "harness_config_dir" | "pi_session_dir",
+  value: string | undefined,
+): void {
+  if (value) {
+    acpx[key] = value;
+  } else {
+    delete acpx[key];
+  }
 }
 
 /**

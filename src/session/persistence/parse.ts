@@ -379,6 +379,10 @@ function parseAcpxState(raw: unknown): SessionAcpxState | undefined {
   // The config-dir CHANNEL must round-trip, or acpx-ui loses the primer path on
   // the first cold reload and silently falls back to a re-render.
   assignStringState(state, "harness_config_dir", record.harness_config_dir);
+  // brick://cb214e48 — the pi session store must round-trip for the same reason:
+  // it is what the resume-failure message names, and a cold reload is exactly when
+  // that message is produced.
+  assignStringState(state, "pi_session_dir", record.pi_session_dir);
   // A LEARNED capability fact must survive a cold reload, or the session
   // re-offers a control it has already proven cannot work.
   assignStringState(state, "model_set_unsupported_for", record.model_set_unsupported_for);
@@ -493,6 +497,7 @@ function assignStringState(
     | "applied_output_style"
     | "refused_output_style"
     | "harness_config_dir"
+    | "pi_session_dir"
     | "model_set_unsupported_for",
   value: unknown,
 ): void {

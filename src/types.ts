@@ -697,6 +697,29 @@ export type SessionAcpxState = {
    */
   harness_config_dir?: string;
   /**
+   * The BOX-store directory acpx handed pi as `PI_CODING_AGENT_SESSION_DIR` for
+   * the CURRENT spawn (brick://cb214e48). Absent for every harness but pi, and for
+   * a pi spawn that declined to set one (no cwd, or the directory could not be
+   * created).
+   *
+   * ⚠️ THE DIRECTORY, NOT THE FILE PATH, AND THAT IS NOT A SHORTCUT. acpx never
+   * learns the filename: pi mints `<ISO>_<pi-session-id>.jsonl` and only pi's own
+   * store ever sees it. A recorded directory is a fact acpx OWNS; a recorded file
+   * path would be a guess that goes stale on every fork.
+   *
+   * ⚠️ AND IT IS DIAGNOSIS, NOT A SUBSTITUTE FOR THE PLACEMENT FIX. Recording
+   * where the transcript went does not stop it being written into a directory
+   * another session deletes — that is `resolveBoxPiAgentDir`'s job. This field
+   * exists so the resume-failure message can NAME the directory that was searched
+   * even against a pi-acp too old to say so itself, and so the next occurrence is
+   * diagnosable from the record instead of from `/proc`.
+   *
+   * Refreshed at every spawn, like {@link harness_config_dir} and for the same
+   * reason: a value written once at create is stale after the first resume, and a
+   * stale path that still resolves is a silent wrong answer.
+   */
+  pi_session_dir?: string;
+  /**
    * LEARNED: this session's adapter answered `-32601 Method not found` for
    * `session/set_model` (F-12, brick 2dc93747).
    *

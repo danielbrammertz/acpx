@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import type { SessionModelState, SetSessionConfigOptionResponse } from "@agentclientprotocol/sdk";
+import { AGENT_REGISTRY } from "../src/agent-registry.js";
 import { transcriptJsonlPath } from "../src/config/subscription-transcript.js";
 import {
   connectAndLoadSession,
@@ -20,6 +21,11 @@ type FakeClient = {
     pid?: number;
     startedAt?: string;
     running: boolean;
+    /** brick://cb214e48 — the pi store THIS spawn handed pi. It reaches the record
+     *  through the snapshot, so a fixture that plants it on `record.acpx` instead is
+     *  wrong twice over: it is not how production writes it, and the pre-load
+     *  lifecycle refresh correctly CLEARS a value the current spawn did not set. */
+    piSessionDir?: string;
     lastExit?: {
       exitCode: number | null;
       signal: NodeJS.Signals | null;
@@ -417,7 +423,7 @@ test("connectAndLoadSession ports a stranded transcript before retrying resource
     const record = makeSessionRecord({
       acpxRecordId: "transcript-port-record",
       acpSessionId: oldSessionId,
-      agentCommand: "agent",
+      agentCommand: AGENT_REGISTRY.claude,
       cwd,
       messages: [
         {
@@ -492,7 +498,7 @@ test("connectAndLoadSession fails loudly for history when resource-not-found has
     const record = makeSessionRecord({
       acpxRecordId: "missing-transcript-record",
       acpSessionId: "missing-session",
-      agentCommand: "agent",
+      agentCommand: AGENT_REGISTRY.claude,
       cwd,
       messages: [
         {
@@ -550,6 +556,420 @@ test("connectAndLoadSession fails loudly for history when resource-not-found has
       },
     );
     assert.equal(record.acpSessionId, "missing-session");
+  });
+});
+
+// ============================================================================
+// brick://cb214e48 — the resume path for a NON-Claude-credentialed record.
+//
+// `recoverMissingTranscriptAndRetry` ran the CLAUDE SDK transcript recovery on any
+// resource-not-found, with no harness gate at all — so a pi session that could not
+// be resumed was told its transcript was missing from `~/.acpx/subscriptions/…`
+// and `~/.claude/projects`, directories it has no relationship to.
+//
+// ⚠️ THE AGENT COMMANDS BELOW ARE REAL, DELIBERATELY. `"node /opt/pi-acp/dist/index.js"`
+// is the literal value on the wedged record measured on devbox; the Claude arm uses
+// AGENT_REGISTRY.claude. The gate is adapter-keyed and NO real record carries acpx's
+// synthetic `"agent"` fixture shape, so a fixture-only suite passes in BOTH wrong
+// directions.
+// ============================================================================
+
+const PI_ACP_COMMAND = "node /opt/pi-acp/dist/index.js";
+
+test("cb214e48: a pi record failing session/load never invokes the Claude transcript recovery", async () => {
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    const subscriptionDir = path.join(homeDir, ".acpx", "subscriptions", "paid");
+    await writeSubscriptionRegistry(homeDir, {
+      default: "paid",
+      subscriptions: [{ id: "paid", label: "Paid", configDir: subscriptionDir }],
+    });
+
+    // A transcript planted at the Claude anchor that a PORT would find. Under the
+    // old ungated code this is exactly what got copied and retried; with the gate
+    // it must be left untouched.
+    const sessionId = "pi-session";
+    const strandedPath = transcriptJsonlPath(path.join(homeDir, ".claude"), cwd, sessionId);
+    await fs.mkdir(path.dirname(strandedPath), { recursive: true });
+    await fs.writeFile(strandedPath, '{"type":"message"}\n', "utf8");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-no-claude-recovery",
+      acpSessionId: sessionId,
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+      acpx: { session_options: { subscription: "paid" } },
+    });
+
+    let loadCalls = 0;
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({ running: true }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        loadCalls += 1;
+        throw { error: { code: -32002, message: "session not found" } };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called for a session with real history");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    await assert.rejects(
+      async () =>
+        await connectAndLoadSession({
+          client: client as never,
+          record,
+          timeoutMs: 1_000,
+          activeController: ACTIVE_CONTROLLER,
+        }),
+      (error: unknown) => {
+        assert(error instanceof Error);
+        assert.equal(error.name, "SessionResumeRequiredError");
+        // ⚠️ THE WHOLE POINT: no Claude vocabulary at a pi session.
+        assert.doesNotMatch(error.message, /subscriptions|\.claude\/projects/);
+        assert.doesNotMatch(error.message, /missing transcript at/);
+        return true;
+      },
+    );
+    // ONE load attempt — no port, therefore no retry.
+    assert.equal(loadCalls, 1, "the Claude transcript recovery ported and retried on a pi record");
+    // And the port genuinely did not happen: the active anchor stays empty.
+    await assert.rejects(
+      async () => await fs.readFile(transcriptJsonlPath(subscriptionDir, cwd, sessionId), "utf8"),
+      /ENOENT/,
+    );
+  });
+});
+
+test("cb214e48: a claude record still ports it — the gate is not a blanket skip", async () => {
+  // THE CONTROL, in the direction that matters. Without it, `return undefined`
+  // unconditionally at the top of the recovery passes the row above.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    const subscriptionDir = path.join(homeDir, ".acpx", "subscriptions", "paid");
+    await writeSubscriptionRegistry(homeDir, {
+      default: "paid",
+      subscriptions: [{ id: "paid", label: "Paid", configDir: subscriptionDir }],
+    });
+
+    const sessionId = "claude-session";
+    const strandedPath = transcriptJsonlPath(path.join(homeDir, ".claude"), cwd, sessionId);
+    await fs.mkdir(path.dirname(strandedPath), { recursive: true });
+    await fs.writeFile(strandedPath, '{"type":"message"}\n', "utf8");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "claude-still-ports",
+      acpSessionId: sessionId,
+      agentCommand: AGENT_REGISTRY.claude,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+      acpx: { session_options: { subscription: "paid" } },
+    });
+
+    let loadCalls = 0;
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({ running: true }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        loadCalls += 1;
+        if (loadCalls === 1) {
+          throw { error: { code: -32002, message: "session not found" } };
+        }
+        return { agentSessionId: "runtime-session" };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called after transcript recovery");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    const result = await connectAndLoadSession({
+      client: client as never,
+      record,
+      timeoutMs: 1_000,
+      activeController: ACTIVE_CONTROLLER,
+    });
+    assert.equal(loadCalls, 2, "the Claude recovery did not port + retry");
+    assert.equal(result.resumed, true);
+    assert.equal(
+      await fs.readFile(transcriptJsonlPath(subscriptionDir, cwd, sessionId), "utf8"),
+      '{"type":"message"}\n',
+    );
+  });
+});
+
+test("cb214e48: the pi resume error names the pi sessions dir and carries no subscription path", async () => {
+  // The OLD-pi-acp arm: the adapter sends no `data.details`, so acpx composes the
+  // suffix from `acpx.pi_session_dir` — the directory it handed pi this spawn.
+  // Without this, gating alone degrades the message from MISLEADING to USELESS
+  // ("Invalid params" and nothing else).
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+    const piSessionDir = path.join(homeDir, ".pi", "agent", "sessions", "--workspace--");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-truthful-message",
+      acpSessionId: "01a0875c-c60c-7e06-84de-6873ea4d3176",
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      // The production shape: THIS spawn reports the store it handed pi, and
+      // `applyLifecycleSnapshotToRecord` lands it on `acpx.pi_session_dir` before
+      // the load is attempted.
+      getAgentLifecycleSnapshot: () => ({ running: true, piSessionDir }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        // pi-acp 73f2e39, verbatim: the human string lands in `data` because the
+        // pinned SDK signature is `invalidParams(data?, additionalMessage?)`, so
+        // `message` is the bare "Invalid params".
+        throw {
+          error: {
+            code: -32602,
+            message: "Invalid params",
+            data: "Unknown sessionId: 01a0875c-c60c-7e06-84de-6873ea4d3176",
+          },
+        };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called for a session with real history");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    await assert.rejects(
+      async () =>
+        await connectAndLoadSession({
+          client: client as never,
+          record,
+          timeoutMs: 1_000,
+          activeController: ACTIVE_CONTROLLER,
+        }),
+      (error: unknown) => {
+        assert(error instanceof Error);
+        assert.match(error.message, /no pi session JSONL/);
+        assert.match(error.message, /--workspace--/);
+        assert.doesNotMatch(error.message, /subscriptions|\.claude\/projects/);
+        return true;
+      },
+    );
+  });
+});
+
+test("cb214e48: a NEW pi-acp's own data.details wins — acpx does not append a poorer sentence", async () => {
+  // The other adapter arm. A pi-acp that names its own search paths knows things
+  // acpx cannot (the session-map path inside the throwaway dir); burying that under
+  // acpx's one-directory guess would be a regression, so the fallback stands down.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-adapter-details",
+      acpSessionId: "pi-detailed",
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({
+        running: true,
+        piSessionDir: path.join(homeDir, ".pi", "agent", "sessions", "--acpx-guess--"),
+      }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        throw {
+          error: {
+            code: -32602,
+            message: "Invalid params: Unknown sessionId: pi-detailed",
+            data: {
+              details:
+                "no pi session JSONL for pi-detailed: searched /adapter/said/this; session map /adapter/map.json",
+            },
+          },
+        };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called for a session with real history");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    await assert.rejects(
+      async () =>
+        await connectAndLoadSession({
+          client: client as never,
+          record,
+          timeoutMs: 1_000,
+          activeController: ACTIVE_CONTROLLER,
+        }),
+      (error: unknown) => {
+        assert(error instanceof Error);
+        // The adapter's own sentence, including the session-map path acpx cannot know.
+        assert.match(error.message, /searched \/adapter\/said\/this/);
+        assert.match(error.message, /session map \/adapter\/map\.json/);
+        // acpx's poorer fallback stood down.
+        assert.doesNotMatch(error.message, /--acpx-guess--/);
+        assert.doesNotMatch(error.message, /subscriptions|\.claude\/projects/);
+        return true;
+      },
+    );
+  });
+});
+
+test("cb214e48: a stranded pi transcript is rescued on resume and the load RETRIES", async () => {
+  // §5.2, end to end through `connectAndLoadSession`. `withTempHome` isolates BOTH
+  // the box store (HOME) and the config-dir root, so the scan walks a fixture root
+  // and the copy lands in a fixture `~/.pi/agent` — never the box's real one.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const sessionId = "01a08754-4154-7aa4-9f0c-d7687033f15d";
+    const slug = `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`;
+    const fileName = `2026-09-09T18-09-59-308Z_${sessionId}.jsonl`;
+    // The transcript sits under an ANCESTOR's config dir — the shape measured on
+    // devbox, and the one nothing on the child's own record names.
+    const strandedDir = path.join(
+      process.env.ACPX_HARNESS_CONFIG_DIR_ROOT ?? "",
+      "acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13",
+      "sessions",
+      slug,
+    );
+    await fs.mkdir(strandedDir, { recursive: true });
+    await fs.writeFile(path.join(strandedDir, fileName), '{"stranded":true}\n', "utf8");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-stranded-rescue",
+      acpSessionId: sessionId,
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    let loadCalls = 0;
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({ running: true }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        loadCalls += 1;
+        if (loadCalls === 1) {
+          throw {
+            error: {
+              code: -32602,
+              message: "Invalid params",
+              data: `Unknown sessionId: ${sessionId}`,
+            },
+          };
+        }
+        // The retry succeeds — the adapter now finds the JSONL in the box store.
+        return { agentSessionId: "runtime-session" };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called after a successful rescue");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    const result = await connectAndLoadSession({
+      client: client as never,
+      record,
+      timeoutMs: 1_000,
+      activeController: ACTIVE_CONTROLLER,
+    });
+
+    assert.equal(loadCalls, 2, "the rescue did not retry the load");
+    assert.equal(result.resumed, true, "the session was not resumed after the rescue");
+    // The file is in the box store, and the source still exists — COPY, not move.
+    assert.equal(
+      await fs.readFile(path.join(homeDir, ".pi", "agent", "sessions", slug, fileName), "utf8"),
+      '{"stranded":true}\n',
+    );
+    assert.equal(
+      await fs.readFile(path.join(strandedDir, fileName), "utf8"),
+      '{"stranded":true}\n',
+    );
+  });
+});
+
+test("cb214e48: a pi TIMEOUT is not annotated 'no pi session JSONL'", async () => {
+  // The suffix is a DIAGNOSIS, so it must only be attached to the failure it
+  // actually diagnoses. Annotating a transport fault would be a confident wrong
+  // answer — the same class of defect as the Claude paths this brick removes.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-transport-fault",
+      acpSessionId: "pi-timeout",
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({
+        running: true,
+        piSessionDir: path.join(homeDir, ".pi", "agent", "sessions", "--workspace--"),
+      }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        throw new Error("adapter pipe closed while loading");
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called for a session with real history");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    await assert.rejects(
+      async () =>
+        await connectAndLoadSession({
+          client: client as never,
+          record,
+          timeoutMs: 1_000,
+          activeController: ACTIVE_CONTROLLER,
+        }),
+      (error: unknown) => {
+        assert(error instanceof Error);
+        assert.match(error.message, /adapter pipe closed while loading/);
+        assert.doesNotMatch(error.message, /no pi session JSONL/);
+        return true;
+      },
+    );
   });
 });
 
@@ -1418,7 +1838,7 @@ test("connectAndLoadSession keeps a missing-transcript resume LOUD when a real t
     const record = makeSessionRecord({
       acpxRecordId: "real-plus-synthetic-record",
       acpSessionId: "history-session",
-      agentCommand: "agent",
+      agentCommand: AGENT_REGISTRY.claude,
       cwd,
       messages: [
         {

@@ -443,6 +443,15 @@ export type AgentLifecycleSnapshot = {
    * mode that ate `depth_projection` in the clone allowlist.
    */
   harnessConfigDir?: string;
+  /**
+   * The BOX-store session directory THIS spawn handed pi (brick://cb214e48).
+   *
+   * Rides the lifecycle snapshot for the identical reason as the field above: it
+   * is per-SPAWN, and every site that refreshes lifecycle state already runs at
+   * exactly the moments it is rewritten — as opposed to a hand-maintained list of
+   * call sites, which is the failure mode that ate `depth_projection`.
+   */
+  piSessionDir?: string;
   pid?: number;
   startedAt?: string;
   running: boolean;
@@ -766,6 +775,9 @@ export class AcpClient {
    * one afternoon), so remove-on-close alone would still leak.
    */
   private harnessConfigDir?: string;
+  /** The BOX-store session directory this spawn handed pi (brick://cb214e48).
+   *  Reported through the lifecycle snapshot onto `acpx.pi_session_dir`. */
+  private piSessionDir?: string;
   /** This client's claim on the shared config dir — released at close so the
    *  directory survives until the session's TERMINAL close (brick 4a6fdda0). */
   private harnessConfigHolderId?: string;
@@ -877,6 +889,7 @@ export class AcpClient {
         ? { ...this.latestProvisioningWarning }
         : undefined,
       harnessConfigDir: this.harnessConfigDir,
+      piSessionDir: this.piSessionDir,
       // `undefined` rather than `false` when unset: the write leg is truthy-gated
       // (like provisioningWarning), so a literal `false` here would be
       // indistinguishable from "not shim-served" while still being a value acpx
@@ -1160,6 +1173,7 @@ export class AcpClient {
         : {}),
     });
     this.harnessConfigDir = plan?.dir;
+    this.piSessionDir = plan?.sessionDir;
     this.harnessConfigHolderId = plan?.holderId;
     reportHarnessConfigDir(plan, this.options.verbose);
   }
@@ -2475,6 +2489,7 @@ export class AcpClient {
     // session's TERMINAL close.
     releaseHarnessConfigDir(this.harnessConfigDir, this.harnessConfigHolderId);
     this.harnessConfigDir = undefined;
+    this.piSessionDir = undefined;
     this.harnessConfigHolderId = undefined;
 
     await this.terminalManager.shutdown();

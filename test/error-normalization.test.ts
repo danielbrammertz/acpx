@@ -7,6 +7,7 @@ import {
   normalizeOutputError,
   isAcpQueryClosedBeforeResponseError,
   isAcpResourceNotFoundError,
+  formatAcpErrorMessage,
 } from "../src/acp/error-normalization.js";
 import {
   PermissionPromptUnavailableError,
@@ -337,4 +338,85 @@ test("isRetryablePromptError returns false for permanent -32601 (method not foun
 
 test("isRetryablePromptError returns false for non-ACP error", () => {
   assert.equal(isRetryablePromptError(new Error("process crash")), false);
+});
+
+// ============================================================================
+// brick://cb214e48 — pi-acp's `Unknown sessionId` rejection must keep classifying
+// as resource-not-found.
+//
+// ⚠️ TODAY THAT CLASSIFICATION RESTS ON A SINGLE LEG. pi-acp calls
+// `RequestError.invalidParams(\`Unknown sessionId: ${id}\`)`, and in the pinned SDK
+// the signature is `invalidParams(data?, additionalMessage?)` — so the human string
+// lands in `data` and `message` is the bare "Invalid params". The code -32602 is
+// NOT in RESOURCE_NOT_FOUND_ACP_CODES, so `hasSessionNotFoundHint(data)` is the
+// only thing holding the whole downstream branch up.
+//
+// The sibling pi-acp change adds `data.details` and repeats the wording in
+// `additionalMessage`, which puts it in `message` as well — so BOTH legs then hold.
+// These rows assert each leg ALONE, so dropping either one is caught, and pin the
+// WORDING: rewording it to e.g. "session not present" would silently reclassify the
+// error out of `isAcpResourceNotFoundError` and change the whole downstream branch.
+// ============================================================================
+
+test("cb214e48: Unknown-sessionId classifies as resource-not-found via the DATA leg alone", () => {
+  // The OLD pi-acp shape, measured verbatim on 73f2e39.
+  assert.equal(
+    isAcpResourceNotFoundError({
+      error: {
+        code: -32602,
+        message: "Invalid params",
+        data: "Unknown sessionId: 01a0875c-c60c-7e06-84de-6873ea4d3176",
+      },
+    }),
+    true,
+  );
+});
+
+test("cb214e48: Unknown-sessionId classifies via the MESSAGE leg alone", () => {
+  // The NEW shape's `additionalMessage` half, with a `data.details` that carries
+  // NO session-not-found wording of its own — so only `message` can classify it.
+  assert.equal(
+    isAcpResourceNotFoundError({
+      error: {
+        code: -32602,
+        message: "Invalid params: Unknown sessionId: 01a0875c-c60c-7e06-84de-6873ea4d3176",
+        data: { details: "no pi JSONL: searched /home/node/.pi/agent/sessions/--workspace--" },
+      },
+    }),
+    true,
+  );
+});
+
+test("cb214e48: the full NEW pi-acp shape classifies, and its details reach the message", () => {
+  const error = {
+    error: {
+      code: -32602,
+      message: "Invalid params: Unknown sessionId: pi-1",
+      data: {
+        details:
+          "no pi session JSONL for pi-1: searched /home/node/.pi/agent/sessions/--workspace--; session map /tmp/acpx-pi-x/pi-acp/session-map.json",
+      },
+    },
+  };
+  assert.equal(isAcpResourceNotFoundError(error), true);
+  // `formatAcpErrorMessage` is the composition the resume path needs: `message`
+  // alone would show the user "Invalid params" and DROP the diagnosis.
+  const formatted = formatAcpErrorMessage(error);
+  assert.match(formatted, /Unknown sessionId: pi-1/);
+  assert.match(formatted, /session map \/tmp\/acpx-pi-x\/pi-acp\/session-map\.json/);
+});
+
+test("cb214e48 ⚠️ CARRIER: rewording 'Unknown sessionId' DE-classifies the error", () => {
+  // ⚠️ DO NOT "IMPROVE" pi-acp's wording to e.g. "session not present". It reads
+  // like a clearer sentence and it silently changes acpx's control flow: the error
+  // stops being resource-not-found, so the resume path stops recovering and stops
+  // falling back. This row is the executable half of that warning — it goes red on
+  // any wording that no longer matches `isSessionNotFoundText`.
+  assert.equal(
+    isAcpResourceNotFoundError({
+      error: { code: -32602, message: "Invalid params: session not present: pi-1" },
+    }),
+    false,
+    "a reworded rejection now classifies — this row's whole purpose is that it does not",
+  );
 });

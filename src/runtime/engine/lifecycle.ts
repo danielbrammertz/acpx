@@ -18,7 +18,9 @@ export function applyLifecycleSnapshotToRecord(
   // The config-dir CHANNEL, refreshed at every spawn/reconnect (brick fa2e54ec).
   // See AgentLifecycleSnapshot.harnessConfigDir for why it must not be written
   // once at create.
-  setHarnessConfigDir(record, snapshot.harnessConfigDir);
+  // brick://cb214e48 — `piSessionDir` rides the SAME snapshot for the same reason,
+  // so a new spawn site cannot record one and forget the other.
+  setHarnessConfigDir(record, snapshot.harnessConfigDir, snapshot.piSessionDir);
   if (snapshot.provisioningWarning) {
     const acpx = record.acpx ?? {};
     const sessionOptions = { ...acpx.session_options };
