@@ -14,7 +14,8 @@ import {
   injectionReturnsTerminalResponse,
 } from "../../acp/mid-turn-injection-support.js";
 import { assertRequestedModelSupported } from "../../acp/model-support.js";
-import { explainTurnError } from "../../acp/openrouter-refusal-reason.js";
+import { explainTurnError, type RefusalProbeDeps } from "../../acp/openrouter-refusal-reason.js";
+import { explainPiTurnError } from "../../acp/pi-turn-error.js";
 import { InterruptedError, withInterrupt, withTimeout } from "../../async-control.js";
 import { tailClaudeSubagentJsonl } from "../../claude-jsonl.js";
 import { transcriptCwdHash } from "../../config/subscription-transcript.js";
@@ -348,6 +349,66 @@ function deliveryPhaseForStopReason(
   stopReason: RunPromptResult["stopReason"],
 ): Exclude<DeliveryPhase, "accepted"> {
   return stopReason === "cancelled" ? "cancelled" : "done";
+}
+
+/**
+ * The failure note the delivery terminal carries, or `undefined` for a turn that
+ * did not fail.
+ *
+ * Two rules, and neither is tidiness:
+ *
+ *  - **A cancelled turn reports nothing** (brick 4ec33f59). `buildDeliveryEvent`
+ *    substitutes `EMPTY_DELIVERY_ERROR` whenever `error` is absent, and acpx-ui
+ *    treats a NON-EMPTY message as the failure note — so widening this would
+ *    stamp "the turn reported an error" onto successful turns app-wide.
+ *  - **An unexplained error passes through UNCHANGED** (brick 0095b715). A
+ *    token-ceiling refusal reaches the user as the raw provider payload — JSON
+ *    inside JSON, newlines escaped, naming no model — so it reads as "acpx is
+ *    broken" rather than "this one model cannot serve a turn".
+ *    `explainPiTurnError` authors acpx's own account of the causes it actually
+ *    understands and keeps the provider's text verbatim beneath it; for anything
+ *    else it returns `undefined` and the adapter's own wording survives, because
+ *    burying it under acpx boilerplate is the same harm in the other direction.
+ */
+export async function turnErrorForDeliveryTerminal(
+  terminalStopReason: RunPromptResult["stopReason"],
+  turnError: string | undefined,
+  currentModelId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  deps: RefusalProbeDeps = {},
+): Promise<string | undefined> {
+  if (terminalStopReason === "cancelled" || turnError === undefined) {
+    return undefined;
+  }
+  // 🔑 FIRST CHECK WINS — Daniel's ruling, 2026-09-09:
+  //   "My feeling is that those two error cases are mutually exclusive, so I don't
+  //    see the judgment call here anyway. If you think that there is a way that
+  //    somehow both can be true — that we have a rate limit error and also are above
+  //    the output token limit — then let's do whatever we have checked first and this
+  //    error is being outputted."
+  // So the two explanations are NOT composed and there is no precedence design to
+  // maintain: whichever check runs first and CLAIMS the error produces the message.
+  //
+  // ⚠️ NEITHER EXPLANATION MAY BE DROPPED — that is the failure mode this seam
+  // invites. Both arrived here as a merge conflict (0095b715 vs bb23a7fa) and a
+  // resolver that takes one side wholesale silently deletes a user-facing message
+  // Daniel asked for by name: "the underlying message must be visible after the last
+  // retry failed". `test/pi-max-tokens-cap.test.ts` fails if EITHER stops arriving.
+  //
+  // Measured, they cannot both match: a ceiling refusal is a 400 quoting two token
+  // numbers, while `looksLikeSilentStall` fires only on "timed out"/"timeout". The
+  // ordering below is therefore a tie-break that no observed input reaches — which is
+  // exactly why it is written down rather than left to whichever call sat first.
+  const ceilingExplanation = explainPiTurnError(turnError, currentModelId);
+  if (ceilingExplanation !== undefined) {
+    return ceilingExplanation;
+  }
+  // Not a ceiling refusal, so the rate-limit explainer gets its turn. It is TOTAL on
+  // strings — it returns `turnError` unchanged when it has nothing better — so an
+  // error neither one recognises still reaches the user as the adapter worded it,
+  // which is the only account of the failure anyone gets. It probes the network only
+  // when `looksLikeSilentStall` matches, so the pass-through costs nothing.
+  return await explainTurnError(turnError, currentModelId, env, deps);
 }
 
 /**
@@ -2881,30 +2942,16 @@ async function runSessionPrompt(options: RunSessionPromptOptions): Promise<Sessi
         // guard looks like defensive clutter; the reason lives in acpx-ui, whose
         // control `4ec33f59 CONTROL: a clean 'done' invents no note` goes red the
         // moment this widens. The acpx-side control below pins the same property.
-        const rawTurnErrorForTerminal =
-          terminalStopReason === "cancelled" ? undefined : response.turnError;
-        // bricks bb23a7fa / 5aacdba2 — say whose fault it was. pi reports a cut
-        // stream as "Request timed out.", a statement about US, when the measured
-        // cause is OpenRouter refusing us on a SHARED rate-limit pool and saying so
-        // in a 429 that the STREAMING endpoint never delivers. One cheap
-        // non-streaming probe recovers the provider's own sentence.
-        //
-        // ⚠️ IT ONLY EVER REWORDS AN ERROR THAT ALREADY EXISTS. The guard above is
-        // untouched: `undefined` stays `undefined`, so a clean `done` still invents
-        // no note and the acpx-ui control `4ec33f59 CONTROL` stays green. This is
-        // total on strings — it decides WHAT to say, never WHETHER to report.
-        //
-        // ⚠️ AND IT IS DELIBERATELY NOT A DECISION INPUT: measured sensitivity is
-        // 50% with a 14% false-positive rate, so it is unusable for retry/abandon
-        // and fine for prose. See `openrouter-refusal-reason.ts`.
-        const turnErrorForTerminal =
-          rawTurnErrorForTerminal === undefined
-            ? undefined
-            : await explainTurnError(
-                rawTurnErrorForTerminal,
-                record.acpx?.current_model_id,
-                process.env,
-              );
+        // TWO explainers meet at this seam — the token-CEILING one (0095b715) and
+        // the RATE-LIMIT one (bb23a7fa / 5aacdba2). Both must still reach the user;
+        // the precedence between them lives in `turnErrorForDeliveryTerminal`, so
+        // that it is one testable function rather than a rule spelled out here.
+        const turnErrorForTerminal = await turnErrorForDeliveryTerminal(
+          terminalStopReason,
+          response.turnError,
+          record.acpx?.current_model_id,
+          process.env,
+        );
         await appendDeliveryTerminal(
           mainDeliveryContext,
           deliveryPhaseForStopReason(terminalStopReason),
