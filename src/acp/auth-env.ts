@@ -595,6 +595,41 @@ function buildAgentEnvironment(
   delete env[ACPX_EFFECTIVE_ADAPTER_ENV];
   delete env[ACPX_EFFECTIVE_AUTH_MODE_ENV];
   delete env[ACPX_EFFECTIVE_ANCHOR_ENV];
+  // brick://1820be37 — and CLAUDE_CONFIG_DIR with them, which is the OPERATIVE
+  // one. The six above are descriptive: they mislead a reader about which
+  // account a session used. This one POINTS AT THE CREDENTIALS — measured on
+  // devbox, a pi child of a claude parent inherited
+  // `CLAUDE_CONFIG_DIR=/home/node/.acpx/subscriptions/sub7`, a directory holding
+  // that subscription's `.credentials.json`, for a session authenticated by an
+  // OpenRouter box key that never touched the account.
+  //
+  // ⚠️ NOT a privilege escalation, and it should not be described as one: every
+  // agent on a box runs as the same uid and the path is conventional, so the
+  // variable grants no access the process did not already have. It is a SCOPING
+  // defect — and it is one acpx already legislated against elsewhere and never
+  // generalised here: `applyChatGptProfileAuth` deletes exactly this variable,
+  // its comment reading *"the bridge strips leaked SDK env defensively, but acpx
+  // must not emit it"*, and `applyClaudeHomeProfileAuth` does the same.
+  //
+  // Safe to clear for the same reason as the six above — every legitimate value
+  // is written after this point, `applySubscriptionConfigDir` (sync) or
+  // `applyProfileAuth` (async, before the adapter spawns). Measured before
+  // changing it: 1456 of 1458 claude sessions on devbox carry a profile or
+  // subscription, so default-account-binding really does bind before spawn as
+  // the branch below claims; the 2 unbound are closed OpenRouter-model sessions
+  // that never used a Claude account at all.
+  //
+  // It also makes claude-pty match its own documentation. The branch below says
+  // a claude-pty session gets "no CLAUDE_CONFIG_DIR" because the bridge owns
+  // auth via its HOME selector — but it never cleared the INHERITED one, so a
+  // claude-pty child of a subscription-bound parent silently received one.
+  //
+  // The `CLAUDE_CODE_*` family (CLAUDECODE, CLAUDE_CODE_MESSAGING_SOCKET/TOKEN,
+  // CLAUDE_CODE_EXECPATH …) leaks the same way and is DELIBERATELY LEFT ALONE:
+  // acpx does not emit those — it inherits them from a parent Claude Code SDK
+  // process — and some are plausibly load-bearing for a claude child. Stripping
+  // them is a separate, larger question than this one.
+  delete env.CLAUDE_CONFIG_DIR;
   applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {

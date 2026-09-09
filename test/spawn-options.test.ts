@@ -1319,8 +1319,11 @@ function withPoisonedAccountStamp(run: () => void): void {
     run();
   } finally {
     for (const [key, value] of previous) {
-      if (value === undefined) {delete process.env[key];}
-      else {process.env[key] = value;}
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
     }
   }
 }
@@ -1367,6 +1370,81 @@ test("buildAgentSpawnOptions still stamps the account for a session that HAS a s
         assert.equal(options.env.ACPX_EFFECTIVE_PROFILE, "sub1");
         assert.equal(options.env.ACPX_EFFECTIVE_ADAPTER, "claude");
         assert.equal(options.env.ACPX_AGENT_TYPE, "claude");
+      });
+    },
+  );
+});
+
+// --- CLAUDE_CONFIG_DIR leak (brick://1820be37) ------------------------------
+// The OPERATIVE half of the account-stamp leak: this variable points at a
+// subscription's real credential directory. Measured on devbox, a pi child of a
+// claude parent inherited it. Not a privilege escalation (same uid, conventional
+// path) but a scoping defect acpx already legislates against in the profile
+// paths and never generalised to the shared env builder.
+
+const POISON_CONFIG_DIR = "/home/node/.acpx/subscriptions/sub7";
+
+function withPoisonedConfigDir(run: () => void): void {
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = POISON_CONFIG_DIR;
+  try {
+    run();
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+}
+
+test("buildAgentSpawnOptions does not leak CLAUDE_CONFIG_DIR into a non-claude child", () => {
+  withPoisonedConfigDir(() => {
+    const options = buildAgentSpawnOptions(
+      "/tmp/acpx-agent",
+      undefined,
+      { acpxRecordId: "11111111-2222-3333-4444-555555555555" },
+      undefined,
+      "node /opt/pi-acp/dist/index.js",
+    );
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(options.env, "CLAUDE_CONFIG_DIR"),
+      false,
+      "a pi session must not receive a pointer into a Claude subscription's credential dir",
+    );
+  });
+});
+
+test("buildAgentSpawnOptions does not leak CLAUDE_CONFIG_DIR into a claude-pty child", () => {
+  // The subscription branch documents claude-pty as getting "no CLAUDE_CONFIG_DIR"
+  // (the bridge owns auth via its HOME selector) — but it never cleared an
+  // INHERITED one, so the code contradicted its own comment.
+  withPoisonedConfigDir(() => {
+    const options = buildAgentSpawnOptions(
+      "/tmp/acpx-agent",
+      undefined,
+      { acpxRecordId: "11111111-2222-3333-4444-555555555555" },
+      undefined,
+      "node /opt/claude-pty-acp/dist/index.js",
+    );
+    assert.equal(Object.prototype.hasOwnProperty.call(options.env, "CLAUDE_CONFIG_DIR"), false);
+  });
+});
+
+test("buildAgentSpawnOptions still resolves CLAUDE_CONFIG_DIR for a subscription-bound claude child", async () => {
+  resetKnownDeadSubs();
+  await withSubscriptionsHome(
+    { registry: TWO_SUB_REGISTRY, existingDirs: ["sub1", "sub2"] },
+    async (ctx) => {
+      // Poisoned with a FOREIGN dir throughout: the assertion fails if the value
+      // survived from the environment, and equally if nothing re-derived it.
+      withPoisonedConfigDir(() => {
+        const options = buildAgentSpawnOptions(
+          "/tmp/acpx-agent",
+          undefined,
+          { acpxRecordId: "rec", subscriptionId: "sub1" },
+          ctx.lookupOptions,
+          "node /opt/claude-agent-acp/dist/index.js",
+        );
+        assert.equal(options.env.CLAUDE_CONFIG_DIR, ctx.configDir("sub1"));
+        assert.notEqual(options.env.CLAUDE_CONFIG_DIR, POISON_CONFIG_DIR);
       });
     },
   );
