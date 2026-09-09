@@ -122,7 +122,7 @@ import {
   waitForSpawn,
 } from "./client-process.js";
 import { isCodexAcpCommand } from "./codex-compat.js";
-import { extractAcpError } from "./error-shapes.js";
+import { extractAcpError, formatAcpErrorMessage } from "./error-shapes.js";
 import {
   HARNESS_FACTS,
   harnessIdForAgentCommand,
@@ -130,8 +130,11 @@ import {
 } from "./harness-capabilities.js";
 import {
   applyHarnessConfigDir,
+  describePiExtensionSeedFailure,
   releaseHarnessConfigDir,
   reportHarnessConfigDir,
+  type HarnessConfigDirPlan,
+  type SeededPiExtension,
 } from "./harness-config-dir.js";
 import {
   avoidBidirectionalJsonRpcIdCollisions,
@@ -781,6 +784,9 @@ export class AcpClient {
   /** This client's claim on the shared config dir — released at close so the
    *  directory survives until the session's TERMINAL close (brick 4a6fdda0). */
   private harnessConfigHolderId?: string;
+  /** The pi extensions this spawn copied in, source→target, so a `session/new`
+   *  that names one can be traced back to the box file (brick 074a1bd9). */
+  private seededPiExtensions?: SeededPiExtension[];
   /**
    * The most recent config-option advertisement this client has seen — from
    * `session/new`, `session/load`, `session/resume`, or a
@@ -1172,10 +1178,24 @@ export class AcpClient {
         ? { provisionModelId: this.options.sessionOptions?.model }
         : {}),
     });
+    this.adoptHarnessConfigDirPlan(plan);
+    reportHarnessConfigDir(plan, this.options.verbose);
+  }
+
+  /**
+   * Take this spawn's per-spawn config-dir state off the plan, in ONE place.
+   *
+   * Extracted from {@link applyHarnessConfigDirEnv} because every field here is an
+   * optional read, so each one costs a branch against that method's complexity
+   * budget — adding the fourth broke the build. Keeping the set together also
+   * means a future field lands beside its siblings instead of somewhere the next
+   * spawn path forgets to copy it.
+   */
+  private adoptHarnessConfigDirPlan(plan: HarnessConfigDirPlan | undefined): void {
     this.harnessConfigDir = plan?.dir;
     this.piSessionDir = plan?.sessionDir;
     this.harnessConfigHolderId = plan?.holderId;
-    reportHarnessConfigDir(plan, this.options.verbose);
+    this.seededPiExtensions = plan?.piExtensions;
   }
 
   /**
@@ -1690,7 +1710,7 @@ export class AcpClient {
           retryable: true,
         });
       }
-      throw error;
+      throw this.explainPiExtensionSeedFailure(error);
     }
 
     this.loadedSessionId = result.sessionId;
@@ -1698,6 +1718,29 @@ export class AcpClient {
     const created = toCreateSessionResult(result);
     this.rememberConfigOptions(created.configOptions);
     return created;
+  }
+
+  /**
+   * A `session/new` failure that names a pi extension acpx seeded gets the one
+   * thing the adapter cannot know: that acpx put that file there, which box file
+   * it came from, and the switch that stops it (brick 074a1bd9).
+   *
+   * ⚠️ WRAPPED WITH `cause`, NOT REPLACED. `extractAcpError` walks `error` / `acp`
+   * / `cause`, so every downstream classification — the ACP code, `data.details`,
+   * resource-not-found and auth detection — still resolves through the wrapper.
+   * Building a fresh error WITHOUT the cause link would strip the payload and turn
+   * a diagnosis into a regression.
+   *
+   * Anything not naming a seeded extension is returned UNTOUCHED: this must be
+   * invisible on every other failure.
+   */
+  private explainPiExtensionSeedFailure(error: unknown): unknown {
+    const base = formatAcpErrorMessage(error);
+    const hint = describePiExtensionSeedFailure(base, this.seededPiExtensions);
+    if (!hint) {
+      return error;
+    }
+    return new Error(`${base}\n\n[acpx] ${hint}`, { cause: error });
   }
 
   /**

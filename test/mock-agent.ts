@@ -47,6 +47,8 @@ type ParsedCommand = {
 
 type MockAgentOptions = {
   hangOnNewSession: boolean;
+  /** brick 074a1bd9 — fail `session/new` the way a pi-acp with a dead pi does. */
+  failNewSessionOnSeededExtension: boolean;
   newSessionMeta?: Record<string, string>;
   loadSessionMeta?: Record<string, string>;
   resumeSessionMeta?: Record<string, string>;
@@ -410,6 +412,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
   let loadReplayText = "replayed load session update";
   let ignoreSigterm = false;
   let hangOnNewSession = false;
+  let failNewSessionOnSeededExtension = false;
   let envDumpFile: string | undefined;
   let envDumpExtra: string[] | undefined;
   let operationLogFile: string | undefined;
@@ -535,6 +538,11 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
       continue;
     }
 
+    if (token === "--fail-new-session-on-seeded-extension") {
+      failNewSessionOnSeededExtension = true;
+      continue;
+    }
+
     if (token === "--env-dump-file") {
       envDumpFile = parseOptionValue(argv, index + 1, token);
       index += 1;
@@ -601,6 +609,7 @@ function parseMockAgentOptions(argv: string[]): MockAgentOptions {
 
   return {
     hangOnNewSession,
+    failNewSessionOnSeededExtension,
     newSessionMeta: Object.keys(newSessionMeta).length > 0 ? { ...newSessionMeta } : undefined,
     loadSessionMeta: Object.keys(loadSessionMeta).length > 0 ? { ...loadSessionMeta } : undefined,
     resumeSessionMeta:
@@ -900,6 +909,24 @@ class MockAgent implements Agent {
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     if (this.options.hangOnNewSession) {
       return await new Promise<NewSessionResponse>(() => {});
+    }
+
+    if (this.options.failNewSessionOnSeededExtension) {
+      // brick 074a1bd9 — stand in for a pi-acp whose pi died on an extension it
+      // could not load. The path is DISCOVERED from `PI_CODING_AGENT_DIR`, which
+      // acpx set on this spawn, exactly as pi would report the copy it actually
+      // read: a hardcoded path could not exercise the mapping back to the box
+      // source, because acpx generates the provisioned directory at runtime.
+      const { readdirSync } = await import("node:fs");
+      const extDir = path.join(process.env.PI_CODING_AGENT_DIR ?? "", "extensions");
+      const named = readdirSync(extDir).toSorted()[0];
+      const target = path.join(extDir, named);
+      throw RequestError.internalError(
+        {},
+        `Could not start pi: it exited during startup (code=1). pi reported:\n` +
+          `Error: Failed to load extension "${target}": Extension does not export a valid factory function: ${target}\n` +
+          `Hint: Start without extensions using "pi -ne".`,
+      );
     }
 
     const sessionId = randomUUID();

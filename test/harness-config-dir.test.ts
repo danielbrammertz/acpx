@@ -19,6 +19,7 @@ import {
 } from "../src/acp/harness-capabilities.js";
 import {
   applyHarnessConfigDir,
+  describePiExtensionSeedFailure,
   pruneOrphanHarnessConfigDirs,
   removeHarnessConfigDir,
   rescueStrandedPiTranscriptForResume,
@@ -238,6 +239,24 @@ test("pi gets PI_CODING_AGENT_DIR and an APPEND_SYSTEM.md primer", () => {
 // dir must reach an acpx-spawned pi session WITHOUT per-session planting.
 
 /**
+ * The file-extension fixture's contents.
+ *
+ * ⚠️ IT MUST EXPORT A DEFAULT, AND THE MARKER ALONE IS NOT ENOUGH (brick 074a1bd9).
+ * This fixture was `"// FILE-EXTENSION-MARKER\n"` — a comment-only module — which
+ * is not merely unrepresentative of a real extension, it is the exact shape that
+ * KILLS a live pi session: pi 0.84.4 refuses to start on a module with no default
+ * export (`Extension does not export a valid factory function`, exit 1), and every
+ * `acpx pi sessions new` on such a box failed. These rows stayed green through all
+ * of it because they stop at the copy and never start a pi. A fixture that models
+ * "a box deploy" must model one pi can actually LOAD; the non-loadable shape now
+ * has a row of its own that says so out loud.
+ */
+const LOADABLE_EXTENSION_SOURCE = "// FILE-EXTENSION-MARKER\nexport default () => {}\n";
+
+/** The measured killer: a module pi cannot load, because it exports no default. */
+const NON_LOADABLE_EXTENSION_SOURCE = "export const notAFactory = 1\n";
+
+/**
  * Fixture: a box HOME whose `.pi/agent/extensions/` holds exactly what a box
  * deploy would (a file extension, a subdir-with-index extension, and junk that
  * pi would NOT load). Returns the HOME path.
@@ -246,7 +265,7 @@ function withBoxExtensions(root: string): string {
   const boxHome = join(root, "box-home");
   const extDir = join(boxHome, ".pi", "agent", "extensions");
   mkdirSync(extDir, { recursive: true });
-  writeFileSync(join(extDir, "pi-full-output.js"), "// FILE-EXTENSION-MARKER\n");
+  writeFileSync(join(extDir, "pi-full-output.js"), LOADABLE_EXTENSION_SOURCE);
   mkdirSync(join(extDir, "pkg-ext"), { recursive: true });
   writeFileSync(join(extDir, "pkg-ext", "index.ts"), "export default () => {}\n");
   mkdirSync(join(extDir, "not-an-extension"), { recursive: true }); // no index, no pi pkg
@@ -276,7 +295,7 @@ test("pi provisioning seeds extensions/ from the box-level dir WITHOUT planting"
     // The file extension arrived byte-for-byte.
     assert.equal(
       readFileSync(join(seeded, "pi-full-output.js"), "utf8"),
-      "// FILE-EXTENSION-MARKER\n",
+      LOADABLE_EXTENSION_SOURCE,
     );
     // The subdir extension arrived recursively; non-extensions did not.
     assert.ok(existsSync(join(seeded, "pkg-ext", "index.ts")), "subdir extension not seeded");
@@ -439,6 +458,110 @@ test("pi extension seeding snapshots — edits to the box dir after provisioning
     // Post-provision box edits must NOT appear in the running session's dir.
     writeFileSync(join(boxHome, ".pi", "agent", "extensions", "late.js"), "// LATE\n");
     assert.equal(existsSync(join(seeded, "late.js")), false, "seed is not a snapshot");
+  });
+});
+
+// ── brick 074a1bd9: a box extension pi CANNOT LOAD took down every
+// `acpx pi sessions new` with `Cannot call write after a stream was destroyed`.
+// Seeding cannot vet loadability (see seedPiExtensions' own note), so the bar is
+// that the failure names the file and the way out.
+
+test("074a1bd9: a NON-LOADABLE box extension is still seeded — and RECORDED with its box source", () => {
+  // Deliberately still seeded: acpx copies by pi's DISCOVERY grammar and does not
+  // judge loadability. What changes is that the pair is recorded, which is the
+  // only reason the failure can later be traced back to a file the operator owns.
+  withTempRoot((root) => {
+    const boxHome = join(root, "broken-home");
+    const extDir = join(boxHome, ".pi", "agent", "extensions");
+    mkdirSync(extDir, { recursive: true });
+    writeFileSync(join(extDir, "half-written.js"), NON_LOADABLE_EXTENSION_SOURCE);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_broken",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(plan);
+    const target = join(env.PI_CODING_AGENT_DIR!, "extensions", "half-written.js");
+    assert.equal(existsSync(target), true, "the entry was not seeded");
+    assert.deepEqual(plan.piExtensions, [{ source: join(extDir, "half-written.js"), target }]);
+  });
+});
+
+test("074a1bd9: a failure naming a seeded extension is traced to the BOX file and the kill-switch", () => {
+  withTempRoot((root) => {
+    const boxHome = join(root, "broken-home-2");
+    const extDir = join(boxHome, ".pi", "agent", "extensions");
+    mkdirSync(extDir, { recursive: true });
+    writeFileSync(join(extDir, "half-written.js"), NON_LOADABLE_EXTENSION_SOURCE);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_broken_msg",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(plan?.piExtensions?.length);
+
+    // pi 0.84.4's measured wording for exactly this file, naming the path IT read
+    // — the acpx-provisioned copy, which is all pi can possibly know about.
+    const target = plan.piExtensions[0].target;
+    const piSaid =
+      `Could not start pi: it exited during startup (code=1). pi reported:\n` +
+      `Error: Failed to load extension "${target}": Extension does not export a valid factory function: ${target}\n` +
+      `Hint: Start without extensions using "pi -ne".`;
+
+    const hint = describePiExtensionSeedFailure(piSaid, plan.piExtensions);
+    assert.ok(hint, "a failure naming a seeded extension produced no diagnosis");
+    assert.ok(hint.includes(join(extDir, "half-written.js")), `no box source in: ${hint}`);
+    assert.ok(hint.includes("ACPX_PI_EXTENSIONS_SEED=off"), `no kill-switch in: ${hint}`);
+  });
+});
+
+test("074a1bd9: an unrelated failure gets NO extension diagnosis — the two-sided control", () => {
+  // Without this row a `describePiExtensionSeedFailure` that returned the hint
+  // unconditionally would pass the row above and bolt an irrelevant extension
+  // story onto every auth failure, timeout and network error.
+  withTempRoot((root) => {
+    const boxHome = withBoxExtensions(root);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_unrelated",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.ok(plan?.piExtensions?.length, "control: nothing was seeded, so this proves nothing");
+    assert.equal(
+      describePiExtensionSeedFailure("Authentication required: missing key", plan.piExtensions),
+      undefined,
+    );
+  });
+});
+
+test("074a1bd9: with seeding OFF there is nothing to blame — no diagnosis, whatever the text", () => {
+  withTempRoot((root) => {
+    const boxHome = withBoxExtensions(root);
+    const env: NodeJS.ProcessEnv = { HOME: boxHome, ACPX_PI_EXTENSIONS_SEED: "off" };
+    const plan = applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_offdiag",
+      primer: "P",
+      rootDir: root,
+    });
+    assert.deepEqual(plan?.piExtensions, []);
+    assert.equal(
+      describePiExtensionSeedFailure(
+        'Error: Failed to load extension "/anything/at/all.js"',
+        plan?.piExtensions,
+      ),
+      undefined,
+    );
   });
 });
 
