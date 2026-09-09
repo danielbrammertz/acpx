@@ -320,29 +320,106 @@ test("pi extension seeding opt-out: ACPX_PI_EXTENSIONS_SEED=off seeds nothing", 
   });
 });
 
-test("pi extension seeding: a nested spawn inherits the PARENT's extensions", () => {
-  // Source resolution mirrors pi's getAgentDir(): an incoming PI_CODING_AGENT_DIR
-  // (here, a parent session's provisioned dir) is the source, NOT <HOME> — so
-  // what the parent sees, the child sees.
+// ⚠️ THE ROW THAT STOOD HERE ASSERTED THE DEFECT (brick://f24f6644). It was
+// "a nested spawn inherits the PARENT's extensions", and its comment called an
+// incoming `PI_CODING_AGENT_DIR` the source "so what the parent sees, the child
+// sees". A parent session's provisioned dir is a THROWAWAY — removed at the
+// parent's terminal close and by the orphan sweep — so that chain seeds a child
+// from a directory that is about to disappear, and from whatever the parent
+// happened to be seeded with rather than from the box. The three rows below
+// replace it: refuse a per-session dir, honour a real box relocation, honour the
+// explicit override. The middle one is what the old row was actually worth.
+
+test("pi extension seeding: an inherited acpx PER-SESSION dir is NOT the source", () => {
   withTempRoot((root) => {
-    const parentDir = join(root, "parent-dir");
+    const boxHome = withBoxExtensions(root);
+    // The production shape: a pi child of a pi parent inherits the parent's
+    // provisioned dir, `acpx-pi-<id>` — named by the same scheme this module
+    // composes, because that name is exactly what the refusal keys on.
+    const parentDir = join(root, "acpx-pi-01a08859-0303-7ce0-8d40-cf15cf90dbdf");
     mkdirSync(join(parentDir, "extensions"), { recursive: true });
-    writeFileSync(join(parentDir, "extensions", "inherited.js"), "// PARENT-SEEN\n");
+    writeFileSync(join(parentDir, "extensions", "parent-only.js"), "export default () => {}\n");
+    const env: NodeJS.ProcessEnv = { HOME: boxHome, PI_CODING_AGENT_DIR: parentDir };
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_nested",
+      primer: "P",
+      rootDir: root,
+    });
+    const seeded = join(env.PI_CODING_AGENT_DIR!, "extensions");
+    // The BOX dir was the source …
+    assert.equal(
+      readFileSync(join(seeded, "pi-full-output.js"), "utf8"),
+      "// FILE-EXTENSION-MARKER\n",
+      "the box extensions dir was not the source",
+    );
+    // … and nothing came from the parent's throwaway dir.
+    assert.equal(
+      existsSync(join(seeded, "parent-only.js")),
+      false,
+      "seeded from the PARENT's per-session dir — that dir dies at the parent's close",
+    );
+  });
+});
+
+test("pi extension seeding: a REAL box-level PI_CODING_AGENT_DIR is still honoured", () => {
+  // The refusal above is name-based, not a blanket ignore: a box that
+  // legitimately relocates pi's agent dir must keep reaching its extensions.
+  withTempRoot((root) => {
+    const boxAgentDir = join(root, "opt-pi-agent");
+    mkdirSync(join(boxAgentDir, "extensions"), { recursive: true });
+    writeFileSync(join(boxAgentDir, "extensions", "relocated.js"), "export default () => {}\n");
     const env: NodeJS.ProcessEnv = {
       HOME: join(root, "home-without-extensions"),
-      PI_CODING_AGENT_DIR: parentDir,
+      PI_CODING_AGENT_DIR: boxAgentDir,
     };
     mkdirSync(env.HOME!, { recursive: true });
     applyHarnessConfigDir({
       env,
       agentCommand: AGENT_REGISTRY.pi,
-      sessionId: "ses_child",
+      sessionId: "ses_relocated",
       primer: "P",
       rootDir: root,
     });
     assert.equal(
-      readFileSync(join(env.PI_CODING_AGENT_DIR!, "extensions", "inherited.js"), "utf8"),
-      "// PARENT-SEEN\n",
+      readFileSync(join(env.PI_CODING_AGENT_DIR!, "extensions", "relocated.js"), "utf8"),
+      "export default () => {}\n",
+    );
+  });
+});
+
+test("pi extension seeding: ACPX_PI_BOX_AGENT_DIR wins over an inherited one", () => {
+  // The leg a LIVE probe can see on the pre-fix build (brick://f24f6644): the
+  // spawn-env scrub in auth-env.ts already deletes an inherited PER-SESSION
+  // value, so the row above cannot fail end-to-end today — but the override was
+  // ignored by this channel alone while every other pi consumer honoured it.
+  withTempRoot((root) => {
+    const override = join(root, "override-agent");
+    mkdirSync(join(override, "extensions"), { recursive: true });
+    writeFileSync(join(override, "extensions", "from-override.js"), "export default () => {}\n");
+    const inherited = join(root, "inherited-agent");
+    mkdirSync(join(inherited, "extensions"), { recursive: true });
+    writeFileSync(join(inherited, "extensions", "from-inherited.js"), "export default () => {}\n");
+    const env: NodeJS.ProcessEnv = {
+      HOME: join(root, "home-without-extensions"),
+      ACPX_PI_BOX_AGENT_DIR: override,
+      PI_CODING_AGENT_DIR: inherited,
+    };
+    mkdirSync(env.HOME!, { recursive: true });
+    applyHarnessConfigDir({
+      env,
+      agentCommand: AGENT_REGISTRY.pi,
+      sessionId: "ses_override",
+      primer: "P",
+      rootDir: root,
+    });
+    const seeded = join(env.PI_CODING_AGENT_DIR!, "extensions");
+    assert.ok(existsSync(join(seeded, "from-override.js")), "the box override was not the source");
+    assert.equal(
+      existsSync(join(seeded, "from-inherited.js")),
+      false,
+      "seeded from PI_CODING_AGENT_DIR while an explicit box override was set",
     );
   });
 });
