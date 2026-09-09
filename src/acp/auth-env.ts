@@ -508,11 +508,17 @@ export type AgentSessionContext = {
  * needs to reason about its own spawns. Measured on the deployed build, the
  * environment of a live pi session named its box, its session, its parent and
  * its brick, but nothing named its harness — so the only cross-harness
- * self-identification an agent had was inference. `ACPX_EFFECTIVE_ADAPTER` is
- * NOT that signal and must not be mistaken for it: it is stamped by
- * `stampEffectiveAccount` on the Claude-credential path and is absent from an
- * OpenRouter-auth pi session (verified against a live adapter's /proc environ) —
- * a discriminator that only exists for one harness cannot identify the others.
+ * self-identification an agent had was inference.
+ *
+ * `ACPX_EFFECTIVE_ADAPTER` is NOT that signal and must not be mistaken for it.
+ * It is stamped by `stampEffectiveAccount` on the Claude-credential path and
+ * names the AUTH adapter, not the harness. Measured against live pi adapters'
+ * /proc environs it fails in BOTH directions: **absent** in a pi session
+ * spawned from the UI, and **present, reading `claude`**, in a pi session
+ * spawned by a claude parent — it is not cleared below, so it survives the
+ * `{...process.env}` copy. A variable that looks authoritative, is right for
+ * one harness, and is either missing or confidently wrong for the rest. (That
+ * leak is a separate defect and is deliberately NOT fixed here.)
  *
  * The value is the {@link HarnessId} for `agentCommand`, resolved through the
  * single adapter classifier. This is deliberately NOT a second classifier and
