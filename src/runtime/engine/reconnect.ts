@@ -12,6 +12,7 @@ import {
   depthMechanismForAgentCommand,
   harnessIdForAgentCommand,
 } from "../../acp/harness-capabilities.js";
+import { rescueStrandedPiTranscriptForResume } from "../../acp/harness-config-dir.js";
 import { RequestedModelUnsupportedError } from "../../acp/model-support.js";
 import { InterruptedError, TimeoutError, withTimeout } from "../../async-control.js";
 import { findProfile, loadProfileRegistry, transcriptAnchorDir } from "../../config/profiles.js";
@@ -878,7 +879,10 @@ async function recoverMissingTranscriptAndRetry(
   // already answers *"can a Claude SDK transcript exist for this session?"*, which
   // is precisely what this call site is implicitly asking.
   if (!sessionUsesClaudeCredentials(params.record)) {
-    return undefined;
+    // pi has its OWN stranded-transcript case, and this is where it belongs: same
+    // trigger (a resource-not-found on resume), same shape (rescue, then retry
+    // once), different store. See `rescueStrandedPiTranscriptForResume`.
+    return await recoverStrandedPiTranscriptAndRetry(params, retry);
   }
 
   const recovery = await ensureTranscriptAtActiveConfigDir(params.record);
@@ -900,6 +904,59 @@ async function recoverMissingTranscriptAndRetry(
   }
 
   return undefined;
+}
+
+/**
+ * pi's half of the stranded-transcript recovery (brick://cb214e48 §5.2).
+ *
+ * Before this brick a pi child of a pi parent wrote its ONLY JSONL into the
+ * PARENT's per-session config dir. R1 stops that happening again; this is what
+ * rescues the sessions it already happened to — measured, eight files across three
+ * ancestor dirs on devbox — on the one path that knows they are needed: a resume
+ * that has just failed with a resource-not-found.
+ *
+ * `undefined` (nothing found) is the normal answer, including for a session that
+ * genuinely has no transcript anywhere. The caller then reports the truthful pi
+ * message rather than a Claude one.
+ *
+ * ⚠️ NOT gated on `harnessIdForAgentCommand === "pi"` here, because the rescue
+ * itself is: it looks only in `acpx-pi-*` dirs, for a filename carrying THIS
+ * record's pi session id, under THIS record's cwd slug. A codex record reaching it
+ * finds nothing and pays one `readdirSync`.
+ */
+async function recoverStrandedPiTranscriptAndRetry(
+  params: {
+    client: AcpClient;
+    record: SessionRecord;
+    sameSessionOnly: boolean;
+    timeoutMs?: number;
+    verbose?: boolean;
+  },
+  retry: (params: {
+    client: AcpClient;
+    record: SessionRecord;
+    timeoutMs?: number;
+  }) => Promise<RuntimeSessionLoadState>,
+): Promise<RuntimeSessionLoadState | undefined> {
+  const rescue = rescueStrandedPiTranscriptForResume({
+    cwd: params.record.cwd,
+    acpSessionId: params.record.acpSessionId,
+  });
+  if (!rescue) {
+    return undefined;
+  }
+  // Unconditional, not `verbose`-gated: a file was COPIED on disk. A mutation the
+  // operator cannot see is how "the fix did nothing" and "the fix worked" become
+  // indistinguishable afterwards.
+  process.stderr.write(
+    `[acpx] rescued a stranded pi transcript for session ${params.record.acpSessionId} from ` +
+      `${rescue.copiedFrom} to ${rescue.copiedTo}; retrying the resume (brick cb214e48)\n`,
+  );
+  try {
+    return await retry(params);
+  } catch (retryError) {
+    return await recoverRuntimeSessionLoadFailure(params, retryError);
+  }
 }
 
 async function ensurePendingSwitchTranscript(

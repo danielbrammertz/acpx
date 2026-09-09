@@ -841,6 +841,85 @@ test("cb214e48: a NEW pi-acp's own data.details wins — acpx does not append a 
   });
 });
 
+test("cb214e48: a stranded pi transcript is rescued on resume and the load RETRIES", async () => {
+  // §5.2, end to end through `connectAndLoadSession`. `withTempHome` isolates BOTH
+  // the box store (HOME) and the config-dir root, so the scan walks a fixture root
+  // and the copy lands in a fixture `~/.pi/agent` — never the box's real one.
+  await withTempHome(async (homeDir) => {
+    const cwd = path.join(homeDir, "workspace");
+    await fs.mkdir(cwd, { recursive: true });
+
+    const sessionId = "01a08754-4154-7aa4-9f0c-d7687033f15d";
+    const slug = `--${cwd.replace(/^\//, "").replace(/\//g, "-")}--`;
+    const fileName = `2026-09-09T18-09-59-308Z_${sessionId}.jsonl`;
+    // The transcript sits under an ANCESTOR's config dir — the shape measured on
+    // devbox, and the one nothing on the child's own record names.
+    const strandedDir = path.join(
+      process.env.ACPX_HARNESS_CONFIG_DIR_ROOT ?? "",
+      "acpx-pi-01a08744-8e1f-74ab-93a1-368e09e68a13",
+      "sessions",
+      slug,
+    );
+    await fs.mkdir(strandedDir, { recursive: true });
+    await fs.writeFile(path.join(strandedDir, fileName), '{"stranded":true}\n', "utf8");
+
+    const record = makeSessionRecord({
+      acpxRecordId: "pi-stranded-rescue",
+      acpSessionId: sessionId,
+      agentCommand: PI_ACP_COMMAND,
+      cwd,
+      messages: [{ Agent: { content: [{ Text: "prior response" }], tool_results: {} } }],
+    });
+
+    let loadCalls = 0;
+    const client: FakeClient = {
+      hasReusableSession: () => false,
+      start: async () => {},
+      getAgentLifecycleSnapshot: () => ({ running: true }),
+      supportsLoadSession: () => true,
+      supportsResumeSession: () => false,
+      loadSessionWithOptions: async () => {
+        loadCalls += 1;
+        if (loadCalls === 1) {
+          throw {
+            error: {
+              code: -32602,
+              message: "Invalid params",
+              data: `Unknown sessionId: ${sessionId}`,
+            },
+          };
+        }
+        // The retry succeeds — the adapter now finds the JSONL in the box store.
+        return { agentSessionId: "runtime-session" };
+      },
+      createSession: async () => {
+        throw new Error("createSession must not be called after a successful rescue");
+      },
+      setSessionMode: async () => {},
+      setSessionModel: async () => {},
+    };
+
+    const result = await connectAndLoadSession({
+      client: client as never,
+      record,
+      timeoutMs: 1_000,
+      activeController: ACTIVE_CONTROLLER,
+    });
+
+    assert.equal(loadCalls, 2, "the rescue did not retry the load");
+    assert.equal(result.resumed, true, "the session was not resumed after the rescue");
+    // The file is in the box store, and the source still exists — COPY, not move.
+    assert.equal(
+      await fs.readFile(path.join(homeDir, ".pi", "agent", "sessions", slug, fileName), "utf8"),
+      '{"stranded":true}\n',
+    );
+    assert.equal(
+      await fs.readFile(path.join(strandedDir, fileName), "utf8"),
+      '{"stranded":true}\n',
+    );
+  });
+});
+
 test("cb214e48: a pi TIMEOUT is not annotated 'no pi session JSONL'", async () => {
   // The suffix is a DIAGNOSIS, so it must only be attached to the failure it
   // actually diagnoses. Annotating a transport fault would be a confident wrong
