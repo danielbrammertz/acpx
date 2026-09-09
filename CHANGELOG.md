@@ -8,6 +8,19 @@ Repo: https://github.com/openclaw/acpx
 
 ### Changes
 
+- Pi provisioning: acpx-spawned pi sessions now **see the box's deployed pi
+  extensions**. Until now, acpx re-pointed `PI_CODING_AGENT_DIR` to a per-session
+  dir whose `settings.json` is the only global settings file the session reads
+  — so a box deploy under `~/.pi/agent/extensions/` (or `settings.json`
+  `extensions: []`) was silently invisible to every acpx session while working
+  for every direct `pi` run. `writePiConfigDir` now seeds the session's
+  `extensions/` from the box-level source as a spawn-time snapshot (copy, not
+  symlink): source is the received `PI_CODING_AGENT_DIR` (a nested spawn
+  inherits its parent's view) or `<HOME>/.pi/agent`; the grammar mirrored is
+  pi's own discovery (top-level `*.ts`/`*.js`, subdirs with an `index.ts`/
+  `index.js` or a `package.json` with a `pi` field); a missing source dir is a
+  silent no-op; per-entry failures warn on stderr and never fail provisioning;
+  `ACPX_PI_EXTENSIONS_SEED=off` disables the channel. (brick af6907f4)
 - CLI/sessions: new `acpx sessions reopen <id>` verb — the lifecycle inverse
   of `sessions close`. Until now nothing in the CLI reopened a closed session:
   `sessions recover` force-restarts a wedged queue owner and leaves `closed`
