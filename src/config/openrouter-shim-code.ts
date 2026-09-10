@@ -65,6 +65,19 @@ const OR_BASE = '/api/v1'
 // both hard-429 for a whole afternoon), so recording the policy's first choice
 // would make the feature un-falsifiable. No line is written when the response
 // names no provider — absence reads as "not recorded".
+//
+// ⚠️ MEASURED 2026-09-10, AND IT EXPLAINS A NULL YOU WILL BE TEMPTED TO "FIX":
+// this shim forwards to OpenRouter's ANTHROPIC-COMPATIBLE endpoint
+// (POST /api/v1/messages), whose streamed response carries the provider in
+// message_start ("provider":"Parasail") — which is why the head sniff below is
+// enough — but carries NO native_finish_reason field at all. Its stop reason is
+// Anthropic's own normalised "stop_reason" ("max_tokens", "end_turn").
+// 🛑 DO NOT MAP stop_reason ONTO native_finish_reason. They are different
+// quantities: one is Anthropic's normalisation, the other the upstream
+// provider's raw string, and putting the first under the second's name is the
+// two-things-one-name defect this file already carries a warning about
+// elsewhere. On this path the honest value is null; the provider's own reason is
+// reachable via GET /api/v1/generation?id=<gen_id>, which is recorded below.
 const ATTRIBUTION_SNIFF_BYTES = 4096
 
 function recordAttribution(head) {
