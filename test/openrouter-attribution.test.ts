@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
+import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { attachAttribution, OpenRouterAttributionLog } from "../src/acp/openrouter-attribution.js";
 import {
+  cloneSessionAcpxState,
   createSessionConversation,
   recordSessionUpdate,
 } from "../src/session/conversation-model.js";
 import { rememberSessionCost } from "../src/session/cost-ingest.js";
+import {
+  readSessionIndex,
+  toSessionIndexEntry,
+  writeSessionIndex,
+} from "../src/session/persistence/index.js";
 import type { SessionAcpxState } from "../src/types.js";
+import { makeSessionRecord } from "./runtime-test-helpers.js";
 
 // T9 — brick 4c272cab §8 / acceptance A9: the record says WHO SERVED the turn.
 //
@@ -139,6 +147,118 @@ test("T9 · the client's WRITER and the record's READER are one pair, end to end
   const unit = acpx.cost_units?.at(-1);
   assert.equal(unit?.provider_name, "Modal", "the provider must survive writer → reader → record");
   assert.equal(unit?.native_finish_reason, "eos_token");
+});
+
+test("T9 · attribution lands on the record even with NO cost unit — the shim-path case", () => {
+  // 🛑 THE DEFECT THIS ROW WAS WRITTEN FOR, FOUND ON A LIVE RIG TURN. The first
+  // implementation stamped the provider onto the cost UNIT only. The cost ingest
+  // fires solely for a `_meta.piAcp.message` block, so a Claude/OpenRouter
+  // session produces ZERO units — measured: the shim's log held two responses
+  // (Modal, Z.AI) and the saved record had `cost_units: []`. The ONE path that
+  // can observe a provider was the one path with nowhere to put it, and every
+  // unit test was green because they all fed a pi-shaped update.
+  const update: Record<string, unknown> = {
+    sessionUpdate: "usage_update",
+    used: 26_052,
+    size: 1_000_000,
+  };
+  attachAttribution(update, { provider_name: "Z.AI", native_finish_reason: "stop" });
+
+  const acpx = recordSessionUpdate(createSessionConversation(), {}, {
+    sessionId: "s-2",
+    update,
+  } as unknown as Parameters<typeof recordSessionUpdate>[2]);
+  assert.equal(acpx.cost_units, undefined, "a Claude-shaped update produces no cost unit");
+  assert.equal(acpx.last_turn_provider?.provider_name, "Z.AI");
+  assert.equal(acpx.last_turn_provider?.native_finish_reason, "stop");
+  assert.equal(typeof acpx.last_turn_provider?.at, "string", "stamped, so a reader can age it");
+});
+
+test("T9 · a later usage update with NO attribution does not blank the recorded one", () => {
+  // A turn emits several usage updates and only the ones following an upstream
+  // response carry a block. Clearing on absence would erase a truthful value
+  // moments after writing it.
+  const conversation = createSessionConversation();
+  const first: Record<string, unknown> = { sessionUpdate: "usage_update", used: 10, size: 1000 };
+  attachAttribution(first, { provider_name: "BaseTen", native_finish_reason: null });
+  let acpx = recordSessionUpdate(conversation, {}, {
+    sessionId: "s-3",
+    update: first,
+  } as unknown as Parameters<typeof recordSessionUpdate>[2]);
+  acpx = recordSessionUpdate(conversation, acpx, {
+    sessionId: "s-3",
+    update: { sessionUpdate: "usage_update", used: 20, size: 1000 },
+  } as unknown as Parameters<typeof recordSessionUpdate>[2]);
+  assert.equal(acpx.last_turn_provider?.provider_name, "BaseTen");
+});
+
+test("T9 · the field survives cloneSessionAcpxState — the allowlist that ate three fields", () => {
+  // ⚠️ Missing from that allowlist, this field is present at `sessions new` and
+  // GONE after one prompt, with the whole suite green, because the turn path
+  // re-bases `record.acpx` off the clone.
+  const cloned = cloneSessionAcpxState({
+    last_turn_provider: {
+      provider_name: "BaseTen",
+      native_finish_reason: "stop",
+      at: "2026-09-10T09:00:00.000Z",
+    },
+  });
+  assert.deepEqual(cloned?.last_turn_provider, {
+    provider_name: "BaseTen",
+    native_finish_reason: "stop",
+    at: "2026-09-10T09:00:00.000Z",
+  });
+});
+
+test("T9 · both index legs carry it — projection AND reconcile-preservation", () => {
+  // The chat header reads its view from the index entry on the enriched hot
+  // path, so a field that stopped at the record would fail only at RUNTIME. And
+  // a field missing from the PARSER is stripped on the next daemon rewrite even
+  // when the projection is right — the brick://874fee67 both-legs rule.
+  const record = makeSessionRecord({
+    acpxRecordId: "attr-1",
+    acpSessionId: "acp-attr-1",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace/x",
+    acpx: {
+      last_turn_provider: {
+        provider_name: "Z.AI",
+        native_finish_reason: "stop",
+        at: "2026-09-10T09:00:00.000Z",
+      },
+    },
+  });
+  const entry = toSessionIndexEntry(record, "attr-1.json");
+  assert.equal(entry.lastTurnProvider, "Z.AI");
+  assert.equal(entry.lastTurnNativeFinishReason, "stop");
+  assert.equal(entry.lastTurnProviderAt, "2026-09-10T09:00:00.000Z");
+});
+
+test("T9 · the index entry survives the read-back — else a daemon rewrite strips it", async () => {
+  const record = makeSessionRecord({
+    acpxRecordId: "attr-2",
+    acpSessionId: "acp-attr-2",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace/x",
+    acpx: {
+      last_turn_provider: {
+        provider_name: "BaseTen",
+        native_finish_reason: "stop",
+        at: "2026-09-10T09:00:00.000Z",
+      },
+    },
+  });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "acpx-attr-index-"));
+  try {
+    const entry = toSessionIndexEntry(record, "attr-2.json");
+    await writeSessionIndex(dir, { files: ["attr-2.json"], entries: [entry] });
+    const reloaded = await readSessionIndex(dir);
+    assert.equal(reloaded?.entries[0].lastTurnProvider, "BaseTen");
+    assert.equal(reloaded?.entries[0].lastTurnNativeFinishReason, "stop");
+    assert.equal(reloaded?.entries[0].lastTurnProviderAt, "2026-09-10T09:00:00.000Z");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("T9 · a turn with no attribution carries null — not the preferred provider", () => {
