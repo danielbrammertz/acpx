@@ -78,13 +78,32 @@ const OR_BASE = '/api/v1'
 // two-things-one-name defect this file already carries a warning about
 // elsewhere. On this path the honest value is null; the provider's own reason is
 // reachable via GET /api/v1/generation?id=<gen_id>, which is recorded below.
+//
+// 🛑 **WRITTEN AS SOON AS THE PROVIDER IS SEEN — NOT AT upstream 'end' — AND
+// THAT ORDERING IS THE WHOLE FIX FOR TE FINDING F-3.** Writing at 'end' lost a
+// race that only exists in the PRODUCTION shape: on a streamed response the SDK
+// acts on the final SSE event the moment it arrives, so acpx's usage_update (and
+// its read of this log) can happen BEFORE the upstream HTTP stream ends and this
+// line is written. Measured by the test engineer 3/3 against real OpenRouter —
+// first turn recorded as null with the provider sitting correctly in this file —
+// local non-streamed capture server won the race every time and both lanes' rigs
+// therefore saw nothing.
+//
+// The provider arrives in the FIRST SSE event (message_start), so recording on
+// the first matching chunk puts the line on disk before the turn can possibly
+// finish, and the race is closed at the source rather than compensated for.
+//
+// ⚠️ CONSEQUENCE, ACCEPTED: a turn that dies mid-stream still records the
+// provider that was serving it. That is the truthful answer to "who served this
+// turn" and is more useful than silence on exactly the turns that go wrong.
 const ATTRIBUTION_SNIFF_BYTES = 4096
 
+/** True once a line has been written, so the caller stops sniffing. */
 function recordAttribution(head) {
-  if (!ATTRIBUTION_LOG) { return }
+  if (!ATTRIBUTION_LOG) { return false }
   try {
     const provider = /"provider"\\s*:\\s*"([^"]+)"/.exec(head)
-    if (!provider) { return }
+    if (!provider) { return false }
     const native = /"native_finish_reason"\\s*:\\s*"([^"]+)"/.exec(head)
     const genId = /"id"\\s*:\\s*"([^"]+)"/.exec(head)
     fs.appendFileSync(ATTRIBUTION_LOG, JSON.stringify({
@@ -94,7 +113,9 @@ function recordAttribution(head) {
       native_finish_reason: native ? native[1] : null,
       gen_id: genId ? genId[1] : null,
     }) + '\\n')
+    return true
   } catch { /* attribution is enrichment; it may never cost a turn */ }
+  return false
 }
 
 // Fake models list: contains all common Claude aliases so Claude Code's model
@@ -203,10 +224,16 @@ const server = http.createServer((req, res) => {
       // response to inspect it would add latency to every turn and risk
       // breaking streaming — the one thing this shim must never do.
       let head = ''
+      let recorded = false
       upstream.on('data', chunk => {
-        if (head.length < ATTRIBUTION_SNIFF_BYTES) { head += chunk.toString('utf8') }
+        if (recorded || head.length >= ATTRIBUTION_SNIFF_BYTES) { return }
+        head += chunk.toString('utf8')
+        // The instant the provider is readable, not when the stream ends (F-3).
+        recorded = recordAttribution(head)
       })
-      upstream.on('end', () => { recordAttribution(head) })
+      // Only for a response whose provider was never visible in the head — the
+      // sniff is bounded, so this is the "we never saw one" leg, not the normal path.
+      upstream.on('end', () => { if (!recorded) { recorded = recordAttribution(head) } })
       upstream.pipe(res)
     })
     fwd.on('error', err => {

@@ -13,6 +13,7 @@ import type {
 import type { CostUnit, SessionCostFigure } from "./models/cost-provenance.js";
 export type { McpServer, SessionNotification } from "@agentclientprotocol/sdk";
 import type { EffectiveAccountMetadata } from "./acp/auth-env.js";
+import type { LastTurnProviderBreadcrumb } from "./acp/openrouter-attribution.js";
 import type { RoutingPolicyWarningBreadcrumb } from "./acp/openrouter-provider-policy.js";
 import type { PromptInput } from "./prompt-content.js";
 
@@ -686,12 +687,7 @@ export type SessionAcpxState = {
    * names, not slugs; a consumer comparing against the bare-slug `order`
    * normalises at read time.
    */
-  last_turn_provider?: {
-    provider_name: string | null;
-    native_finish_reason: string | null;
-    /** ISO-8601 instant the attribution was observed. */
-    at: string;
-  };
+  last_turn_provider?: LastTurnProviderBreadcrumb;
   /**
    * What a `--reasoning-effort` request ACTUALLY produced (B3, CONCEPTION §6.2).
    *

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { attachAttribution, OpenRouterAttributionLog } from "../src/acp/openrouter-attribution.js";
+import { applyLifecycleSnapshotToRecord } from "../src/runtime/engine/lifecycle.js";
 import {
   cloneSessionAcpxState,
   createSessionConversation,
@@ -258,6 +259,83 @@ test("T9 · the index entry survives the read-back — else a daemon rewrite str
     assert.equal(reloaded?.entries[0].lastTurnProviderAt, "2026-09-10T09:00:00.000Z");
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("F-3 · a line written AFTER the usage update still reaches the record", () => {
+  // 🛑 THE BELT FOR THE RACE. The shim now writes the moment the provider is
+  // readable, so the usage_update path normally has it — but "normally" is what
+  // this brick's first cut relied on, and a first turn recorded `null` 3/3
+  // against real OpenRouter with the provider sitting correctly in the log.
+  //
+  // This row deliberately reproduces the LOSING order: the usage update happens
+  // with an EMPTY log, and the line lands only afterwards. The record must still
+  // end up with the provider, via the turn-end read the lifecycle snapshot does.
+  const file = logFile();
+  writeFileSync(file, "", "utf8");
+  const log = new OpenRouterAttributionLog(file);
+
+  // 1. usage update arrives first — nothing to attach, so the record says null.
+  assert.equal(log.takeLatest(), undefined, "the losing order: nothing on disk yet");
+
+  // 2. the shim's line lands late.
+  appendFileSync(file, line("Together", null));
+
+  // 3. the next read — the one the snapshot performs when the record is written.
+  const late = log.takeLatest();
+  assert.equal(late?.provider_name, "Together");
+});
+
+test("F-3 · the turn-END leg writes the record even when no usage update carried it", () => {
+  // The other half of the belt: the lifecycle snapshot is built when the record
+  // is WRITTEN — after the turn — so this leg is what turns a late line into a
+  // recorded provider. Truthy-gated like every other breadcrumb, so a snapshot
+  // with nothing new leaves a value already on the record alone.
+  const record = makeSessionRecord({
+    acpxRecordId: "attr-late-1",
+    acpSessionId: "acp-attr-late-1",
+    agentCommand: "node /opt/claude-agent-acp/dist/index.js",
+    cwd: "/workspace/x",
+  });
+  applyLifecycleSnapshotToRecord(record, {
+    running: true,
+    lastTurnProvider: {
+      provider_name: "Together",
+      native_finish_reason: null,
+      at: "2026-09-10T10:45:00.000Z",
+    },
+  });
+  assert.equal(record.acpx?.last_turn_provider?.provider_name, "Together");
+
+  applyLifecycleSnapshotToRecord(record, { running: false });
+  assert.equal(
+    record.acpx?.last_turn_provider?.provider_name,
+    "Together",
+    "a later empty snapshot must not blank it",
+  );
+});
+
+test("F-3 · a MISSING log is silent; an unreadable one is not", () => {
+  // ENOENT is the ordinary state of a session that has not talked to OpenRouter,
+  // and warning on it would train every reader to ignore the line. Anything else
+  // is a real fault that used to be indistinguishable from "no new response".
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    written.push(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    assert.equal(new OpenRouterAttributionLog("/nonexistent/or.ndjson").takeLatest(), undefined);
+    assert.deepEqual(written, [], "a missing log says nothing");
+
+    // A DIRECTORY where a file belongs: statSync succeeds, the read fails EISDIR.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "acpx-attr-unreadable-"));
+    assert.equal(new OpenRouterAttributionLog(dir).takeLatest(), undefined, "still no throw");
+    assert.equal(written.length, 1, `expected one warning, got ${JSON.stringify(written)}`);
+    assert.match(written[0], /could not read the OpenRouter attribution log/);
+  } finally {
+    process.stderr.write = original;
   }
 });
 

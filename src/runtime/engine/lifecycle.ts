@@ -64,6 +64,13 @@ export function applyLifecycleSnapshotToRecord(
   // so a new spawn site cannot record one and forget the other.
   setHarnessConfigDir(record, snapshot.harnessConfigDir, snapshot.piSessionDir);
   applySnapshotBreadcrumbs(record, snapshot);
+  // TE F-3 — the turn-END leg. The usage_update path writes this field during the
+  // turn; this one catches a shim line that landed after the last update, which
+  // is what left a FIRST turn null 3/3 against real OpenRouter. Truthy-gated like
+  // every other breadcrumb: a snapshot with nothing new leaves the value alone.
+  if (snapshot.lastTurnProvider) {
+    record.acpx = { ...record.acpx, last_turn_provider: snapshot.lastTurnProvider };
+  }
 
   if (snapshot.lastExit) {
     record.lastAgentExitCode = snapshot.lastExit.exitCode;

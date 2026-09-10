@@ -186,6 +186,72 @@ test("T9 · the shim records the SERVED provider, never the preferred one", asyn
   );
 });
 
+test("F-3 · the line is written BEFORE the response body reaches the client", async () => {
+  // 🛑 THE ORDERING THAT WAS THE BUG. Writing at upstream 'end' lost a race that
+  // only exists in the production shape: on a STREAMED response the SDK acts on
+  // the final SSE event as it arrives, so acpx's usage_update — and its read of
+  // this log — can happen before the HTTP stream ends. Measured 3/3 against real
+  // OpenRouter by the test engineer; a local non-streamed capture server won the
+  // race every time, which is exactly why both lanes' rigs saw nothing.
+  //
+  // This row reproduces the production shape: an upstream that sends
+  // `message_start` (which carries the provider) and then HOLDS THE STREAM OPEN.
+  // The assertion is that the log already has the line while the body is still
+  // being delivered — i.e. the line cannot arrive after the turn.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "acpx-or-attr-race-"));
+  const logPath = path.join(dir, "or-attribution.ndjson");
+
+  let release: (() => void) | undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const server = http.createServer((req, res) => {
+    req.on("data", () => {});
+    req.on("end", async () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      // Exactly what OpenRouter's Anthropic-compatible endpoint sends first.
+      res.write(
+        `event: message_start\ndata: ${JSON.stringify({
+          type: "message_start",
+          message: { id: "gen-STREAM-1", provider: "Together", model: MODEL },
+        })}\n\n`,
+      );
+      await held;
+      res.end("event: message_stop\ndata: {}\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+
+  const previous = process.env.OR_UPSTREAM_HOST;
+  process.env.OR_UPSTREAM_HOST = `http://127.0.0.1:${port}`;
+  const shim = await spawnOpenRouterShim(SYNTHETIC_KEY, MODEL, { attributionLogPath: logPath });
+  try {
+    const inFlight = postMessages(shim.port);
+    // Poll while the upstream response is DELIBERATELY UNFINISHED.
+    let recorded: string | undefined;
+    for (let attempt = 0; attempt < 100 && !recorded; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      try {
+        const line = readFileSync(logPath, "utf8").trim();
+        recorded =
+          line.length > 0 ? (JSON.parse(line) as { provider: string }).provider : undefined;
+      } catch {
+        /* the log does not exist until the first response — ENOENT is normal here */
+      }
+    }
+    assert.equal(recorded, "Together", "the provider must be on disk before the stream ends");
+    release?.();
+    await inFlight;
+  } finally {
+    process.env.OR_UPSTREAM_HOST = previous;
+    shim.stop();
+    server.close();
+  }
+});
+
 test("T9 · a response naming no provider records NOTHING — absence stays absence", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "acpx-or-attr-test-"));
   const logPath = path.join(dir, "or-attribution.ndjson");

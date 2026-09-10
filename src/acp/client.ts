@@ -141,7 +141,12 @@ import {
   isAcpMessageObject,
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
-import { attachAttribution, OpenRouterAttributionLog } from "./openrouter-attribution.js";
+import {
+  attachAttribution,
+  type LastTurnProviderBreadcrumb,
+  OpenRouterAttributionLog,
+  type TurnAttribution,
+} from "./openrouter-attribution.js";
 import type {
   RoutingPolicyWarning,
   RoutingPolicyWarningBreadcrumb,
@@ -473,6 +478,12 @@ export type AgentLifecycleSnapshot = {
    */
   routingPolicyWarning?: RoutingPolicyWarningBreadcrumb;
   /**
+   * Who served this session's most recent OpenRouter turn (TE finding F-3).
+   * Lands as `acpx.last_turn_provider`, the same field the usage_update path
+   * writes — this is the leg that catches a line written after the last update.
+   */
+  lastTurnProvider?: LastTurnProviderBreadcrumb;
+  /**
    * `true` once ANY turn of this session was served through the OpenRouter shim
    * (brick://a89c3cd4). Sticky in the client and sticky in the record: the write
    * leg only fires on a truthy value, so a post-teardown snapshot cannot reset
@@ -778,6 +789,14 @@ export class AcpClient {
    */
   private attributionLog?: OpenRouterAttributionLog;
   /**
+   * The most recent attribution this client has SEEN, kept beside the cursor
+   * (TE finding F-3). The cursor CONSUMES, so whichever reader takes a line must
+   * not be the only one that can act on it: a `status` call would otherwise eat
+   * the line and drop it on the floor. Every read refreshes this; the record
+   * write reports from it.
+   */
+  private lastTurnAttribution?: TurnAttribution;
+  /**
    * The OpenRouter slug the PICKER route's shim is serving, or undefined. Paired
    * with `shimHandle`'s lifetime: set when that shim starts, cleared when it
    * stops, so `outOfBandModelId` can never outlive the process that makes it true.
@@ -930,7 +949,20 @@ export class AcpClient {
       routingPolicyWarning: this.latestRoutingPolicyWarning
         ? { ...this.latestRoutingPolicyWarning, at: new Date().toISOString() }
         : undefined,
+      // TE F-3, the belt: this snapshot is built when the record is WRITTEN, i.e.
+      // after the turn, so re-reading here catches a line that landed after the
+      // last usage_update. Reported from the memo rather than from this read
+      // alone, so a snapshot taken by anything else cannot consume it and lose it.
+      lastTurnProvider: this.readLastTurnProvider(),
     };
+  }
+
+  /** The latest attribution, refreshed first, stamped when the record learns it. */
+  private readLastTurnProvider(): LastTurnProviderBreadcrumb | undefined {
+    this.refreshAttribution();
+    return this.lastTurnAttribution
+      ? { ...this.lastTurnAttribution, at: new Date().toISOString() }
+      : undefined;
   }
 
   supportsLoadSession(): boolean {
@@ -3270,10 +3302,27 @@ export class AcpClient {
    * tinguishable from a right one.
    */
   private decorateWithAttribution(update: SessionNotification["update"]): void {
-    const attribution = this.attributionLog?.takeLatest();
+    const attribution = this.refreshAttribution();
     if (attribution) {
       attachAttribution(update, attribution);
     }
+  }
+
+  /**
+   * Take any new attribution line and remember it. Returns only what was NEW.
+   *
+   * ⚠️ THE MEMO IS WHAT MAKES A LATE LINE SURVIVABLE (TE finding F-3). The shim
+   * now writes the moment the provider is readable, so the usage_update path
+   * normally has it — but a line that still arrives late is picked up by the next
+   * read (the lifecycle snapshot, built when the record is written) instead of
+   * being lost because the one reader that could have used it had already run.
+   */
+  private refreshAttribution(): TurnAttribution | undefined {
+    const latest = this.attributionLog?.takeLatest();
+    if (latest) {
+      this.lastTurnAttribution = latest;
+    }
+    return latest;
   }
 
   private async waitForSessionUpdateDrain(idleMs: number, timeoutMs: number): Promise<void> {

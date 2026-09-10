@@ -49,6 +49,12 @@ export type TurnAttribution = {
 };
 
 /**
+ * The persisted form: the observation plus when the record learned it. ONE
+ * declaration, referenced by `types.ts` and the client snapshot alike.
+ */
+export type LastTurnProviderBreadcrumb = TurnAttribution & { at: string };
+
+/**
  * A cursor over one session's attribution log.
  *
  * ⚠️ **IT CONSUMES, RATHER THAN RE-READING THE TAIL.** Reading "the last line"
@@ -107,10 +113,34 @@ export class OpenRouterAttributionLog {
       } finally {
         fs.closeSync(handle);
       }
-    } catch {
+    } catch (error) {
+      // ⚠️ ENOENT IS NOT AN ERROR AND EVERYTHING ELSE IS (TE finding F-3). The
+      // log does not exist until the first upstream response, so "no file yet"
+      // is the ordinary state of a session that has not talked to OpenRouter —
+      // silence there is correct. A permission problem, a bad handle or an I/O
+      // failure is NOT ordinary, and swallowing it identically is what made an
+      // unreadable log indistinguishable from an empty one.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        reportAttributionReadFailure(this.path, error);
+      }
       return [];
     }
   }
+}
+
+let attributionReadFailureReported = false;
+
+/** Say it ONCE per process: enough to be discovered, not enough to flood a turn. */
+function reportAttributionReadFailure(path: string, error: unknown): void {
+  if (attributionReadFailureReported) {
+    return;
+  }
+  attributionReadFailureReported = true;
+  process.stderr.write(
+    `[acpx] warning: could not read the OpenRouter attribution log at ${path} ` +
+      `(${error instanceof Error ? error.message : String(error)}); ` +
+      `turns will record no provider until this is fixed.\n`,
+  );
 }
 
 /**
