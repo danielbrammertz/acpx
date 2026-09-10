@@ -30,6 +30,17 @@
 // what `owner-reaper-coverage.test.ts` enforces, precisely because the failure
 // this header warns about is silent.
 
+// ⚠ brick://3b1ec678 — AND IT IS NOW THE SUITE'S BOOTSTRAP, NOT ONLY THE REAPER'S.
+// The `--import` property the first paragraph describes — it runs in every test-file
+// child, before that file's module body — is exactly what an environment scrub needs,
+// so the box-override scrub lives here too. Same coverage argument, same bare-run
+// caveat: a `node --test <file>` that skips this preload also skips the scrub, and on a
+// box whose `entrypoint.sh` exports `ACPX_PI_BOX_AGENT_DIR` such a run reds the pi
+// HOME-derivation rows. Run the suite through `scripts/run-tests.mjs` (`pnpm test`), or
+// `env -u ACPX_PI_BOX_AGENT_DIR` the targeted run. See `box-env-scrub.ts`.
+
+import { scrubBoxHarnessEnvOverrides } from "./box-env-scrub.js";
 import { installOwnerReaper } from "./owner-reaper.js";
 
+scrubBoxHarnessEnvOverrides();
 installOwnerReaper();
