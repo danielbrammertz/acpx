@@ -96,7 +96,7 @@ test("F-1 legs 3+4 · it survives serialize → parse (the leg that killed its o
 
 test("F-1 leg 3 · a malformed breadcrumb on disk is dropped, not half-parsed", () => {
   const record = bareRecord();
-  const onDisk = serializeSessionRecordForDisk(record) as Record<string, unknown>;
+  const onDisk = serializeSessionRecordForDisk(record);
   onDisk.acpx = { session_options: { routing_policy_warning: { file: "/x", reason: "" } } };
   const parsed = parseSessionRecord(JSON.parse(JSON.stringify(onDisk)));
   assert.equal(parsed?.acpx?.session_options?.routing_policy_warning, undefined);

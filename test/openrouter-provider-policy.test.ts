@@ -433,7 +433,7 @@ test("F-1 · the stderr line is said ONCE per process per distinct warning", () 
   const written: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
   process.stderr.write = ((chunk: string) => {
-    written.push(String(chunk));
+    written.push(chunk);
     return true;
   }) as typeof process.stderr.write;
   try {
