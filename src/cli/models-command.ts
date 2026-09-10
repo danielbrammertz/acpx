@@ -19,6 +19,7 @@
 
 import { Command, InvalidArgumentError } from "commander";
 import { resolveAcpxUiBaseUrl } from "../acp/auth-env.js";
+import { resolveOpenRouterBoxCredential } from "../acp/openrouter-routing.js";
 import {
   decorateFavorites,
   findModelByKey,
@@ -28,6 +29,11 @@ import {
 import { describeDepth } from "../models/depth.js";
 import { bandModels, isAvailableForAgent, searchModels } from "../models/matcher.js";
 import { nearestModels, parseModelRef, searchToken } from "../models/model-slug-validation.js";
+import {
+  loadOpenRouterEndpoints,
+  type OpenRouterEndpoint,
+  type OpenRouterEndpointsResult,
+} from "../models/openrouter-endpoints.js";
 import type { CatalogueModel, ModelCatalogue } from "../models/types.js";
 import { getUiPrefsStore } from "../models/ui-prefs-store.js";
 import type { ResolvedAcpxConfig } from "./config.js";
@@ -413,6 +419,96 @@ async function handleShow(ref: string, flags: ModelsFlags): Promise<void> {
   out(renderShow(model));
 }
 
+/**
+ * `acpx models endpoints <slug>` — WHICH PROVIDERS SERVE THIS MODEL, and how
+ * well (brick 4c272cab §7.1 / acceptance A4).
+ *
+ * The agent-facing half of provider routing: an orchestrator told *"this model
+ * is slow on this box"* can run this, read `providerSlug`, `quantization`,
+ * `throughput_last_30m.p50` and `uptime_last_1d` off one row, and name a better
+ * provider — instead of guessing, or abandoning the model as the founding
+ * incident did.
+ *
+ * ⚠️ **A BOX WITH NO CREDENTIAL ERRORS; IT DOES NOT RETURN AN EMPTY LIST.**
+ * Unlike the catalogue, this endpoint needs the box key, and `[]` is a real
+ * answer here — a model can genuinely have no endpoints — so a silent empty
+ * would tell an agent "this model has no providers" when the truth is "this box
+ * cannot ask".
+ */
+async function handleEndpoints(slug: string, flags: ModelsFlags): Promise<void> {
+  const credential = resolveOpenRouterBoxCredential();
+  if (!credential) {
+    failUsage(
+      `[acpx] OPENROUTER_BOX_CREDENTIAL_MISSING — no OpenRouter credential on ${boxLabel()}. ` +
+        `Endpoint metrics need the box key (~/.acpx/providers.json) or OPENROUTER_API_KEY.`,
+    );
+  }
+  const result = await loadOpenRouterEndpoints(slug, credential.key, {
+    refresh: flags.refresh === true,
+  });
+  if (wantsJson(flags)) {
+    out(
+      `${JSON.stringify({
+        slug,
+        fetchedAt: result.snapshot?.fetchedAt ?? null,
+        stale: result.stale,
+        error: result.error,
+        // `null`, never `[]`, on every failure — see the module header.
+        endpoints: result.snapshot ? result.snapshot.endpoints : null,
+      })}\n`,
+    );
+    return;
+  }
+  if (!result.snapshot) {
+    failUsage(`[acpx] could not read endpoints for ${slug}: ${result.error ?? "unknown error"}`);
+  }
+  out(renderEndpoints(slug, result));
+}
+
+function renderEndpoints(slug: string, result: OpenRouterEndpointsResult): string {
+  const snapshot = result.snapshot;
+  if (!snapshot) {
+    return "";
+  }
+  const rows = snapshot.endpoints.toSorted((a, b) => throughputP50(b) - throughputP50(a));
+  const header =
+    `  ${slug} — ${rows.length} endpoints ${describeEndpointsFreshness(result)}\n` +
+    `  ${pad("provider", 18)} ${pad("quant", 8)} ${pad("p50 tok/s", 10)} ${pad("uptime 1d", 10)} ${pad("ctx", 8)} $/M in\n`;
+  return header + rows.map((row) => endpointRow(row)).join("");
+}
+
+/** Staleness is SURFACED, never hidden: a 5-minute TTL still has a stale leg. */
+function describeEndpointsFreshness(result: OpenRouterEndpointsResult): string {
+  const fetchedAt = result.snapshot?.fetchedAt ?? "never";
+  if (!result.stale) {
+    return `(fetched ${fetchedAt})`;
+  }
+  return `(STALE, fetched ${fetchedAt}${result.error ? `; ${result.error}` : ""})`;
+}
+
+function endpointRow(row: OpenRouterEndpoint): string {
+  return (
+    `  ${pad(truncate(row.providerSlug, 18), 18)} ${pad(row.quantization ?? "?", 8)} ` +
+    `${pad(formatMetric(throughputP50(row)), 10)} ${pad(formatMetric(row.uptime_last_1d ?? null), 10)} ` +
+    `${pad(formatContext(row.context_length ?? null), 8)} ${formatPricePerMillion(row.pricing?.prompt)}\n`
+  );
+}
+
+/** `-1` sorts a metric-less row (measured: Morph reports null) to the bottom. */
+function throughputP50(endpoint: OpenRouterEndpoint): number {
+  const value = endpoint.throughput_last_30m?.p50;
+  return typeof value === "number" ? value : -1;
+}
+
+function formatMetric(value: number | null): string {
+  return value === null || value < 0 ? "—" : String(Math.round(value * 10) / 10);
+}
+
+function formatPricePerMillion(rate: string | undefined): string {
+  const value = rate === undefined ? Number.NaN : Number.parseFloat(rate);
+  return Number.isFinite(value) ? `$${Number((value * 1_000_000).toFixed(4))}` : "?";
+}
+
 async function handleFavList(flags: ModelsFlags): Promise<void> {
   const favorites = getUiPrefsStore().listFavorites();
   if (wantsJson(flags)) {
@@ -548,6 +644,25 @@ export function registerModelsCommand(parent: Command, _config: ResolvedAcpxConf
     .argument("<ref>", "<source>:<id> or a bare <id>")
     .action(async function (this: Command, ref: string, flags: ModelsFlags) {
       await handleShow(ref, flags);
+    });
+
+  // ⚠️ A SUBCOMMAND OF `models`, WHICH IS ALREADY IN `TOP_LEVEL_VERBS` — so the
+  // two-registration trap does NOT apply here and adding a second entry would be
+  // wrong. The trap is about a new FIRST token: an unregistered one is absorbed
+  // by the agent catch-all and becomes a prompt. `models endpoints …` is parsed
+  // by commander under an already-registered verb, and a typo'd subverb fails
+  // loudly with "too many arguments for 'models'".
+  modelsCommand
+    .command("endpoints")
+    .description(
+      "Which providers serve an OpenRouter model, with quantization, price, p50 throughput and uptime",
+    )
+    .argument("<slug>", "OpenRouter model slug, e.g. z-ai/glm-5.3-flash")
+    .option("--json", "Shorthand for --format json")
+    .option("--format <fmt>", "Output format: text, json", parseModelsFormat)
+    .option("--refresh", "Force a fetch instead of serving the 5-minute cache")
+    .action(async function (this: Command, slug: string, flags: ModelsFlags) {
+      await handleEndpoints(slug, flags);
     });
 
   const favCommand = modelsCommand
