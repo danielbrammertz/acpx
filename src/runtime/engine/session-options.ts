@@ -141,6 +141,34 @@ type SessionOptionBreadcrumbs = {
   outputStyle: PersistedSessionOptions["output_style"];
 };
 
+/**
+ * Every breadcrumb this module carries across a session-options rewrite, as
+ * `camelCase → persisted snake_case` (brick 576d8090).
+ *
+ * ⚠️ EXHAUSTIVE BY COMPILATION: `satisfies Record<keyof SessionOptionBreadcrumbs, …>`
+ * means a breadcrumb added to that type but not listed here fails `typecheck`.
+ * `test/persisted-allowlist-roundtrip.test.ts` reads this map to decide what a
+ * rewrite must preserve, so the test's subjects are DISCOVERED from the type
+ * rather than hand-listed — a hand list is what let four fields through.
+ */
+export const SESSION_OPTION_BREADCRUMB_KEYS = {
+  subscriptionSwitch: "subscription_switch",
+  accountSwitch: "account_switch",
+  provisioningWarning: "provisioning_warning",
+  routingPolicyWarning: "routing_policy_warning",
+  servedViaShim: "served_via_shim",
+  modelGuard: "model_guard",
+  fableDegrade: "fable_degrade",
+  autoFailover: "auto_failover",
+  floorHard: "floor_hard",
+  autoSubscription: "auto_subscription",
+  fableDegradeOk: "fable_degrade_ok",
+  model: "model",
+  modelSource: "model_source",
+  effort: "effort",
+  outputStyle: "output_style",
+} as const satisfies Record<keyof SessionOptionBreadcrumbs, keyof PersistedSessionOptions>;
+
 function sessionOptionBreadcrumbs(record: SessionRecord): SessionOptionBreadcrumbs {
   const stored = record.acpx?.session_options ?? {};
   return {

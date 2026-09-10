@@ -731,6 +731,11 @@ export function cloneSessionAcpxState(
     // NULL AFTER ONE PROMPT, with typecheck, lint and the whole unit suite green,
     // because the turn path re-bases `record.acpx` off this clone. Both cost
     // fields are proven through a REAL TURN, not an in-memory test.
+    // brick 576d8090 — also found by the guard's first run. Persisted (parse.ts
+    // carries it) and read by the reuse policy off the record, so a turn-path
+    // clone that drops it can let a session that was closed with
+    // `discardPersistentState` be reused instead of reset.
+    reset_on_next_ensure: state.reset_on_next_ensure,
     cost: cloneOptional(state.cost),
     cost_units: cloneOptional(state.cost_units),
     // brick 4c272cab §8 — the fourth field this allowlist would have eaten.
@@ -853,6 +858,12 @@ function cloneSessionOptionBreadcrumbs(
     // brick://4d517be2: fable_degrade is a record-only breadcrumb (mirror
     // model_guard) — rides the clone so the degrade provenance survives every turn.
     ...(options.fable_degrade !== undefined ? { fable_degrade: { ...options.fable_degrade } } : {}),
+    // brick 576d8090 — found by the allowlist round-trip guard on its FIRST run.
+    // `served_via_shim` is documented STICKY and is read AFTER teardown by the
+    // cold-resume transcript gate (brick://a89c3cd4); a turn-path clone that drops
+    // it depends on the next lifecycle snapshot to put it back, which is exactly
+    // the "restored by luck" shape the other three losses had.
+    ...(options.served_via_shim !== undefined ? { served_via_shim: options.served_via_shim } : {}),
   };
 }
 
