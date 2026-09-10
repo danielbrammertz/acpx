@@ -86,7 +86,7 @@ test("PM-1 · a malformed block is dropped rather than half-parsed", () => {
   // `at` is required: a breadcrumb a reader cannot place in time is worse than
   // none, because it reads as current.
   const record = recordWith();
-  const onDisk = serializeSessionRecordForDisk(record) as Record<string, unknown>;
+  const onDisk = serializeSessionRecordForDisk(record);
   onDisk.acpx = { last_turn_provider: { provider_name: "Wafer" } };
   const parsed = parseSessionRecord(JSON.parse(JSON.stringify(onDisk)));
   assert.equal(parsed?.acpx?.last_turn_provider, undefined);
