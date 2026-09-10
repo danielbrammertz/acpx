@@ -52,6 +52,12 @@ export type UsageObservation = {
   cacheWrite: number;
   /** The adapter's OWN figure for the session so far, when it reports one. */
   reportedAmount?: number | null;
+  /**
+   * Who SERVED this message, when the path can observe it (brick 4c272cab §8).
+   * Absent ⇒ the unit records `null`, which means "not recorded" and must never
+   * be filled in with the provider the box merely preferred.
+   */
+  attribution?: { provider_name: string | null; native_finish_reason: string | null };
 };
 
 type RateLookup = (modelId: string) => UnitRates | null;
@@ -196,6 +202,11 @@ function stampedUnit(
     ts: now().toISOString(),
     model: modelId ?? null,
     cost_usd: priceUnit(priceable),
+    // ⚠️ `?? null`, NOT a fallback to anything else. The absent case is recorded
+    // as absent — see `CostUnit.provider_name` for why a "sensible default" here
+    // (the preferred provider) would make the routing feature un-falsifiable.
+    provider_name: observation.attribution?.provider_name ?? null,
+    native_finish_reason: observation.attribution?.native_finish_reason ?? null,
   };
 }
 

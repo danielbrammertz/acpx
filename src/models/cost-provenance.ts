@@ -158,6 +158,27 @@ export type CostUnit = {
    * is `computed`, and `cost-ingest.test.ts` pins exactly that.
    */
   cost_usd?: number | null;
+  /**
+   * The provider that ACTUALLY SERVED this message, verbatim from OpenRouter's
+   * response (`"Modal"`), or `null` (brick 4c272cab §8).
+   *
+   * 🛑 **`null` MEANS "NOT RECORDED" AND NOTHING ELSE. IT IS NEVER THE PROVIDER
+   * THE BOX PREFERRED.** A preference is a preference: the named provider is
+   * routinely unavailable — measured, BaseTen and Crusoe were both hard-429 for
+   * an afternoon while a correct policy was in force — so substituting the
+   * policy's first choice would make the routing feature UN-FALSIFIABLE, because
+   * the record would then agree with the preference by construction, including
+   * on every turn where the preference did not hold.
+   *
+   * Populated on the Claude/OpenRouter shim path, where acpx owns the proxy and
+   * sees the real response. `null` on pi and on every non-OpenRouter path: pi
+   * talks to OpenRouter directly and its own message record carries only its
+   * PROVIDER ID (`"openrouter"`), not the serving provider — see
+   * `src/acp/openrouter-attribution.ts` for the measurement.
+   */
+  provider_name?: string | null;
+  /** The provider's own, un-normalised finish reason; `null` = not recorded. */
+  native_finish_reason?: string | null;
 };
 
 /**

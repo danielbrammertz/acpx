@@ -84,10 +84,14 @@ export class OpenRouterAttributionLog {
   private readNewLines(): string[] {
     try {
       const size = fs.statSync(this.path).size;
+      // ⚠️ A SHRUNKEN FILE REWINDS TO ZERO, NOT TO ITS NEW SIZE. A fresh shim
+      // restarts the log on the same path; clamping the cursor to the new size
+      // would leave it AT the end, so every later response would be missed and
+      // attribution would go permanently blind with no error anywhere.
+      if (size < this.offset) {
+        this.offset = 0;
+      }
       if (size <= this.offset) {
-        // A truncated file (a fresh shim on the same path) rewinds the cursor
-        // rather than reading nothing forever.
-        this.offset = Math.min(this.offset, size);
         return [];
       }
       const handle = fs.openSync(this.path, "r");
@@ -107,6 +111,24 @@ export class OpenRouterAttributionLog {
       return [];
     }
   }
+}
+
+/**
+ * Attach an attribution to a `usage_update` notification, on the exact path the
+ * session record's ingest reads it back from.
+ *
+ * ⚠️ **THE WRITER AND THE READER ARE ONE PAIR AND THEY LIVE APART** — this is
+ * called by the ACP client (which owns the shim's log) and read by
+ * `conversation-model`'s cost ingest (which owns the record). A `_meta` path
+ * typo would be silent in both directions: no error, no type failure, just a
+ * record that never carries a provider. It is exported so the round trip can be
+ * asserted end-to-end rather than by two independent literals agreeing by luck
+ * (`test/openrouter-attribution.test.ts`).
+ */
+export function attachAttribution(update: object, attribution: TurnAttribution): void {
+  const meta = ((update as { _meta?: Record<string, unknown> })._meta ??= {});
+  const acpx = ((meta as { acpx?: Record<string, unknown> }).acpx ??= {});
+  (acpx as { orAttribution?: TurnAttribution }).orAttribution = attribution;
 }
 
 function parseLine(line: string): TurnAttribution | undefined {

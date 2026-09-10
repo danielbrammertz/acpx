@@ -141,6 +141,7 @@ import {
   isAcpMessageObject,
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
+import { attachAttribution, OpenRouterAttributionLog } from "./openrouter-attribution.js";
 import {
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
@@ -759,6 +760,12 @@ export class AcpClient {
    * `session_options.served_via_shim`.
    */
   private servedViaShim = false;
+  /**
+   * A cursor over the running shim's attribution log (brick 4c272cab §8), or
+   * undefined when this session is not shim-served. Created beside the handle,
+   * in the one assignment path, so a third shim-start site inherits it.
+   */
+  private attributionLog?: OpenRouterAttributionLog;
   /**
    * The OpenRouter slug the PICKER route's shim is serving, or undefined. Paired
    * with `shimHandle`'s lifetime: set when that shim starts, cleared when it
@@ -1434,6 +1441,14 @@ export class AcpClient {
     this.shimHandle = handle;
     if (handle !== undefined) {
       this.servedViaShim = true;
+      // ⚠️ NOT sticky, unlike `servedViaShim`: the cursor belongs to THIS shim's
+      // log. A new shim (respawn, reconnect after teardown) starts a new file,
+      // and carrying the old cursor's offset into it would skip its first
+      // responses — attribution would then be silently missing for exactly the
+      // turns after a restart.
+      this.attributionLog = handle.attributionLogPath
+        ? new OpenRouterAttributionLog(handle.attributionLogPath)
+        : undefined;
     }
   }
 
@@ -3195,6 +3210,9 @@ export class AcpClient {
       this.configOptionUpdateCount += 1;
       this.rememberConfigOptions(notification.update.configOptions ?? undefined);
     }
+    if (notification.update?.sessionUpdate === "usage_update") {
+      this.decorateWithAttribution(notification.update);
+    }
     const sequence = ++this.observedSessionUpdates;
     this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
       try {
@@ -3210,6 +3228,27 @@ export class AcpClient {
     });
 
     await this.sessionUpdateChain;
+  }
+
+  /**
+   * Attach WHO SERVED the message this usage update reports (brick 4c272cab §8).
+   *
+   * Done HERE because this class owns the shim handle, and therefore the one log
+   * that belongs to this session — the conversation model, which persists the
+   * unit, has neither a session id nor a path and would otherwise need a
+   * process-wide pointer that could cross-attribute two sessions in one process.
+   *
+   * ⚠️ ONE READ PER USAGE UPDATE, AND IT CONSUMES. `takeLatest` returns only
+   * responses not yet handed out, so a usage update with no new response leaves
+   * the block absent — which the ingest records as `null`. Re-reading the tail
+   * instead would attribute a STALE response to it: a wrong answer indis-
+   * tinguishable from a right one.
+   */
+  private decorateWithAttribution(update: SessionNotification["update"]): void {
+    const attribution = this.attributionLog?.takeLatest();
+    if (attribution) {
+      attachAttribution(update, attribution);
+    }
   }
 
   private async waitForSessionUpdateDrain(idleMs: number, timeoutMs: number): Promise<void> {

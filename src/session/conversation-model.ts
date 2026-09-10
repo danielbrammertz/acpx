@@ -1198,6 +1198,7 @@ function rememberCostFromUsageUpdate(acpx: SessionAcpxState, update: UsageUpdate
     return;
   }
   const reported = asRecord(asRecord(update)?.cost)?.amount;
+  const attribution = attributionFromUpdate(update);
   rememberSessionCost(acpx, {
     // camelCase here is pi's OWN wire vocabulary, not ours — see `UnitRates`
     // for where the naming has to change on the way to disk.
@@ -1206,7 +1207,34 @@ function rememberCostFromUsageUpdate(acpx: SessionAcpxState, update: UsageUpdate
     cacheRead: countField(message, "cacheRead"),
     cacheWrite: countField(message, "cacheWrite"),
     reportedAmount: typeof reported === "number" ? reported : null,
+    ...(attribution ? { attribution } : {}),
   });
+}
+
+/**
+ * Who served this message, if the path could observe it (brick 4c272cab §8).
+ *
+ * The block is put there by the ACP client, which owns the OpenRouter shim
+ * handle and therefore the session's attribution log; reading it off the update
+ * keeps this function session-scoped rather than reaching for a process-wide
+ * pointer that could cross-attribute two sessions in one process.
+ *
+ * ⚠️ ABSENT STAYS ABSENT. Every path that is not the Claude/OpenRouter shim —
+ * pi, Codex, a native Claude subscription — carries no block, and the unit
+ * records `null`. That is the honest answer, not a gap to be filled.
+ */
+function attributionFromUpdate(
+  update: UsageUpdate,
+): { provider_name: string | null; native_finish_reason: string | null } | undefined {
+  const block = asRecord(asRecord(asRecord(asRecord(update)?._meta)?.acpx)?.orAttribution);
+  if (!block) {
+    return undefined;
+  }
+  return {
+    provider_name: typeof block.provider_name === "string" ? block.provider_name : null,
+    native_finish_reason:
+      typeof block.native_finish_reason === "string" ? block.native_finish_reason : null,
+  };
 }
 
 /** pi's per-message usage block, or `undefined` when this update carries none. */
