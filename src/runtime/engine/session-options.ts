@@ -127,6 +127,7 @@ type SessionOptionBreadcrumbs = {
   subscriptionSwitch: PersistedSessionOptions["subscription_switch"];
   accountSwitch: PersistedSessionOptions["account_switch"];
   provisioningWarning: PersistedSessionOptions["provisioning_warning"];
+  routingPolicyWarning: PersistedSessionOptions["routing_policy_warning"];
   servedViaShim: PersistedSessionOptions["served_via_shim"];
   modelGuard: PersistedSessionOptions["model_guard"];
   fableDegrade: PersistedSessionOptions["fable_degrade"];
@@ -146,6 +147,7 @@ function sessionOptionBreadcrumbs(record: SessionRecord): SessionOptionBreadcrum
     subscriptionSwitch: stored.subscription_switch,
     accountSwitch: stored.account_switch,
     provisioningWarning: stored.provisioning_warning,
+    routingPolicyWarning: stored.routing_policy_warning,
     servedViaShim: stored.served_via_shim,
     modelGuard: stored.model_guard,
     fableDegrade: stored.fable_degrade,
@@ -190,6 +192,12 @@ function assignBreadcrumbs(
   }
   if (breadcrumbs.provisioningWarning !== undefined) {
     target.provisioning_warning = breadcrumbs.provisioningWarning;
+  }
+  // brick 4c272cab / TE F-1 — a record-only breadcrumb like servedViaShim below:
+  // carried across respawns so "this box's routing settings are invalid" is not
+  // rewritten away by the next spawn that happens not to re-read the file.
+  if (breadcrumbs.routingPolicyWarning !== undefined) {
+    target.routing_policy_warning = breadcrumbs.routingPolicyWarning;
   }
   // brick://a89c3cd4 — a pure record-only breadcrumb: carry it across respawns so
   // the "this session was shim-served" fact survives the process that observed it.

@@ -7,22 +7,116 @@
 //   2. GET /v1/models — return a fake Anthropic-format models list containing
 //      common Claude aliases so Claude Code's local model-validation passes
 //      even though ANTHROPIC_BASE_URL points here instead of Anthropic.
-// Reads config from env: OR_MODEL, OPENROUTER_API_KEY.
+//   3. Apply the box's PROVIDER-ROUTING policy (brick 4c272cab): `OR_PROVIDER`
+//      carries a pre-resolved OpenRouter `provider` object, copied verbatim onto
+//      the forwarded body. Absent ⇒ nothing is added and the body is
+//      byte-identical to before that brick.
+//   4. Record WHO SERVED the turn (brick 4c272cab §8): one NDJSON line per
+//      response to `OR_ATTRIBUTION_LOG`, sniffed off the response head without
+//      buffering it.
+// Reads config from env: OR_MODEL, OPENROUTER_API_KEY, OR_REASONING_EFFORT,
+// OR_PROVIDER, OR_ATTRIBUTION_LOG, OR_UPSTREAM_HOST.
 // On startup writes "PORT=<n>\n" to stdout so the caller learns the bound port.
 export const OPENROUTER_SHIM_CODE = `
+import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
 
 const API_KEY           = process.env.OPENROUTER_API_KEY
 const MODEL             = process.env.OR_MODEL
 const REASONING_EFFORT  = process.env.OR_REASONING_EFFORT || null
+const ATTRIBUTION_LOG   = process.env.OR_ATTRIBUTION_LOG || null
 if (!API_KEY || !MODEL) {
   process.stderr.write('[or-shim] OPENROUTER_API_KEY and OR_MODEL are required\\n')
   process.exit(1)
 }
 
-const OR_HOST = 'openrouter.ai'
+// The box's provider-routing policy, already resolved and validated by acpx
+// (src/acp/openrouter-provider-policy.ts). A MALFORMED VALUE DEGRADES TO "no
+// policy" AND MUST NOT JOIN THE process.exit(1) ABOVE: a settings typo would
+// then present as a broken OpenRouter credential, three screens from its cause.
+let PROVIDER = null
+try {
+  PROVIDER = process.env.OR_PROVIDER ? JSON.parse(process.env.OR_PROVIDER) : null
+} catch {
+  PROVIDER = null
+  process.stderr.write('[or-shim] OR_PROVIDER is not valid JSON; continuing with no provider policy\\n')
+}
+
+// TEST-ONLY UPSTREAM OVERRIDE (HoD ruling R-5). The shim is the only component
+// that sees the body OpenRouter actually receives, and it used to hardcode its
+// host — so the Claude path could only ever be checked by INFERENCE from the
+// reply. Pointing this at a capture server is what makes "the correct provider
+// object reached OpenRouter" an assertion rather than a belief. A bare host
+// keeps https (production, unchanged); a full origin lets a test use http.
+const UPSTREAM = (() => {
+  const raw = (process.env.OR_UPSTREAM_HOST || 'openrouter.ai').trim()
+  return new URL(raw.includes('://') ? raw : 'https://' + raw)
+})()
+const OR_HOST = UPSTREAM.host
+const OR_TRANSPORT = UPSTREAM.protocol === 'http:' ? http : https
+const OR_PORT = UPSTREAM.port || (UPSTREAM.protocol === 'http:' ? 80 : 443)
 const OR_BASE = '/api/v1'
+
+// One NDJSON line per upstream response: WHO ACTUALLY SERVED IT.
+//
+// ⚠️ THE PREFERRED PROVIDER IS NOT AN ANSWER HERE. A preference is a preference
+// and the named provider is routinely unavailable (measured: BaseTen and Crusoe
+// both hard-429 for a whole afternoon), so recording the policy's first choice
+// would make the feature un-falsifiable. No line is written when the response
+// names no provider — absence reads as "not recorded".
+//
+// ⚠️ MEASURED 2026-09-10, AND IT EXPLAINS A NULL YOU WILL BE TEMPTED TO "FIX":
+// this shim forwards to OpenRouter's ANTHROPIC-COMPATIBLE endpoint
+// (POST /api/v1/messages), whose streamed response carries the provider in
+// message_start ("provider":"Parasail") — which is why the head sniff below is
+// enough — but carries NO native_finish_reason field at all. Its stop reason is
+// Anthropic's own normalised "stop_reason" ("max_tokens", "end_turn").
+// 🛑 DO NOT MAP stop_reason ONTO native_finish_reason. They are different
+// quantities: one is Anthropic's normalisation, the other the upstream
+// provider's raw string, and putting the first under the second's name is the
+// two-things-one-name defect this file already carries a warning about
+// elsewhere. On this path the honest value is null; the provider's own reason is
+// reachable via GET /api/v1/generation?id=<gen_id>, which is recorded below.
+//
+// 🛑 **WRITTEN AS SOON AS THE PROVIDER IS SEEN — NOT AT upstream 'end' — AND
+// THAT ORDERING IS THE WHOLE FIX FOR TE FINDING F-3.** Writing at 'end' lost a
+// race that only exists in the PRODUCTION shape: on a streamed response the SDK
+// acts on the final SSE event the moment it arrives, so acpx's usage_update (and
+// its read of this log) can happen BEFORE the upstream HTTP stream ends and this
+// line is written. Measured by the test engineer 3/3 against real OpenRouter —
+// first turn recorded as null with the provider sitting correctly in this file —
+// local non-streamed capture server won the race every time and both lanes' rigs
+// therefore saw nothing.
+//
+// The provider arrives in the FIRST SSE event (message_start), so recording on
+// the first matching chunk puts the line on disk before the turn can possibly
+// finish, and the race is closed at the source rather than compensated for.
+//
+// ⚠️ CONSEQUENCE, ACCEPTED: a turn that dies mid-stream still records the
+// provider that was serving it. That is the truthful answer to "who served this
+// turn" and is more useful than silence on exactly the turns that go wrong.
+const ATTRIBUTION_SNIFF_BYTES = 4096
+
+/** True once a line has been written, so the caller stops sniffing. */
+function recordAttribution(head) {
+  if (!ATTRIBUTION_LOG) { return false }
+  try {
+    const provider = /"provider"\\s*:\\s*"([^"]+)"/.exec(head)
+    if (!provider) { return false }
+    const native = /"native_finish_reason"\\s*:\\s*"([^"]+)"/.exec(head)
+    const genId = /"id"\\s*:\\s*"([^"]+)"/.exec(head)
+    fs.appendFileSync(ATTRIBUTION_LOG, JSON.stringify({
+      ts: new Date().toISOString(),
+      provider: provider[1],
+      model: MODEL,
+      native_finish_reason: native ? native[1] : null,
+      gen_id: genId ? genId[1] : null,
+    }) + '\\n')
+    return true
+  } catch { /* attribution is enrichment; it may never cost a turn */ }
+  return false
+}
 
 // Fake models list: contains all common Claude aliases so Claude Code's model
 // validation passes when ANTHROPIC_BASE_URL points to this shim. The actual
@@ -70,6 +164,10 @@ const server = http.createServer((req, res) => {
         const obj = JSON.parse(body.toString('utf8'))
         // Rewrite model to the configured OR model.
         obj.model = MODEL
+        // Apply the box's provider-routing policy. One line, beside the model
+        // rewrite, because that is the same question asked about a different
+        // axis: the model says WHAT serves the turn, this says WHO.
+        if (PROVIDER) { obj.provider = PROVIDER }
         // Inject static reasoning effort when configured on the profile.
         if (REASONING_EFFORT) { obj.reasoning = { effort: REASONING_EFFORT } }
         // Inject an identity override so the model self-identifies by its real
@@ -113,13 +211,29 @@ const server = http.createServer((req, res) => {
     // Remove Anthropic-specific beta headers — OpenRouter handles versioning itself.
     delete fwdHeaders['anthropic-beta']
     const opts = {
-      hostname: OR_HOST, port: 443,
+      hostname: UPSTREAM.hostname, port: OR_PORT,
       path: OR_BASE + fwdPath,
       method: req.method ?? 'GET',
       headers: fwdHeaders,
     }
-    const fwd = https.request(opts, upstream => {
+    const fwd = OR_TRANSPORT.request(opts, upstream => {
       res.writeHead(upstream.statusCode ?? 502, upstream.headers)
+      // ⚠️ SNIFF, DO NOT BUFFER. The body is piped through untouched; this
+      // listener only reads the HEAD of the stream (both the non-streamed JSON
+      // and the SSE prologue both carry provider and id there). Buffering the
+      // response to inspect it would add latency to every turn and risk
+      // breaking streaming — the one thing this shim must never do.
+      let head = ''
+      let recorded = false
+      upstream.on('data', chunk => {
+        if (recorded || head.length >= ATTRIBUTION_SNIFF_BYTES) { return }
+        head += chunk.toString('utf8')
+        // The instant the provider is readable, not when the stream ends (F-3).
+        recorded = recordAttribution(head)
+      })
+      // Only for a response whose provider was never visible in the head — the
+      // sniff is bounded, so this is the "we never saw one" leg, not the normal path.
+      upstream.on('end', () => { if (!recorded) { recorded = recordAttribution(head) } })
       upstream.pipe(res)
     })
     fwd.on('error', err => {

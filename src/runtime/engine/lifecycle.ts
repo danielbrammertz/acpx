@@ -5,6 +5,48 @@ import { normalizeRuntimeSessionId } from "../../session/runtime-session-id.js";
 import { messagesHaveRealAgentTurn } from "../../session/synthetic-messages.js";
 import type { SessionConversation, SessionRecord } from "../../types.js";
 
+/**
+ * The `session_options` breadcrumbs a spawn observes.
+ *
+ * 🛑 **EVERY ONE OF THEM IS TRUTHY-GATED, AND THAT IS LOAD-BEARING RATHER THAN
+ * INCIDENTAL.** A falsy snapshot value leaves the stored one alone:
+ *
+ * - `provisioningWarning` — degraded harness state must stay visible after the
+ *   spawn that saw it.
+ * - `servedViaShim` (brick://a89c3cd4) — its consumer is the cold-resume
+ *   transcript gate, which runs AFTER teardown, and teardown produces a snapshot
+ *   with this unset. An `else` clearing it here would report "not shim-served"
+ *   at exactly the moment the truth is needed, reproducing the defect it fixes.
+ * - `routingPolicyWarning` (brick 4c272cab / TE F-1) — the same shape, and for a
+ *   sharper reason: a session may be spawned by a path that never reads the
+ *   settings file at all, and clearing on absence would erase "this box's
+ *   routing policy is invalid" on the next unrelated respawn.
+ *
+ * Extracted from {@link applyLifecycleSnapshotToRecord} so a fourth breadcrumb
+ * costs no complexity budget there — the pressure that pushes an author toward
+ * omitting a leg is exactly how a persisted field gets left out.
+ */
+function applySnapshotBreadcrumbs(record: SessionRecord, snapshot: AgentLifecycleSnapshot): void {
+  const acpx = record.acpx ?? {};
+  const sessionOptions = { ...acpx.session_options };
+  let touched = false;
+  if (snapshot.provisioningWarning) {
+    sessionOptions.provisioning_warning = { ...snapshot.provisioningWarning };
+    touched = true;
+  }
+  if (snapshot.routingPolicyWarning) {
+    sessionOptions.routing_policy_warning = { ...snapshot.routingPolicyWarning };
+    touched = true;
+  }
+  if (snapshot.servedViaShim) {
+    sessionOptions.served_via_shim = true;
+    touched = true;
+  }
+  if (touched) {
+    record.acpx = { ...acpx, session_options: sessionOptions };
+  }
+}
+
 export function applyLifecycleSnapshotToRecord(
   record: SessionRecord,
   snapshot: AgentLifecycleSnapshot | undefined,
@@ -21,23 +63,13 @@ export function applyLifecycleSnapshotToRecord(
   // brick://cb214e48 — `piSessionDir` rides the SAME snapshot for the same reason,
   // so a new spawn site cannot record one and forget the other.
   setHarnessConfigDir(record, snapshot.harnessConfigDir, snapshot.piSessionDir);
-  if (snapshot.provisioningWarning) {
-    const acpx = record.acpx ?? {};
-    const sessionOptions = { ...acpx.session_options };
-    sessionOptions.provisioning_warning = { ...snapshot.provisioningWarning };
-    record.acpx = { ...acpx, session_options: sessionOptions };
-  }
-  // brick://a89c3cd4 — STICKY BY CONSTRUCTION, exactly like the block above: the
-  // truthy gate means a falsy snapshot leaves any stored `true` alone, and that
-  // is load-bearing rather than incidental. The consumer is the cold-resume
-  // transcript gate, which runs AFTER teardown — and teardown produces a snapshot
-  // with this unset. An `else` clearing it here would report "not shim-served" at
-  // exactly the moment the truth is needed, reproducing the defect it fixes.
-  if (snapshot.servedViaShim) {
-    const acpx = record.acpx ?? {};
-    const sessionOptions = { ...acpx.session_options };
-    sessionOptions.served_via_shim = true;
-    record.acpx = { ...acpx, session_options: sessionOptions };
+  applySnapshotBreadcrumbs(record, snapshot);
+  // TE F-3 — the turn-END leg. The usage_update path writes this field during the
+  // turn; this one catches a shim line that landed after the last update, which
+  // is what left a FIRST turn null 3/3 against real OpenRouter. Truthy-gated like
+  // every other breadcrumb: a snapshot with nothing new leaves the value alone.
+  if (snapshot.lastTurnProvider) {
+    record.acpx = { ...record.acpx, last_turn_provider: snapshot.lastTurnProvider };
   }
 
   if (snapshot.lastExit) {

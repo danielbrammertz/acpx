@@ -13,6 +13,8 @@ import type {
 import type { CostUnit, SessionCostFigure } from "./models/cost-provenance.js";
 export type { McpServer, SessionNotification } from "@agentclientprotocol/sdk";
 import type { EffectiveAccountMetadata } from "./acp/auth-env.js";
+import type { LastTurnProviderBreadcrumb } from "./acp/openrouter-attribution.js";
+import type { RoutingPolicyWarningBreadcrumb } from "./acp/openrouter-provider-policy.js";
 import type { PromptInput } from "./prompt-content.js";
 
 export type AcpPermissionRequest = {
@@ -661,6 +663,32 @@ export type SessionAcpxState = {
     source?: string;
   };
   /**
+   * Which OpenRouter PROVIDER served the most recent message, and its own
+   * un-normalised finish reason (brick 4c272cab §8).
+   *
+   * ⚠️ **A SEPARATE FIELD FROM {@link served}, DELIBERATELY, AND NOT FOLDED INTO
+   * IT.** `setServedState` REPLACES that whole block (its own comment says a
+   * third producer must respect that), and on a Claude session the post-turn
+   * transcript producer runs AFTER this is written — so living there would mean
+   * the provider is silently erased on exactly the path that can observe it.
+   *
+   * ⚠️ **AND NOT ONLY ON `cost_units`, WHICH IS WHY THIS FIELD EXISTS AT ALL.**
+   * The per-unit stamp was the first home and it is unreachable on the shim
+   * path: the cost ingest fires only for a `_meta.piAcp.message` block, so a
+   * Claude/OpenRouter session produces **zero cost units** — measured on a live
+   * rig turn, `cost_units: []` with the attribution log holding two responses.
+   * The one path that CAN observe a provider was the one path with nowhere to
+   * put it.
+   *
+   * 🛑 `provider_name: null` MEANS "NOT RECORDED" AND IS NEVER THE PREFERRED
+   * PROVIDER. See `src/acp/openrouter-attribution.ts`: substituting the policy's
+   * first choice would make provider routing un-falsifiable. Values are stored
+   * **verbatim** as OpenRouter returns them (`"BaseTen"`, `"Z.AI"`) — display
+   * names, not slugs; a consumer comparing against the bare-slug `order`
+   * normalises at read time.
+   */
+  last_turn_provider?: LastTurnProviderBreadcrumb;
+  /**
    * What a `--reasoning-effort` request ACTUALLY produced (B3, CONCEPTION §6.2).
    *
    * **The invariant this exists for: a depth request is never silently dropped.**
@@ -946,6 +974,30 @@ export type SessionAcpxState = {
       anchor?: string;
       message: string;
     };
+    /**
+     * The box's OpenRouter routing settings file EXISTS and was REJECTED, so the
+     * whole policy was dropped for this session (brick 4c272cab, TE finding F-1).
+     *
+     * **Why a breadcrumb and not just a log line.** Measured by the test
+     * engineer: acpx and acpx-ui's validators agreed on 37 of 40 candidates and
+     * disagreed on a family of 8 — an empty value of the WRONG type
+     * (`perModel: []`, `ignore: ""`) is "neutral" to the UI and a type error to
+     * acpx. The user-visible result was the settings gear reading *"Minimum
+     * precision 8-bit · Never: Wafer"* while the box applied **nothing at all**,
+     * with no error on either side. The file was never PATCHed, so the UI's
+     * save-time validation cannot catch it; only the component that rejected it
+     * can say so, and only the record carries that to a UI.
+     *
+     * ⚠️ Written only when a policy was actually dropped. Absent is the normal
+     * state — no settings file, no `openrouterRouting` key, and a legal policy
+     * all leave it unset — so a UI may treat presence as "policy file invalid".
+     *
+     * ⚠️ snake_case, like every persisted key here: `assertPersistedKeyPolicy`
+     * runs before `fs.writeFile`, and the throw is swallowed by
+     * `LiveSessionCheckpoint` — a camelCase key freezes the WHOLE record
+     * silently (that is what killed `provisioning_warning` above for months).
+     */
+    routing_policy_warning?: RoutingPolicyWarningBreadcrumb;
     /**
      * `true` once ANY of this session's turns were served through the OpenRouter
      * shim rather than by Claude credentials (brick://a89c3cd4).

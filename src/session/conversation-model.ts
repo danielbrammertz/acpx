@@ -733,6 +733,12 @@ export function cloneSessionAcpxState(
     // fields are proven through a REAL TURN, not an in-memory test.
     cost: cloneOptional(state.cost),
     cost_units: cloneOptional(state.cost_units),
+    // brick 4c272cab §8 — the fourth field this allowlist would have eaten.
+    // Written during the turn (on `usage_update`) and re-based off this clone
+    // afterwards, so its absence here is not a display bug: the provider that
+    // served would be present mid-turn and GONE from the saved record. Proven
+    // through a real Claude-via-OpenRouter turn on an isolated rig, not in memory.
+    last_turn_provider: cloneOptional(state.last_turn_provider),
     // brick://07dd62c9: the live served block + floor breadcrumbs MUST survive the
     // clone. savePromptSuccess stamps `served` then re-bases acpxState off this
     // clone; without these the served-truth surface + durable park are dropped on
@@ -835,6 +841,11 @@ function cloneSessionOptionBreadcrumbs(
       : {}),
     ...(options.provisioning_warning !== undefined
       ? { provisioning_warning: { ...options.provisioning_warning } }
+      : {}),
+    // brick 4c272cab / TE F-1 — rides the clone like every other breadcrumb
+    // object, or the turn path drops it on the first prompt.
+    ...(options.routing_policy_warning !== undefined
+      ? { routing_policy_warning: { ...options.routing_policy_warning } }
       : {}),
     // brick://5bac5564 Layer B: the model_guard breadcrumb rides the clone like
     // the other breadcrumb objects so it survives every turn's applyConfig clone.
@@ -1071,6 +1082,12 @@ const SESSION_UPDATE_HANDLERS: Record<string, SessionUpdateHandler> = {
     if (update.sessionUpdate === "usage_update") {
       applyUsageUpdate(conversation, update);
       rememberContextWindow(acpx, update);
+      // ⚠️ BEFORE, AND INDEPENDENT OF, THE COST INGEST BELOW — which returns
+      // early without a `_meta.piAcp.message` block, i.e. on EVERY Claude
+      // session. Folding attribution into that call left it unreachable on the
+      // one path that can observe a provider at all (measured on a live rig
+      // turn: the shim's log held two responses and `cost_units` was empty).
+      rememberTurnProvider(acpx, update);
       // ⚠️ GUARDED BECAUSE COST IS ENRICHMENT — it must never be able to cost the
       // caller its update. Kept deliberately, but note the correction below.
       //
@@ -1198,6 +1215,7 @@ function rememberCostFromUsageUpdate(acpx: SessionAcpxState, update: UsageUpdate
     return;
   }
   const reported = asRecord(asRecord(update)?.cost)?.amount;
+  const attribution = attributionFromUpdate(update);
   rememberSessionCost(acpx, {
     // camelCase here is pi's OWN wire vocabulary, not ours — see `UnitRates`
     // for where the naming has to change on the way to disk.
@@ -1206,7 +1224,52 @@ function rememberCostFromUsageUpdate(acpx: SessionAcpxState, update: UsageUpdate
     cacheRead: countField(message, "cacheRead"),
     cacheWrite: countField(message, "cacheWrite"),
     reportedAmount: typeof reported === "number" ? reported : null,
+    ...(attribution ? { attribution } : {}),
   });
+}
+
+/**
+ * Record who served the most recent message (brick 4c272cab §8 / A9).
+ *
+ * ⚠️ AN UPDATE WITH NO ATTRIBUTION LEAVES THE PRIOR VALUE ALONE rather than
+ * clearing it: a turn produces several usage updates and only the ones that
+ * followed an upstream response carry a block, so clearing on absence would
+ * blank a truthful value moments after writing it. It is stamped with `at`, so a
+ * reader can always tell how old the answer is instead of assuming it is this
+ * turn's.
+ */
+function rememberTurnProvider(acpx: SessionAcpxState, update: UsageUpdate): void {
+  const attribution = attributionFromUpdate(update);
+  if (!attribution) {
+    return;
+  }
+  acpx.last_turn_provider = { ...attribution, at: isoNow() };
+}
+
+/**
+ * Who served this message, if the path could observe it (brick 4c272cab §8).
+ *
+ * The block is put there by the ACP client, which owns the OpenRouter shim
+ * handle and therefore the session's attribution log; reading it off the update
+ * keeps this function session-scoped rather than reaching for a process-wide
+ * pointer that could cross-attribute two sessions in one process.
+ *
+ * ⚠️ ABSENT STAYS ABSENT. Every path that is not the Claude/OpenRouter shim —
+ * pi, Codex, a native Claude subscription — carries no block, and the unit
+ * records `null`. That is the honest answer, not a gap to be filled.
+ */
+function attributionFromUpdate(
+  update: UsageUpdate,
+): { provider_name: string | null; native_finish_reason: string | null } | undefined {
+  const block = asRecord(asRecord(asRecord(asRecord(update)?._meta)?.acpx)?.orAttribution);
+  if (!block) {
+    return undefined;
+  }
+  return {
+    provider_name: typeof block.provider_name === "string" ? block.provider_name : null,
+    native_finish_reason:
+      typeof block.native_finish_reason === "string" ? block.native_finish_reason : null,
+  };
 }
 
 /** pi's per-message usage block, or `undefined` when this update carries none. */

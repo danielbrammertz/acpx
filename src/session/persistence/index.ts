@@ -120,6 +120,24 @@ export type SessionIndexEntry = {
   depthOutcome?: string;
   depthServed?: string;
   /**
+   * Which OpenRouter provider SERVED this session's most recent message, and
+   * when (brick 4c272cab §8). Stored VERBATIM as OpenRouter returns it —
+   * `"BaseTen"`, `"Z.AI"` — a display name, not a slug; a consumer comparing it
+   * against a bare-slug `order` normalises at read time.
+   *
+   * ⚠️ Projected onto the INDEX ENTRY for the same reason `depthOutcome` above
+   * is: the chat header reads its view from the entry on the enriched hot path,
+   * so a field that stopped at the record would fail only at RUNTIME with
+   * typecheck and build green.
+   *
+   * 🛑 ABSENT MEANS NOT RECORDED — never "the provider the box preferred", and
+   * never a value carried over from an older turn. Most sessions have none: only
+   * the Claude/OpenRouter shim path can observe it.
+   */
+  lastTurnProvider?: string;
+  lastTurnNativeFinishReason?: string;
+  lastTurnProviderAt?: string;
+  /**
    * The DESCRIPTOR's `canSetModelLive`, REFINED by this session's own
    * advertisement (F-12). The UI's live-model control reads this, not the static
    * table — see {@link canSetModelLiveFromRecord}.
@@ -364,6 +382,12 @@ function parseIndexEntry(raw: unknown): SessionIndexEntry | undefined {
     desiredEffort: optionalString(record.desiredEffort),
     depthOutcome: optionalString(record.depthOutcome),
     depthServed: optionalString(record.depthServed),
+    // BOTH index legs, like brick://874fee67: this parser reconstructs an entry
+    // from index.json on reconcile, so a field missing HERE is stripped on the
+    // next daemon rewrite even though the projection below is correct.
+    lastTurnProvider: optionalString(record.lastTurnProvider),
+    lastTurnNativeFinishReason: optionalString(record.lastTurnNativeFinishReason),
+    lastTurnProviderAt: optionalString(record.lastTurnProviderAt),
     canSetModelLive:
       typeof record.canSetModelLive === "boolean" ? record.canSetModelLive : undefined,
     // brick://874fee67: BOTH index legs. This parser reconstructs an entry from
@@ -527,6 +551,11 @@ export function toSessionIndexEntry(record: SessionRecord, fileName: string): Se
     desiredEffort: acpx?.desired_config_options?.effort,
     depthOutcome: acpx?.depth_projection?.outcome,
     depthServed: acpx?.depth_projection?.served,
+    // `?? undefined`: the record stores `null` for "observed, but the response
+    // named none", and an index scalar carries absence as absence.
+    lastTurnProvider: acpx?.last_turn_provider?.provider_name ?? undefined,
+    lastTurnNativeFinishReason: acpx?.last_turn_provider?.native_finish_reason ?? undefined,
+    lastTurnProviderAt: acpx?.last_turn_provider?.at,
     outputStyleDesired: sessionOptions?.output_style,
     canSetModelLive: canSetModelLiveFromRecord(record),
     outputStyleSupported: outputStyleSupportedFromRecord(acpx),

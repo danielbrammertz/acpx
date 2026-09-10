@@ -34,6 +34,13 @@ import {
   type HarnessId,
 } from "./harness-capabilities.js";
 import { resolveHarnessConfigDirRoot } from "./harness-config-dir-root.js";
+import {
+  loadBoxRoutingPolicyRead,
+  type OpenRouterProviderObject,
+  type OpenRouterRoutingPolicy,
+  reportRoutingPolicyWarning,
+  resolveProviderObject,
+} from "./openrouter-provider-policy.js";
 import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
 
 /**
@@ -2069,7 +2076,7 @@ function writePiModelProvisioning(
     // Anthropic `baseUrl` repair is not (see the call site): a session created
     // without `--model` can still `session/set_model` onto any model pi offers,
     // and would then be the one case this brick's fix did not cover.
-    writePiModelsConfig(dir, undefined, boxModels, files);
+    writePiModelsConfig(dir, undefined, boxModels, env, files);
     return;
   }
 
@@ -2092,7 +2099,7 @@ function writePiModelProvisioning(
   // means "pi has a better entry than anything acpx could write".
   const provisioned = alreadyKnown ? undefined : buildPiCatalogueEntry(modelId, env);
 
-  writePiModelsConfig(dir, provisioned, boxModels, files);
+  writePiModelsConfig(dir, provisioned, boxModels, env, files);
   writePiModelsStore(dir, boxModels, provisioned, files);
 }
 
@@ -2134,20 +2141,37 @@ function writePiModelsConfig(
   dir: string,
   provisioned: PiCatalogueModel | undefined,
   boxModels: PiCatalogueModel[],
+  env: NodeJS.ProcessEnv,
   files: string[],
 ): void {
   const openrouter: {
     baseUrl: string;
+    compat?: { openRouterRouting: OpenRouterProviderObject };
     models?: PiCatalogueModel[];
-    modelOverrides?: Record<string, { maxTokens: number }>;
+    modelOverrides?: Record<string, PiModelOverride>;
   } = {
     baseUrl: OPENROUTER_API_BASE,
   };
   if (provisioned) {
     openrouter.models = [piModelDefinition(provisioned)];
   }
-  const overrides = buildPiMaxTokensOverrides(
-    provisioned ? [...boxModels, provisioned] : boxModels,
+  // The box's provider-routing policy (brick 4c272cab). Read ONCE for this
+  // write, from the env this config dir was asked about — never `process.env`,
+  // which on a scoped-env caller reads the machine's file (brick ff298f02).
+  //
+  // ⚠️ A REJECTED FILE IS ANNOUNCED, NOT SWALLOWED (TE finding F-1): without the
+  // line, a pi session on a box whose settings the gear happily displays runs
+  // with no routing at all and nothing anywhere says so.
+  const read = loadBoxRoutingPolicyRead(env);
+  reportRoutingPolicyWarning(read.warning);
+  const policy = read.policy;
+  const boxWide = resolveProviderObject(policy, undefined);
+  if (boxWide) {
+    openrouter.compat = { openRouterRouting: boxWide };
+  }
+  const overrides = mergePiModelOverrides(
+    buildPiMaxTokensOverrides(provisioned ? [...boxModels, provisioned] : boxModels),
+    buildPiRoutingOverrides(policy),
   );
   if (Object.keys(overrides).length > 0) {
     openrouter.modelOverrides = overrides;
@@ -2237,6 +2261,67 @@ const PI_MAX_OUTPUT_TOKENS = 32_768;
  * makes that sound by construction: the value capped here is the value pi will
  * hold.
  */
+/**
+ * A `models.json` model override. Both fields are optional because the two
+ * builders below contribute independently: a model may be capped, routed, or
+ * both, and an entry carrying neither is never written.
+ */
+type PiModelOverride = {
+  maxTokens?: number;
+  compat?: { openRouterRouting: OpenRouterProviderObject };
+};
+
+/**
+ * The per-model half of the box's provider-routing policy (brick 4c272cab).
+ *
+ * ## pi has the field NATIVELY — no extension, and this is the whole mechanism
+ *
+ * `compat.openRouterRouting` is a member of pi 0.84.4's `ProviderCompatSchema`
+ * (`dist/core/model-config.d.ts:57`), reachable at provider level, model level
+ * and inside `modelOverrides`; the openai-completions chunk sends it **verbatim**
+ * as the request's `provider` object
+ * (`model.compat?.openRouterRouting && (params.provider = …)`). The
+ * `before_provider_request` extension the original scoping assumed is not needed.
+ *
+ * ## ⚠️ EACH LEVEL CARRIES A COMPLETE OBJECT, DELIBERATELY
+ *
+ * pi's `mergeCompat` shallow-merges `openRouterRouting` key by key
+ * (provider level → model level), so writing only the per-model DELTA would also
+ * work — today. Writing the fully-resolved object at both levels makes the file
+ * say what acpx means **without depending on pi's merge semantics**, and makes
+ * the model-level block byte-identical to what the shim sends for that same
+ * model. Under pi's shallow merge the two forms produce the same result, so this
+ * costs nothing and removes an upstream behaviour from the trust chain.
+ *
+ * An override for an id pi does not carry is inert: `composeModelProvider` maps
+ * over the models it HAS and applies an override only where one matches
+ * (`provider-composer.js:299`).
+ */
+function buildPiRoutingOverrides(
+  policy: OpenRouterRoutingPolicy | undefined,
+): Record<string, PiModelOverride> {
+  const overrides: Record<string, PiModelOverride> = {};
+  for (const slug of Object.keys(policy?.perModel ?? {})) {
+    const resolved = resolveProviderObject(policy, slug);
+    if (resolved) {
+      overrides[slug] = { compat: { openRouterRouting: resolved } };
+    }
+  }
+  return overrides;
+}
+
+/** Union of the two override builders, per id — neither may erase the other. */
+function mergePiModelOverrides(
+  caps: Record<string, { maxTokens: number }>,
+  routing: Record<string, PiModelOverride>,
+): Record<string, PiModelOverride> {
+  const merged: Record<string, PiModelOverride> = { ...caps };
+  for (const [id, override] of Object.entries(routing)) {
+    merged[id] = { ...merged[id], ...override };
+  }
+  return merged;
+}
+
 function buildPiMaxTokensOverrides(
   models: PiCatalogueModel[],
 ): Record<string, { maxTokens: number }> {

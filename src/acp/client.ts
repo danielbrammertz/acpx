@@ -142,6 +142,16 @@ import {
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
 import {
+  attachAttribution,
+  type LastTurnProviderBreadcrumb,
+  OpenRouterAttributionLog,
+  type TurnAttribution,
+} from "./openrouter-attribution.js";
+import type {
+  RoutingPolicyWarning,
+  RoutingPolicyWarningBreadcrumb,
+} from "./openrouter-provider-policy.js";
+import {
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
   resolveOpenRouterRoute,
@@ -461,6 +471,19 @@ export type AgentLifecycleSnapshot = {
   lastExit?: AgentExitInfo;
   provisioningWarning?: ProvisioningWarningBreadcrumb;
   /**
+   * The box's OpenRouter routing settings file EXISTS and was REJECTED, so this
+   * session runs with NO provider policy (brick 4c272cab / TE finding F-1).
+   * Lands as `session_options.routing_policy_warning`, which is what lets the UI
+   * say "policy file invalid" instead of showing a policy that is not in force.
+   */
+  routingPolicyWarning?: RoutingPolicyWarningBreadcrumb;
+  /**
+   * Who served this session's most recent OpenRouter turn (TE finding F-3).
+   * Lands as `acpx.last_turn_provider`, the same field the usage_update path
+   * writes — this is the leg that catches a line written after the last update.
+   */
+  lastTurnProvider?: LastTurnProviderBreadcrumb;
+  /**
    * `true` once ANY turn of this session was served through the OpenRouter shim
    * (brick://a89c3cd4). Sticky in the client and sticky in the record: the write
    * leg only fires on a truthy value, so a post-teardown snapshot cannot reset
@@ -760,6 +783,20 @@ export class AcpClient {
    */
   private servedViaShim = false;
   /**
+   * A cursor over the running shim's attribution log (brick 4c272cab §8), or
+   * undefined when this session is not shim-served. Created beside the handle,
+   * in the one assignment path, so a third shim-start site inherits it.
+   */
+  private attributionLog?: OpenRouterAttributionLog;
+  /**
+   * The most recent attribution this client has SEEN, kept beside the cursor
+   * (TE finding F-3). The cursor CONSUMES, so whichever reader takes a line must
+   * not be the only one that can act on it: a `status` call would otherwise eat
+   * the line and drop it on the floor. Every read refreshes this; the record
+   * write reports from it.
+   */
+  private lastTurnAttribution?: TurnAttribution;
+  /**
    * The OpenRouter slug the PICKER route's shim is serving, or undefined. Paired
    * with `shimHandle`'s lifetime: set when that shim starts, cleared when it
    * stops, so `outOfBandModelId` can never outlive the process that makes it true.
@@ -769,6 +806,12 @@ export class AcpClient {
   private lastAgentExit?: AgentExitInfo;
   private lastKnownPid?: number;
   private latestProvisioningWarning?: ProvisioningWarningBreadcrumb;
+  /**
+   * The box settings file was rejected on THIS session's most recent spawn
+   * (brick 4c272cab / TE F-1). Refreshed at every shim start, so repairing the
+   * file and respawning stops re-writing the breadcrumb.
+   */
+  private latestRoutingPolicyWarning?: RoutingPolicyWarning;
   /**
    * The per-session harness config dir this client created, so `close()` can
    * remove it (brick 433f6bf8). Undefined for every harness that gets none.
@@ -901,7 +944,25 @@ export class AcpClient {
       // indistinguishable from "not shim-served" while still being a value acpx
       // never observed. Absent means "cannot say"; it must not become `false`.
       servedViaShim: this.servedViaShim ? true : undefined,
+      // Stamped at read, not at spawn: `at` is when the record learned it, and
+      // the warning object itself is re-derived on every spawn.
+      routingPolicyWarning: this.latestRoutingPolicyWarning
+        ? { ...this.latestRoutingPolicyWarning, at: new Date().toISOString() }
+        : undefined,
+      // TE F-3, the belt: this snapshot is built when the record is WRITTEN, i.e.
+      // after the turn, so re-reading here catches a line that landed after the
+      // last usage_update. Reported from the memo rather than from this read
+      // alone, so a snapshot taken by anything else cannot consume it and lose it.
+      lastTurnProvider: this.readLastTurnProvider(),
     };
+  }
+
+  /** The latest attribution, refreshed first, stamped when the record learns it. */
+  private readLastTurnProvider(): LastTurnProviderBreadcrumb | undefined {
+    this.refreshAttribution();
+    return this.lastTurnAttribution
+      ? { ...this.lastTurnAttribution, at: new Date().toISOString() }
+      : undefined;
   }
 
   supportsLoadSession(): boolean {
@@ -1434,6 +1495,17 @@ export class AcpClient {
     this.shimHandle = handle;
     if (handle !== undefined) {
       this.servedViaShim = true;
+      // ⚠️ NOT sticky, unlike `servedViaShim`: the cursor belongs to THIS shim's
+      // log. A new shim (respawn, reconnect after teardown) starts a new file,
+      // and carrying the old cursor's offset into it would skip its first
+      // responses — attribution would then be silently missing for exactly the
+      // turns after a restart.
+      this.attributionLog = handle.attributionLogPath
+        ? new OpenRouterAttributionLog(handle.attributionLogPath)
+        : undefined;
+      // Same single-assignment-path argument as `servedViaShim` above: a third
+      // shim-start site inherits this instead of forgetting it.
+      this.latestRoutingPolicyWarning = handle.routingPolicyWarning;
     }
   }
 
@@ -3195,6 +3267,9 @@ export class AcpClient {
       this.configOptionUpdateCount += 1;
       this.rememberConfigOptions(notification.update.configOptions ?? undefined);
     }
+    if (notification.update?.sessionUpdate === "usage_update") {
+      this.decorateWithAttribution(notification.update);
+    }
     const sequence = ++this.observedSessionUpdates;
     this.sessionUpdateChain = this.sessionUpdateChain.then(async () => {
       try {
@@ -3210,6 +3285,44 @@ export class AcpClient {
     });
 
     await this.sessionUpdateChain;
+  }
+
+  /**
+   * Attach WHO SERVED the message this usage update reports (brick 4c272cab §8).
+   *
+   * Done HERE because this class owns the shim handle, and therefore the one log
+   * that belongs to this session — the conversation model, which persists the
+   * unit, has neither a session id nor a path and would otherwise need a
+   * process-wide pointer that could cross-attribute two sessions in one process.
+   *
+   * ⚠️ ONE READ PER USAGE UPDATE, AND IT CONSUMES. `takeLatest` returns only
+   * responses not yet handed out, so a usage update with no new response leaves
+   * the block absent — which the ingest records as `null`. Re-reading the tail
+   * instead would attribute a STALE response to it: a wrong answer indis-
+   * tinguishable from a right one.
+   */
+  private decorateWithAttribution(update: SessionNotification["update"]): void {
+    const attribution = this.refreshAttribution();
+    if (attribution) {
+      attachAttribution(update, attribution);
+    }
+  }
+
+  /**
+   * Take any new attribution line and remember it. Returns only what was NEW.
+   *
+   * ⚠️ THE MEMO IS WHAT MAKES A LATE LINE SURVIVABLE (TE finding F-3). The shim
+   * now writes the moment the provider is readable, so the usage_update path
+   * normally has it — but a line that still arrives late is picked up by the next
+   * read (the lifecycle snapshot, built when the record is written) instead of
+   * being lost because the one reader that could have used it had already run.
+   */
+  private refreshAttribution(): TurnAttribution | undefined {
+    const latest = this.attributionLog?.takeLatest();
+    if (latest) {
+      this.lastTurnAttribution = latest;
+    }
+    return latest;
   }
 
   private async waitForSessionUpdateDrain(idleMs: number, timeoutMs: number): Promise<void> {

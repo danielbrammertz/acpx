@@ -576,6 +576,10 @@ function assignParsedSessionOptions(state: SessionAcpxState, raw: unknown): void
   assignSessionOptionSubscriptionSwitch(parsedSessionOptions, sessionOptions.subscription_switch);
   assignSessionOptionAccountSwitch(parsedSessionOptions, sessionOptions.account_switch);
   assignSessionOptionProvisioningWarning(parsedSessionOptions, sessionOptions.provisioning_warning);
+  assignSessionOptionRoutingPolicyWarning(
+    parsedSessionOptions,
+    sessionOptions.routing_policy_warning,
+  );
 
   if (Object.keys(parsedSessionOptions).length > 0) {
     state.session_options = parsedSessionOptions;
@@ -715,6 +719,42 @@ function isValidProvisioningWarning(
     typeof record.message === "string" &&
     record.message.length > 0
   );
+}
+
+/**
+ * brick 4c272cab / TE F-1 — the READ leg. Without it the breadcrumb is written
+ * correctly and then dropped on the next parse, which is the shape that made
+ * `provisioning_warning` above dead on arrival for months: every write leg
+ * green, nothing on the record.
+ *
+ * ⚠️ The predicate names the CANONICAL type rather than restating its fields, for
+ * the reason its neighbour documents: a second declaration is a second thing to
+ * forget on a rename.
+ */
+function isValidRoutingPolicyWarning(
+  record: Record<string, unknown>,
+): record is NonNullable<
+  NonNullable<SessionAcpxState["session_options"]>["routing_policy_warning"]
+> {
+  return (
+    typeof record.file === "string" &&
+    record.file.length > 0 &&
+    typeof record.reason === "string" &&
+    record.reason.length > 0 &&
+    typeof record.at === "string" &&
+    record.at.length > 0
+  );
+}
+
+function assignSessionOptionRoutingPolicyWarning(
+  options: NonNullable<SessionAcpxState["session_options"]>,
+  value: unknown,
+): void {
+  const record = asRecord(value);
+  if (!record || !isValidRoutingPolicyWarning(record)) {
+    return;
+  }
+  options.routing_policy_warning = { file: record.file, reason: record.reason, at: record.at };
 }
 
 function assignSessionOptionProvisioningWarning(
