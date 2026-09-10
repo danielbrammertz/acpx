@@ -650,18 +650,57 @@ function buildAgentEnvironment(
   // a box that legitimately relocates pi's agent dir. Same predicate as the writer
   // ({@link isAcpxPerSessionConfigDir}), ONE implementation: two spellings of one
   // rule is how the writer and the scrubber come to disagree.
-  //
-  // Deliberately NOT scrubbed here: PI_SESSION_ID, PI_SESSION_FILE, PI_PROVIDER,
-  // PI_MODEL, PI_REASONING_LEVEL. Measured against pi 0.84.4's bundle: pi DELETES
-  // all five from the shell env it builds for tool subprocesses and re-sets them
-  // from the current session, so they self-heal at every pi boundary and cannot
-  // mis-steer a child pi. They do mislead /proc-based forensics — the same class
-  // as the ACPX_EFFECTIVE_ADAPTER leak above — and that is a follow-up brick, not
-  // behaviour to change inside a P0.
   delete env.PI_CODING_AGENT_SESSION_DIR;
   if (isAcpxPerSessionConfigDir(env.PI_CODING_AGENT_DIR)) {
     delete env.PI_CODING_AGENT_DIR;
   }
+  // brick://27894f40 — pi's five DESCRIPTIVE session variables, for the same
+  // stated reason as every delete above: never inherit stale acpx process
+  // context. They are not operative — the cb214e48 conception deferred them on
+  // exactly that ground — but they MIS-ATTRIBUTE A CHILD TO ITS PARENT in
+  // /proc-based forensics, the same class as the ACPX_EFFECTIVE_* family.
+  //
+  // Measured on devbox 2026-09-09 (cb214e48 EVIDENCE §1b): the pi-acp adapter of
+  // the child session `w8-depth-gate` reported PI_SESSION_ID and PI_SESSION_FILE
+  // naming the Wave 8 HoD's pi session and JSONL — so a debugger reading
+  // /proc/<child-adapter>/environ is told to open the PARENT's transcript, with
+  // nothing in the dump to reveal the mistake.
+  //
+  // Safe to clear UNCONDITIONALLY, and the reason is stronger than for the two
+  // above: nothing in this system READS them. Re-measured 2026-09-10 against pi
+  // 0.84.4's shipped bundle, pi-acp `70ee6c7` and this repo — each name occurs
+  // exactly twice in pi, both inside one function, `resolveSpawnContext`:
+  //
+  //   let env2={...getShellEnv()};
+  //   delete env2.PI_SESSION_ID, delete env2.PI_SESSION_FILE, delete env2.PI_PROVIDER,
+  //   delete env2.PI_MODEL, delete env2.PI_REASONING_LEVEL,
+  //   exposeSessionEnvironment&&ctx && (… env2.PI_SESSION_ID=ctx.sessionManager.getSessionId() …
+  //    ctx.thinkingLevel&&(env2.PI_REASONING_LEVEL=ctx.thinkingLevel))
+  //
+  // i.e. write-only: pi drops all five and re-derives them from the LIVE session
+  // for every tool subprocess. So deleting them here cannot starve pi — a pi
+  // session still publishes its own five to its own tools, which is the only
+  // place they were ever meant to be read. Zero occurrences in pi-acp's src or
+  // dist, and zero readers here (the only other mention in this repo is a
+  // docstring in cli/session/inherited-metadata.ts).
+  //
+  // ⚠️ NOT a config seam, so there is no box-level value to preserve and no
+  // conditional to write: unlike PI_CODING_AGENT_DIR, whose box-level form is
+  // legitimate and is why THAT delete is gated, these five are per-session
+  // outputs of a running pi. A value present at spawn is always some other
+  // session's. Deleting them for EVERY harness is deliberate — a claude or codex
+  // child of a pi parent inherits the same five today, for no reason at all.
+  //
+  // pi's grep trap does NOT apply here (cb214e48 EVIDENCE §2): pi assembles
+  // `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` at runtime from its
+  // rebrandable `APP_NAME`, but these five are literal in the bundle, and a
+  // suffix search (`toUpperCase()}_SESSION_ID` etc.) returns zero — so the
+  // literal-name census above is complete, not a false negative.
+  delete env.PI_SESSION_ID;
+  delete env.PI_SESSION_FILE;
+  delete env.PI_MODEL;
+  delete env.PI_PROVIDER;
+  delete env.PI_REASONING_LEVEL;
   applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
   if (sessionContext && typeof sessionContext.acpxRecordId === "string") {
