@@ -595,6 +595,7 @@ function assignParsedSessionOptions(state: SessionAcpxState, raw: unknown): void
   assignSessionOptionSubscriptionSwitch(parsedSessionOptions, sessionOptions.subscription_switch);
   assignSessionOptionAccountSwitch(parsedSessionOptions, sessionOptions.account_switch);
   assignSessionOptionProvisioningWarning(parsedSessionOptions, sessionOptions.provisioning_warning);
+  assignSessionOptionServedViaShim(parsedSessionOptions, sessionOptions.served_via_shim);
   assignSessionOptionRoutingPolicyWarning(
     parsedSessionOptions,
     sessionOptions.routing_policy_warning,
@@ -865,6 +866,29 @@ function assignSessionOptionAutoFailover(
 // on a cold disk reload (mirror auto_failover), or every queue-owner delivery /
 // owner respawn strips it → floorHardEnabled=false → the airtight quarantine
 // silently stops firing.
+/**
+ * 🛑 brick 576d8090 — FOUND BY THE ALLOWLIST GUARD ON ITS FIRST RUN, and this is
+ * the one that mattered most of the three.
+ *
+ * `served_via_shim` is written on every spawn and its whole purpose is to be read
+ * **on a COLD RESUME, after teardown** (brick://a89c3cd4): the resume gate uses it
+ * to know it must not demand a Claude SDK transcript for a session whose turns
+ * OpenRouter served. A cold resume goes through THIS PARSER — so the field was
+ * being dropped on precisely the path it exists for, restored only because a live
+ * client re-stamps it from the lifecycle snapshot.
+ *
+ * Same family as the four losses in the guard's header, and it had been sitting
+ * here unnoticed: the field's own tests write it and read their own object back.
+ */
+function assignSessionOptionServedViaShim(
+  options: NonNullable<SessionAcpxState["session_options"]>,
+  value: unknown,
+): void {
+  if (typeof value === "boolean") {
+    options.served_via_shim = value;
+  }
+}
+
 function assignSessionOptionFloorHard(
   options: NonNullable<SessionAcpxState["session_options"]>,
   value: unknown,
