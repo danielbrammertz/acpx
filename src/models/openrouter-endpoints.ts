@@ -23,6 +23,16 @@
  *    is a self-inflicted degradation, so the credential is now an enrichment and
  *    its absence is a NOTE, not an error (HoD ruling O-1, which revises A4).
  *
+ *    ⚠️ **BUT THE THROUGHPUT NUMBERS ARE KEY-GATED, AND THEY ARE THE POINT.**
+ *    Measured 2026-09-10, same slug, one variable: **unauthenticated → 26 rows,
+ *    uptime on all 26, `throughput_last_30m.p50` null on ALL 26; authenticated →
+ *    26 rows, p50 on all 26.** So "public" is true about the ROWS and false about
+ *    the metric this whole brick exists to act on. A box with no credential can
+ *    still see who serves a model, its quantization, its price and its uptime —
+ *    which is why refusing the call was wrong — but it cannot rank by speed. The
+ *    CLI says so in its `note` rather than letting every `p50` render as `—` with
+ *    no explanation.
+ *
  *    ⚠️ **AND IT KILLED A FAULT INJECTION** — worth knowing before you reach for
  *    one: the TE's first stale-on-error probe set a bogus key expecting the fetch
  *    to fail, and got 26 live rows with `error:null`. A bad key does not fail this

@@ -490,8 +490,10 @@ function endpointsEnvelope(
 function credentialNote(present: boolean): string | null {
   return present
     ? null
-    : `OPENROUTER_BOX_CREDENTIAL_MISSING — no OpenRouter credential on ${boxLabel()}; ` +
-        `this endpoint is public, so the rows are complete, but nothing on this box will route.`;
+    : `OPENROUTER_BOX_CREDENTIAL_MISSING — no OpenRouter credential on ${boxLabel()}. ` +
+        `The endpoint is public, so every provider row is here, and so are uptime and pricing — ` +
+        `but THROUGHPUT IS KEY-GATED: throughput_last_30m is null on all 26 rows unauthenticated ` +
+        `and populated on all 26 with the key (measured 2026-09-10). Nothing on this box will route either.`;
 }
 
 function renderEndpoints(slug: string, result: OpenRouterEndpointsResult): string {
