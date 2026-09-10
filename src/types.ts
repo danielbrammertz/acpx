@@ -13,6 +13,7 @@ import type {
 import type { CostUnit, SessionCostFigure } from "./models/cost-provenance.js";
 export type { McpServer, SessionNotification } from "@agentclientprotocol/sdk";
 import type { EffectiveAccountMetadata } from "./acp/auth-env.js";
+import type { RoutingPolicyWarningBreadcrumb } from "./acp/openrouter-provider-policy.js";
 import type { PromptInput } from "./prompt-content.js";
 
 export type AcpPermissionRequest = {
@@ -977,6 +978,30 @@ export type SessionAcpxState = {
       anchor?: string;
       message: string;
     };
+    /**
+     * The box's OpenRouter routing settings file EXISTS and was REJECTED, so the
+     * whole policy was dropped for this session (brick 4c272cab, TE finding F-1).
+     *
+     * **Why a breadcrumb and not just a log line.** Measured by the test
+     * engineer: acpx and acpx-ui's validators agreed on 37 of 40 candidates and
+     * disagreed on a family of 8 — an empty value of the WRONG type
+     * (`perModel: []`, `ignore: ""`) is "neutral" to the UI and a type error to
+     * acpx. The user-visible result was the settings gear reading *"Minimum
+     * precision 8-bit · Never: Wafer"* while the box applied **nothing at all**,
+     * with no error on either side. The file was never PATCHed, so the UI's
+     * save-time validation cannot catch it; only the component that rejected it
+     * can say so, and only the record carries that to a UI.
+     *
+     * ⚠️ Written only when a policy was actually dropped. Absent is the normal
+     * state — no settings file, no `openrouterRouting` key, and a legal policy
+     * all leave it unset — so a UI may treat presence as "policy file invalid".
+     *
+     * ⚠️ snake_case, like every persisted key here: `assertPersistedKeyPolicy`
+     * runs before `fs.writeFile`, and the throw is swallowed by
+     * `LiveSessionCheckpoint` — a camelCase key freezes the WHOLE record
+     * silently (that is what killed `provisioning_warning` above for months).
+     */
+    routing_policy_warning?: RoutingPolicyWarningBreadcrumb;
     /**
      * `true` once ANY of this session's turns were served through the OpenRouter
      * shim rather than by Claude credentials (brick://a89c3cd4).

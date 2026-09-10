@@ -842,6 +842,11 @@ function cloneSessionOptionBreadcrumbs(
     ...(options.provisioning_warning !== undefined
       ? { provisioning_warning: { ...options.provisioning_warning } }
       : {}),
+    // brick 4c272cab / TE F-1 — rides the clone like every other breadcrumb
+    // object, or the turn path drops it on the first prompt.
+    ...(options.routing_policy_warning !== undefined
+      ? { routing_policy_warning: { ...options.routing_policy_warning } }
+      : {}),
     // brick://5bac5564 Layer B: the model_guard breadcrumb rides the clone like
     // the other breadcrumb objects so it survives every turn's applyConfig clone.
     ...(options.model_guard !== undefined ? { model_guard: { ...options.model_guard } } : {}),

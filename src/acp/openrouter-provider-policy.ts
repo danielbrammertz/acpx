@@ -209,6 +209,34 @@ export function uiSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * Why a settings file that EXISTS produced no policy (TE finding F-1).
+ *
+ * Absence of a warning is the normal state: no file, no `openrouterRouting`
+ * key, and a legal policy all produce `undefined`.
+ */
+export type RoutingPolicyWarning = {
+  /** The settings file acpx actually read — the two repos can resolve different ones. */
+  file: string;
+  /** Human-readable, field-anchored: "perModel: must be an object keyed by model slug". */
+  reason: string;
+};
+
+/**
+ * The persisted form: the observation plus WHEN the record learned it.
+ *
+ * ⚠️ ONE DECLARATION, referenced by `types.ts`, the client snapshot and the
+ * parser alike. A hand-copied duplicate is how `provisioning_warning` kept its
+ * camelCase field names through a rename — "a second declaration is a second
+ * thing to forget", as that parser's own comment puts it.
+ */
+export type RoutingPolicyWarningBreadcrumb = RoutingPolicyWarning & { at: string };
+
+export type BoxRoutingPolicyRead = {
+  policy?: OpenRouterRoutingPolicy;
+  warning?: RoutingPolicyWarning;
+};
+
+/**
  * The box's policy, or `undefined` for "no policy" — SYNCHRONOUS, NETWORK-FREE,
  * and it NEVER THROWS.
  *
@@ -219,25 +247,114 @@ export function uiSettingsPath(env: NodeJS.ProcessEnv = process.env): string {
  * bricked by its own settings file.
  *
  * ⚠️ AN INVALID POLICY IS DROPPED WHOLE, not partially applied. Half a policy is
- * a shape nobody authored and nobody measured; acpx-ui validates on save
- * (`validateRoutingPolicy`, shared), so reaching here invalid means the file was
- * hand-edited.
+ * a shape nobody authored and nobody measured.
+ *
+ * 🛑 **BUT DROPPING IT SILENTLY WAS A REAL DEFECT — TE FINDING F-1.** The two
+ * repos' validators agreed on 37 of 40 cases and disagreed on a family of 8:
+ * an empty value of the WRONG TYPE (`perModel: []`, `ignore: ""`) is "neutral"
+ * to acpx-ui and a type error here. Measured end-to-end: **the settings gear
+ * read `Minimum precision 8-bit · Never: Wafer` while the box applied nothing at
+ * all, with no error on either side.** The drop is still right — a partial
+ * policy is a shape nobody authored — but it must be LOUD.
+ * ⇒ {@link loadBoxRoutingPolicyRead} carries the reason out, the spawn paths put
+ * it on stderr, and the record carries `session_options.routing_policy_warning`
+ * so the UI can say *"policy file invalid"* instead of showing a policy that is
+ * not in force.
  */
 export function loadBoxRoutingPolicy(
   env: NodeJS.ProcessEnv = process.env,
   settingsPath: string = uiSettingsPath(env),
 ): OpenRouterRoutingPolicy | undefined {
-  const candidate = readSettingsFile(settingsPath)?.openrouterRouting;
-  if (candidate === undefined || candidate === null) {
-    return undefined;
+  return loadBoxRoutingPolicyRead(env, settingsPath).policy;
+}
+
+/** {@link loadBoxRoutingPolicy}, plus WHY an existing file yielded nothing. */
+export function loadBoxRoutingPolicyRead(
+  env: NodeJS.ProcessEnv = process.env,
+  settingsPath: string = uiSettingsPath(env),
+): BoxRoutingPolicyRead {
+  const settings = readSettingsFile(settingsPath);
+  if (!settings) {
+    // ⚠️ NO WARNING HERE, AND THAT IS DELIBERATE. This leg is overwhelmingly
+    // "the box has no settings file", which is the normal state of most boxes;
+    // warning on it would train every reader to ignore the line. A file that
+    // exists but is unparseable is reported by the leg below.
+    return unparseableWarning(settingsPath);
   }
-  if (validateRoutingPolicy(candidate).length > 0) {
-    return undefined;
+  const candidate = settings.openrouterRouting;
+  if (candidate === undefined || candidate === null) {
+    return {};
+  }
+  const errors = validateRoutingPolicy(candidate);
+  if (errors.length > 0) {
+    return { warning: { file: settingsPath, reason: describeErrors(errors) } };
   }
   const policy = candidate as OpenRouterRoutingPolicy;
   // `{}` on disk is treated as absent — the one representation of "auto"
   // (CONCEPTION K4). A hand-edited file cannot introduce a second one.
-  return isEmptyPolicy(policy) ? undefined : policy;
+  return isEmptyPolicy(policy) ? {} : { policy };
+}
+
+/**
+ * A file that is PRESENT but unreadable/unparseable warns; an absent one does not.
+ *
+ * Distinguished by a second `statSync`, not by catching a parse error, because
+ * `readSettingsFile` cannot tell ENOENT from a truncated file — and the two mean
+ * opposite things to an operator.
+ */
+function unparseableWarning(settingsPath: string): BoxRoutingPolicyRead {
+  try {
+    if (!fs.statSync(settingsPath).isFile()) {
+      return {};
+    }
+  } catch {
+    return {};
+  }
+  return {
+    warning: { file: settingsPath, reason: "the settings file is not readable JSON" },
+  };
+}
+
+/** At most three, so the line stays a line; the count says how many were hidden. */
+function describeErrors(errors: RoutingPolicyError[]): string {
+  const shown = errors.slice(0, 3).map((error) => `${error.field}: ${error.message}`);
+  const hidden = errors.length - shown.length;
+  return hidden > 0 ? `${shown.join("; ")} (+${hidden} more)` : shown.join("; ");
+}
+
+/**
+ * The stderr line, said ONCE PER PROCESS PER DISTINCT WARNING.
+ *
+ * A queue owner spawns many sessions, and a box whose settings file is broken
+ * would otherwise print the same line on every one of them — noise that gets
+ * filtered, which is how a loud warning becomes a silent one again. Keyed on
+ * file + reason so a *different* breakage still speaks up.
+ *
+ * ⚠️ The separator is a literal " :: ", NOT a NUL. This repo already carries a
+ * file whose NUL-in-a-template-literal composite keys make `grep` return a false
+ * negative on it (`PROJECT.md`); no new one starts here.
+ */
+const reportedRoutingWarnings = new Set<string>();
+
+export function reportRoutingPolicyWarning(warning: RoutingPolicyWarning | undefined): void {
+  if (!warning) {
+    return;
+  }
+  const key = `${warning.file} :: ${warning.reason}`;
+  if (reportedRoutingWarnings.has(key)) {
+    return;
+  }
+  reportedRoutingWarnings.add(key);
+  process.stderr.write(
+    `[acpx] warning: OpenRouter provider routing is NOT in force — ` +
+      `${warning.file} was rejected (${warning.reason}). ` +
+      `The whole policy is ignored; sessions run as if unconfigured.\n`,
+  );
+}
+
+/** Test seam: the dedupe is per PROCESS, and a test process runs many cases. */
+export function resetRoutingPolicyWarningMemo(): void {
+  reportedRoutingWarnings.clear();
 }
 
 /** The parsed settings object, or `undefined` for absent / unreadable / mangled. */
@@ -512,15 +629,21 @@ function lookupPerModel(
 
 /**
  * The one call a spawn path makes: read the box's settings and resolve this
- * model's `provider` object, or `undefined`. Never throws, never touches the
- * network.
+ * model's `provider` object. Never throws, never touches the network.
+ *
+ * ⚠️ RETURNS THE WARNING TOO, and the caller must surface it (TE finding F-1).
+ * The two halves are returned together rather than as two calls precisely so a
+ * spawn path cannot take the policy and quietly leave the reason behind — which
+ * is the defect, one layer up.
  */
-export function resolveBoxProviderObject(
+export function resolveBoxRouting(
   env: NodeJS.ProcessEnv,
   modelSlug: string | undefined,
   options: ResolveOptions = {},
-): OpenRouterProviderObject | undefined {
-  return resolveProviderObject(loadBoxRoutingPolicy(env), modelSlug, options);
+): { provider?: OpenRouterProviderObject; warning?: RoutingPolicyWarning } {
+  const read = loadBoxRoutingPolicyRead(env);
+  const provider = resolveProviderObject(read.policy, modelSlug, options);
+  return { ...(provider ? { provider } : {}), ...(read.warning ? { warning: read.warning } : {}) };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -142,6 +142,10 @@ import {
   isSessionUpdateNotification,
 } from "./jsonrpc.js";
 import { attachAttribution, OpenRouterAttributionLog } from "./openrouter-attribution.js";
+import type {
+  RoutingPolicyWarning,
+  RoutingPolicyWarningBreadcrumb,
+} from "./openrouter-provider-policy.js";
 import {
   openRouterBoxCredentialMissing,
   resolveOpenRouterBoxCredential,
@@ -462,6 +466,13 @@ export type AgentLifecycleSnapshot = {
   lastExit?: AgentExitInfo;
   provisioningWarning?: ProvisioningWarningBreadcrumb;
   /**
+   * The box's OpenRouter routing settings file EXISTS and was REJECTED, so this
+   * session runs with NO provider policy (brick 4c272cab / TE finding F-1).
+   * Lands as `session_options.routing_policy_warning`, which is what lets the UI
+   * say "policy file invalid" instead of showing a policy that is not in force.
+   */
+  routingPolicyWarning?: RoutingPolicyWarningBreadcrumb;
+  /**
    * `true` once ANY turn of this session was served through the OpenRouter shim
    * (brick://a89c3cd4). Sticky in the client and sticky in the record: the write
    * leg only fires on a truthy value, so a post-teardown snapshot cannot reset
@@ -777,6 +788,12 @@ export class AcpClient {
   private lastKnownPid?: number;
   private latestProvisioningWarning?: ProvisioningWarningBreadcrumb;
   /**
+   * The box settings file was rejected on THIS session's most recent spawn
+   * (brick 4c272cab / TE F-1). Refreshed at every shim start, so repairing the
+   * file and respawning stops re-writing the breadcrumb.
+   */
+  private latestRoutingPolicyWarning?: RoutingPolicyWarning;
+  /**
    * The per-session harness config dir this client created, so `close()` can
    * remove it (brick 433f6bf8). Undefined for every harness that gets none.
    *
@@ -908,6 +925,11 @@ export class AcpClient {
       // indistinguishable from "not shim-served" while still being a value acpx
       // never observed. Absent means "cannot say"; it must not become `false`.
       servedViaShim: this.servedViaShim ? true : undefined,
+      // Stamped at read, not at spawn: `at` is when the record learned it, and
+      // the warning object itself is re-derived on every spawn.
+      routingPolicyWarning: this.latestRoutingPolicyWarning
+        ? { ...this.latestRoutingPolicyWarning, at: new Date().toISOString() }
+        : undefined,
     };
   }
 
@@ -1449,6 +1471,9 @@ export class AcpClient {
       this.attributionLog = handle.attributionLogPath
         ? new OpenRouterAttributionLog(handle.attributionLogPath)
         : undefined;
+      // Same single-assignment-path argument as `servedViaShim` above: a third
+      // shim-start site inherits this instead of forgetting it.
+      this.latestRoutingPolicyWarning = handle.routingPolicyWarning;
     }
   }
 

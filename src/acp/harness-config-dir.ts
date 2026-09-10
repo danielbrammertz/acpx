@@ -35,9 +35,10 @@ import {
 } from "./harness-capabilities.js";
 import { resolveHarnessConfigDirRoot } from "./harness-config-dir-root.js";
 import {
-  loadBoxRoutingPolicy,
+  loadBoxRoutingPolicyRead,
   type OpenRouterProviderObject,
   type OpenRouterRoutingPolicy,
+  reportRoutingPolicyWarning,
   resolveProviderObject,
 } from "./openrouter-provider-policy.js";
 import { readPiAdvertisedModelIds } from "./pi-model-knowledge.js";
@@ -2157,7 +2158,13 @@ function writePiModelsConfig(
   // The box's provider-routing policy (brick 4c272cab). Read ONCE for this
   // write, from the env this config dir was asked about — never `process.env`,
   // which on a scoped-env caller reads the machine's file (brick ff298f02).
-  const policy = loadBoxRoutingPolicy(env);
+  //
+  // ⚠️ A REJECTED FILE IS ANNOUNCED, NOT SWALLOWED (TE finding F-1): without the
+  // line, a pi session on a box whose settings the gear happily displays runs
+  // with no routing at all and nothing anywhere says so.
+  const read = loadBoxRoutingPolicyRead(env);
+  reportRoutingPolicyWarning(read.warning);
+  const policy = read.policy;
   const boxWide = resolveProviderObject(policy, undefined);
   if (boxWide) {
     openrouter.compat = { openRouterRouting: boxWide };

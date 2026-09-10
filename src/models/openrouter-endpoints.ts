@@ -11,10 +11,22 @@
  *
  * ## Three differences from `openrouter-catalogue.ts`, each measured
  *
- * 1. **It NEEDS THE BOX KEY.** `/api/v1/models` is public; this endpoint is not.
- *    A box with no credential must therefore ERROR, never return an empty list —
- *    "no key" and "this model has no endpoints" are different answers and only
- *    one of them is about the box.
+ * 1. **The key is OPTIONAL — sent when the box has one, never required.**
+ *
+ *    🛑 **THE BRIEF SAID THE OPPOSITE AND THE BRIEF WAS WRONG.** CONCEPTION §7.1
+ *    states this endpoint *"needs the box key (unlike `/api/v1/models`, which is
+ *    public)"*, and acceptance A4 listed "returns rows on a box with no key" as a
+ *    FAIL. The test engineer measured it directly (2026-09-10 10:12Z): **no
+ *    `Authorization` header at all → `200`, 24 559 bytes, 26 rows**; a
+ *    deliberately invalid key → `200` as well. The endpoint is public. Refusing
+ *    to show freely-reachable data because this box happens to hold no credential
+ *    is a self-inflicted degradation, so the credential is now an enrichment and
+ *    its absence is a NOTE, not an error (HoD ruling O-1, which revises A4).
+ *
+ *    ⚠️ **AND IT KILLED A FAULT INJECTION** — worth knowing before you reach for
+ *    one: the TE's first stale-on-error probe set a bogus key expecting the fetch
+ *    to fail, and got 26 live rows with `error:null`. A bad key does not fail this
+ *    request. Use a slug that genuinely 404s.
  * 2. **TTL is 5 minutes, not the catalogue's hour.** These are LIVE HEALTH
  *    figures. An hour-old uptime number is worse than none, because it reads as
  *    current — and it is read at exactly the moment someone is deciding whether a
@@ -122,7 +134,8 @@ export type EndpointsLoadOptions = {
  */
 export async function loadOpenRouterEndpoints(
   slug: string,
-  apiKey: string,
+  /** The box key when it has one. **Optional** — this endpoint is public (§1). */
+  apiKey: string | undefined,
   options: EndpointsLoadOptions = {},
 ): Promise<OpenRouterEndpointsResult> {
   const { cachePath, ttlMs, now, fetchEndpoints } = resolveLoadOptions(slug, apiKey, options);
@@ -141,7 +154,11 @@ export async function loadOpenRouterEndpoints(
 }
 
 /** Defaults in one place, mirroring the catalogue reader's own splitting. */
-function resolveLoadOptions(slug: string, apiKey: string, options: EndpointsLoadOptions) {
+function resolveLoadOptions(
+  slug: string,
+  apiKey: string | undefined,
+  options: EndpointsLoadOptions,
+) {
   const env = options.env ?? process.env;
   return {
     cachePath: options.cachePath ?? endpointsCachePath(slug, env),
@@ -153,12 +170,17 @@ function resolveLoadOptions(slug: string, apiKey: string, options: EndpointsLoad
 
 export async function fetchEndpointsLive(
   slug: string,
-  apiKey: string,
+  apiKey?: string,
 ): Promise<OpenRouterEndpointsSnapshot> {
   const url = endpointsUrl(slug);
   const response = await fetch(url, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    headers: { accept: "application/json", authorization: `Bearer ${apiKey}` },
+    // The key is sent when present — attribution and any account-level view ride
+    // on it — and simply omitted when not. Measured: both forms answer 200.
+    headers: {
+      accept: "application/json",
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+    },
   });
   if (!response.ok) {
     // ⚠️ The URL, never the key. The Authorization header is the one thing in

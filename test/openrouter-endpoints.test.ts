@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   endpointsCachePath,
   endpointsUrl,
+  fetchEndpointsLive,
   loadOpenRouterEndpoints,
   OPENROUTER_ENDPOINTS_TTL_MS,
   parseEndpointsBody,
@@ -189,6 +190,48 @@ test("A4 · a failure with no cache is snapshot:null — never an empty endpoint
   assert.equal(result.snapshot, null);
   assert.equal(result.stale, false, "nothing was served, so nothing is stale");
   assert.equal(result.error, "no network");
+});
+
+test("O-1 · the fetch works with NO key, and sends one when present", async () => {
+  // 🛑 THE BRIEF SAID THIS ENDPOINT NEEDS THE BOX KEY. IT DOES NOT — measured by
+  // the test engineer against OpenRouter: no `Authorization` header at all → 200
+  // with 26 rows; a deliberately invalid key → 200 as well. Refusing to show
+  // freely-reachable data because this box holds no credential is a
+  // self-inflicted degradation (HoD ruling O-1, revising acceptance A4).
+  //
+  // Asserted on the REQUEST HEADERS the fetcher would send, not on a reply: the
+  // property is "we do not require a credential", and a live call would test
+  // OpenRouter's uptime instead.
+  const seen: (string | undefined)[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: string, init?: { headers?: Record<string, string> }) => {
+    seen.push(init?.headers?.authorization);
+    return {
+      ok: true,
+      json: async () => LIVE_SHAPED_BODY,
+    } as unknown as Response;
+  }) as typeof globalThis.fetch;
+  try {
+    const withoutKey = await fetchEndpointsLive(SLUG);
+    assert.equal(withoutKey.endpoints.length, 2, "rows come back with no credential at all");
+    await fetchEndpointsLive(SLUG, SYNTHETIC_KEY);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(seen, [undefined, `Bearer ${SYNTHETIC_KEY}`]);
+});
+
+test("O-1 · loadOpenRouterEndpoints takes an undefined key without erroring", async () => {
+  const result = await loadOpenRouterEndpoints(SLUG, undefined, {
+    cachePath: tempCache(),
+    fetchEndpoints: async (slug) => ({
+      slug,
+      fetchedAt: new Date().toISOString(),
+      endpoints: parseEndpointsBody(LIVE_SHAPED_BODY),
+    }),
+  });
+  assert.equal(result.error, null);
+  assert.equal(result.snapshot?.endpoints.length, 2);
 });
 
 test("a mangled cache file is a COLD cache, not a crash", async () => {

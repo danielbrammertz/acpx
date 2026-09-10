@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OPENROUTER_SHIM_CODE } from "../config/openrouter-shim-code.js";
+import type { RoutingPolicyWarning } from "./openrouter-provider-policy.js";
 
 export type ShimHandle = {
   port: number;
@@ -19,6 +20,14 @@ export type ShimHandle = {
    * responses to another the way a process-scoped pointer could.
    */
   attributionLogPath?: string;
+  /**
+   * Set when the box's settings file EXISTS and was rejected, so the whole
+   * policy was dropped (TE finding F-1). Carried on the handle because that is
+   * what the shim starter already returns to the client, and the client is what
+   * puts it on the lifecycle snapshot → the session record. Absent is the
+   * normal state, including on a box with no settings file at all.
+   */
+  routingPolicyWarning?: RoutingPolicyWarning;
 };
 
 export type ShimOptions = {

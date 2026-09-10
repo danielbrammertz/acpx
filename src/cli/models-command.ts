@@ -429,40 +429,69 @@ async function handleShow(ref: string, flags: ModelsFlags): Promise<void> {
  * provider — instead of guessing, or abandoning the model as the founding
  * incident did.
  *
- * ⚠️ **A BOX WITH NO CREDENTIAL ERRORS; IT DOES NOT RETURN AN EMPTY LIST.**
- * Unlike the catalogue, this endpoint needs the box key, and `[]` is a real
- * answer here — a model can genuinely have no endpoints — so a silent empty
- * would tell an agent "this model has no providers" when the truth is "this box
- * cannot ask".
+ * ⚠️ **A BOX WITH NO CREDENTIAL STILL GETS THE ROWS** (HoD ruling O-1). This
+ * endpoint is PUBLIC — measured by the test engineer: no `Authorization` header
+ * at all returns `200` and 26 rows. An earlier cut refused here with `rc 2`
+ * because CONCEPTION §7.1 said the key was required; it is not, and degrading a
+ * freely-reachable answer because this box holds no credential helps nobody. The
+ * key is sent when present and its absence is reported as a NOTE.
+ *
+ * ⚠️ **A real failure is still `null`, never `[]`** — a model can genuinely have
+ * no endpoints, and a silent empty would tell an agent "this model has no
+ * providers" when the truth is "the read failed".
  */
 async function handleEndpoints(slug: string, flags: ModelsFlags): Promise<void> {
   const credential = resolveOpenRouterBoxCredential();
-  if (!credential) {
-    failUsage(
-      `[acpx] OPENROUTER_BOX_CREDENTIAL_MISSING — no OpenRouter credential on ${boxLabel()}. ` +
-        `Endpoint metrics need the box key (~/.acpx/providers.json) or OPENROUTER_API_KEY.`,
-    );
-  }
-  const result = await loadOpenRouterEndpoints(slug, credential.key, {
+  const result = await loadOpenRouterEndpoints(slug, credential?.key, {
     refresh: flags.refresh === true,
   });
+  const note = credentialNote(credential !== undefined);
   if (wantsJson(flags)) {
-    out(
-      `${JSON.stringify({
-        slug,
-        fetchedAt: result.snapshot?.fetchedAt ?? null,
-        stale: result.stale,
-        error: result.error,
-        // `null`, never `[]`, on every failure — see the module header.
-        endpoints: result.snapshot ? result.snapshot.endpoints : null,
-      })}\n`,
-    );
+    out(`${JSON.stringify(endpointsEnvelope(slug, result, credential !== undefined, note))}\n`);
     return;
   }
   if (!result.snapshot) {
     failUsage(`[acpx] could not read endpoints for ${slug}: ${result.error ?? "unknown error"}`);
   }
+  if (note) {
+    // stderr, so `--format text` stdout stays a clean table and a piped reader
+    // is not handed a note it did not ask for.
+    diag(`[acpx] note: ${note}\n`);
+  }
   out(renderEndpoints(slug, result));
+}
+
+/** The `--json` envelope: staleness, provenance and the rows, in one shape. */
+function endpointsEnvelope(
+  slug: string,
+  result: OpenRouterEndpointsResult,
+  hasCredential: boolean,
+  note: string | null,
+): Record<string, unknown> {
+  return {
+    slug,
+    fetchedAt: result.snapshot?.fetchedAt ?? null,
+    stale: result.stale,
+    error: result.error,
+    credential: hasCredential ? "box" : "missing",
+    note,
+    // `null`, never `[]`, on every failure — see the module header.
+    endpoints: result.snapshot ? result.snapshot.endpoints : null,
+  };
+}
+
+/**
+ * A machine-readable NOTE, not an error: the rows are complete either way.
+ *
+ * It still says something worth saying — a box with no OpenRouter credential can
+ * read these metrics but cannot route or spend on anything, so an agent reading
+ * this verb to plan a change learns that here rather than at the first spawn.
+ */
+function credentialNote(present: boolean): string | null {
+  return present
+    ? null
+    : `OPENROUTER_BOX_CREDENTIAL_MISSING — no OpenRouter credential on ${boxLabel()}; ` +
+        `this endpoint is public, so the rows are complete, but nothing on this box will route.`;
 }
 
 function renderEndpoints(slug: string, result: OpenRouterEndpointsResult): string {

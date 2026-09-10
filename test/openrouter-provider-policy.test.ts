@@ -6,6 +6,9 @@ import test from "node:test";
 import {
   expandQuantizationFloor,
   loadBoxRoutingPolicy,
+  loadBoxRoutingPolicyRead,
+  reportRoutingPolicyWarning,
+  resetRoutingPolicyWarningMemo,
   type OpenRouterRoutingPolicy,
   resolveProviderObject,
   uiSettingsPath,
@@ -344,6 +347,110 @@ test("T1/T2 · absent, empty and unparseable all read as no policy — and never
   const corrupt = makeHome();
   writeFileSync(corrupt.file, "{ this is not json", "utf8");
   assert.equal(loadBoxRoutingPolicy(corrupt.env), undefined, "a truncated file is not a crash");
+});
+
+// ── F-1 · the drop is LOUD ───────────────────────────────────────────────────
+
+test("F-1 · a REJECTED file yields no policy AND a warning naming file + reason", () => {
+  // 🛑 THE DEFECT THE TEST ENGINEER MEASURED. The two repos' validators agreed on
+  // 37 of 40 candidates and disagreed on a family of 8: an empty value of the
+  // WRONG TYPE (`perModel: []`, `ignore: ""`) is "neutral" to acpx-ui and a type
+  // error here. End-to-end, the settings gear read
+  // `Minimum precision 8-bit · Never: Wafer` while the box applied NOTHING AT
+  // ALL, with no error on either side. Dropping the whole policy stays correct —
+  // a partial policy is a shape nobody authored — but it may not be silent.
+  //
+  // The row uses the TE's own two files, verbatim.
+  const rows: { name: string; settings: unknown; field: string }[] = [
+    {
+      name: "perModel: [] (TE case 1)",
+      settings: { minQuantization: "fp8", ignore: ["wafer"], perModel: [] },
+      field: "perModel",
+    },
+    {
+      name: 'ignore: "" (TE case 2)',
+      settings: {
+        minQuantization: "fp8",
+        ignore: "",
+        perModel: { "z-ai/glm-5.3-flash": { order: ["baseten", "modal"] } },
+      },
+      field: "ignore",
+    },
+  ];
+  for (const row of rows) {
+    const fixture = makeHome({ version: 1, openrouterRouting: row.settings });
+    const read = loadBoxRoutingPolicyRead(fixture.env);
+    assert.equal(read.policy, undefined, `${row.name}: the policy must still be dropped WHOLE`);
+    assert.ok(read.warning, `${row.name}: …but not silently`);
+    assert.equal(read.warning.file, fixture.file, "the warning names the file acpx actually read");
+    assert.match(
+      read.warning.reason,
+      new RegExp(row.field),
+      `${row.name}: the reason must name the offending field, not just say "invalid"`,
+    );
+  }
+});
+
+test("F-1 · a CLEAN file yields a policy and NO warning — the control", () => {
+  // Without this pair the row above would pass on a build that warns about
+  // everything, which is the same silence in a louder costume.
+  const fixture = makeHome({
+    version: 1,
+    openrouterRouting: { minQuantization: "fp8", ignore: ["wafer"] },
+  });
+  const read = loadBoxRoutingPolicyRead(fixture.env);
+  assert.deepEqual(read.policy?.ignore, ["wafer"]);
+  assert.equal(read.warning, undefined);
+});
+
+test("F-1 · the ordinary no-policy states are SILENT — absent, no key, and {}", () => {
+  // A box with no settings file is the normal state of most boxes. Warning on it
+  // would train every reader to ignore the line, which is how a loud warning
+  // becomes a silent one again.
+  assert.equal(loadBoxRoutingPolicyRead(makeHome().env).warning, undefined, "no file at all");
+  assert.equal(loadBoxRoutingPolicyRead(makeHome({ version: 1 }).env).warning, undefined, "no key");
+  assert.equal(
+    loadBoxRoutingPolicyRead(makeHome({ version: 1, openrouterRouting: {} }).env).warning,
+    undefined,
+    "{} is auto, not an error",
+  );
+});
+
+test("F-1 · a file that EXISTS but is unparseable warns; a missing one does not", () => {
+  // The two mean opposite things to an operator, and `readFileSync` cannot tell
+  // them apart — hence the explicit existence check behind the warning.
+  const corrupt = makeHome();
+  writeFileSync(corrupt.file, "{ this is not json", "utf8");
+  const read = loadBoxRoutingPolicyRead(corrupt.env);
+  assert.equal(read.policy, undefined);
+  assert.match(read.warning?.reason ?? "", /not readable JSON/);
+});
+
+test("F-1 · the stderr line is said ONCE per process per distinct warning", () => {
+  // A queue owner spawns many sessions; a broken settings file would otherwise
+  // print on every one of them, and noise that gets filtered is silence again.
+  resetRoutingPolicyWarningMemo();
+  const written: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => {
+    written.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const warning = { file: "/tmp/x/ui-settings.json", reason: "perModel: must be an object" };
+    reportRoutingPolicyWarning(warning);
+    reportRoutingPolicyWarning({ ...warning });
+    reportRoutingPolicyWarning(undefined);
+    // A DIFFERENT breakage still speaks up — the dedupe is per warning, not a
+    // global "already said something".
+    reportRoutingPolicyWarning({ ...warning, reason: "ignore: must be an array" });
+  } finally {
+    process.stderr.write = original;
+  }
+  assert.equal(written.length, 2, `expected 2 lines, got ${JSON.stringify(written)}`);
+  assert.match(written[0], /NOT in force/);
+  assert.match(written[0], /ui-settings\.json/);
+  assert.match(written[0], /perModel/);
 });
 
 test("T7 · an INVALID policy on disk is dropped whole, not partially applied", () => {

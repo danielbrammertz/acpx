@@ -49,7 +49,7 @@ import { isCodexAcpCommand } from "./codex-compat.js";
 import { harnessIdForAgentCommand } from "./harness-capabilities.js";
 import { isAcpxPerSessionConfigDir } from "./harness-config-dir.js";
 import { ATTRIBUTION_LOG_FILENAME } from "./openrouter-attribution.js";
-import { resolveBoxProviderObject } from "./openrouter-provider-policy.js";
+import { reportRoutingPolicyWarning, resolveBoxRouting } from "./openrouter-provider-policy.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import { spawnOpenRouterShim } from "./openrouter-shim.js";
 
@@ -1598,16 +1598,24 @@ export async function startOpenRouterShimForSession(
   // ⚠️ AND IT IS RESOLVED AGAINST THE MODEL THE SHIM WILL ACTUALLY SEND, not the
   // alias Claude Code thinks it is using — `perModel` is keyed by the OpenRouter
   // slug, which is exactly what `model` is here.
-  const providerObject = resolveBoxProviderObject(env, model);
+  //
+  // ⚠️ AND THE WARNING IS CARRIED OUT, NOT SWALLOWED (TE finding F-1). A settings
+  // file this validator rejects is dropped WHOLE — the right call, a partial
+  // policy being a shape nobody authored — but measured end-to-end the gear then
+  // showed a policy in force while the box applied nothing, with no error on
+  // either side. The stderr line is said here; the record breadcrumb rides the
+  // handle to the client, which puts it on the lifecycle snapshot.
+  const routing = resolveBoxRouting(env, model);
+  reportRoutingPolicyWarning(routing.warning);
   const shim = await spawnOpenRouterShim(apiKey, model, {
     reasoningEffort,
-    providerObject,
+    providerObject: routing.provider,
     attributionLogPath: join(configDir, ATTRIBUTION_LOG_FILENAME),
   });
 
   pointAdapterAtShim(env, shim.port);
 
-  return shim;
+  return routing.warning ? { ...shim, routingPolicyWarning: routing.warning } : shim;
 }
 
 /**
