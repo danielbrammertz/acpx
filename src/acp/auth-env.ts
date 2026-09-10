@@ -48,6 +48,8 @@ import { splitCommandLine } from "./client-process.js";
 import { isCodexAcpCommand } from "./codex-compat.js";
 import { harnessIdForAgentCommand } from "./harness-capabilities.js";
 import { isAcpxPerSessionConfigDir } from "./harness-config-dir.js";
+import { ATTRIBUTION_LOG_FILENAME } from "./openrouter-attribution.js";
+import { resolveBoxProviderObject } from "./openrouter-provider-policy.js";
 import type { ShimHandle } from "./openrouter-shim.js";
 import { spawnOpenRouterShim } from "./openrouter-shim.js";
 
@@ -1585,8 +1587,23 @@ export async function startOpenRouterShimForSession(
   mkdirSync(configDir, { recursive: true });
   env.CLAUDE_CONFIG_DIR = configDir;
 
-  // Start the model-rewrite shim; apiKey never appears in logs.
-  const shim = await spawnOpenRouterShim(apiKey, model, reasoningEffort);
+  // The box's provider-routing policy, resolved ONCE HERE — synchronously, from
+  // the env this spawn was asked about, with no network hop (brick 4c272cab).
+  //
+  // ⚠️ THIS IS THE SINGLE POINT FOR BOTH CLAUDE ROUTES, for the same reason the
+  // function itself was extracted (brick 007eaac8): the legacy PROFILE route and
+  // the picker route both arrive here, so a policy applied further up would
+  // silently cover one and not the other.
+  //
+  // ⚠️ AND IT IS RESOLVED AGAINST THE MODEL THE SHIM WILL ACTUALLY SEND, not the
+  // alias Claude Code thinks it is using — `perModel` is keyed by the OpenRouter
+  // slug, which is exactly what `model` is here.
+  const providerObject = resolveBoxProviderObject(env, model);
+  const shim = await spawnOpenRouterShim(apiKey, model, {
+    reasoningEffort,
+    providerObject,
+    attributionLogPath: join(configDir, ATTRIBUTION_LOG_FILENAME),
+  });
 
   pointAdapterAtShim(env, shim.port);
 

@@ -8,6 +8,39 @@ export type ShimHandle = {
   port: number;
   pid: number;
   stop: () => void;
+  /**
+   * Where the shim appends one NDJSON line per upstream response, naming the
+   * provider that ACTUALLY served it (brick 4c272cab §8). `undefined` when the
+   * caller asked for no attribution.
+   *
+   * ⚠️ IT IS CARRIED ON THE HANDLE, NOT IN A MODULE-LEVEL VARIABLE. The handle
+   * is already the session's own object — held by the client that spawned it and
+   * re-used on reconnect — so the reader cannot cross-attribute one session's
+   * responses to another the way a process-scoped pointer could.
+   */
+  attributionLogPath?: string;
+};
+
+export type ShimOptions = {
+  reasoningEffort?: string;
+  /**
+   * The box's resolved OpenRouter `provider` object
+   * (`src/acp/openrouter-provider-policy.ts`). Serialised onto the shim child's
+   * env as `OR_PROVIDER`.
+   *
+   * ⚠️ **ENV, NOT ARGV.** The shim's whole configuration is already env, and
+   * argv is world-readable through `/proc` — the same rule that keeps the API
+   * key out of the command line.
+   *
+   * ⚠️ **`undefined` MUST STAY `undefined`.** An unconfigured box emits no
+   * variable at all, so the forwarded body is byte-identical to before this
+   * brick (acceptance A8). `{}` would be truthy in the shim and would put
+   * `"provider": {}` on every request.
+   */
+  providerObject?: object;
+  /** Absolute path for the attribution NDJSON; omitted ⇒ nothing is recorded. */
+  attributionLogPath?: string;
+  timeoutMs?: number;
 };
 
 // Ensure the shim file exists on disk (idempotent; no-op if already written).
@@ -35,9 +68,9 @@ function ensureShimFile(): string {
 export function spawnOpenRouterShim(
   apiKey: string,
   model: string,
-  reasoningEffort?: string,
-  timeoutMs = 5000,
+  options: ShimOptions = {},
 ): Promise<ShimHandle> {
+  const timeoutMs = options.timeoutMs ?? 5000;
   return new Promise((resolve, reject) => {
     const path = ensureShimFile();
     const shimEnv: NodeJS.ProcessEnv = {
@@ -46,8 +79,14 @@ export function spawnOpenRouterShim(
       OR_MODEL: model,
       PORT: "0",
     };
-    if (reasoningEffort) {
-      shimEnv.OR_REASONING_EFFORT = reasoningEffort;
+    if (options.reasoningEffort) {
+      shimEnv.OR_REASONING_EFFORT = options.reasoningEffort;
+    }
+    if (options.providerObject) {
+      shimEnv.OR_PROVIDER = JSON.stringify(options.providerObject);
+    }
+    if (options.attributionLogPath) {
+      shimEnv.OR_ATTRIBUTION_LOG = options.attributionLogPath;
     }
     const child = spawn(process.execPath, [path], {
       env: shimEnv,
@@ -76,6 +115,7 @@ export function spawnOpenRouterShim(
         resolve({
           port,
           pid,
+          attributionLogPath: options.attributionLogPath,
           stop: () => {
             try {
               child.kill();
