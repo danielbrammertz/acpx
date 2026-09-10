@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { SessionNotFoundError, SessionResolutionError } from "../../errors.js";
 import { incrementPerfCounter, measurePerf } from "../../perf-metrics.js";
-import type { SessionRecord } from "../../types.js";
+import type { SessionAcpxState, SessionRecord } from "../../types.js";
 import { getLoggedMessageCount, markAllMessagesLogged } from "../messages-log-bookkeeping.js";
 import {
   appendFinalizedMessagesToLog,
@@ -313,6 +313,23 @@ function applyPersistedLifecycleForWrite(
   }
 }
 
+/**
+ * Fill an ABSENT `acpx.last_turn_provider` from what is already on disk.
+ *
+ * Kept a named function rather than three inline lines so the write path reads as
+ * a list of the properties it protects — and so this one cannot be dropped by a
+ * refactor that tidies the block above it.
+ */
+function preserveLastTurnProviderForPersist(
+  record: SessionRecord,
+  persistedAcpx: SessionAcpxState | undefined,
+): void {
+  const onDisk = persistedAcpx?.last_turn_provider;
+  if (onDisk && !record.acpx?.last_turn_provider) {
+    record.acpx = { ...record.acpx, last_turn_provider: onDisk };
+  }
+}
+
 async function writeSessionRecordInternal(
   record: SessionRecord,
   options: {
@@ -346,6 +363,28 @@ async function writeSessionRecordInternal(
     // pinned model: a stale/dropped write can't regress a record-pinned model,
     // while a deliberate set-model/subscription-switch/new --model still wins.
     mergeRecordPinnedModelForPersist(record, freshPersisted?.acpx);
+    // 🛑 SAME BASELINE-DIFF PROTECTION, FOR WHO SERVED THE TURN (brick 4c272cab,
+    // finding PM-1). UNCONDITIONAL — outside the `preserveLifecycle` branch above —
+    // and that placement IS the fix: the write that clobbers this field is the
+    // PRIVILEGED one (`closeSession`), which bypasses that branch by design. A
+    // preserve inside it looked right, shipped, and changed nothing; measured on a
+    // live turn, the two final writes still landed `null`.
+    //
+    // MEASURED with per-object identity on every serialize, fresh session, one turn:
+    //   13:15:23.748  rec-5   provider="Wafer"   ← the turn's record, correct
+    //   13:15:24.365  rec-5   provider="Wafer"   ← on disk, correct
+    //   13:15:24.373  rec-11  provider=null      ← a DIFFERENT record object …
+    //   13:15:24.380  rec-13  provider=null      ← … clobbers it 8 ms later
+    // A LOST UPDATE, not a race: in the post-merge smoke the shim's line was on
+    // disk 3.1 s before the clobbering write. The earlier F-3 ordering fix was
+    // therefore treating the wrong cause, and this is why its 3/3 held only in a
+    // rig where no late writer happened to run.
+    //
+    // ⚠️ ONE-DIRECTIONAL: an in-memory value WINS (a later turn changes the
+    // provider), disk only fills an ABSENCE. The field is historical — "who served
+    // the last turn" — and like `served_via_shim` is never legitimately cleared,
+    // so there is no write this can wrongly suppress.
+    preserveLastTurnProviderForPersist(record, freshPersisted?.acpx);
 
     const sessionDir = sessionBaseDir();
     const logPath = messagesLogPath(sessionDir, record.acpxRecordId);

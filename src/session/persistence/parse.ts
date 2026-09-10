@@ -341,6 +341,25 @@ function parseAcpxState(raw: unknown): SessionAcpxState | undefined {
   }
   assignStringState(state, "context_window_model_id", record.context_window_model_id);
 
+  // 🛑 brick 4c272cab / finding PM-1 — WITHOUT THIS LEG THE FIELD IS WRITTEN
+  // CORRECTLY AND LOST ON THE NEXT READ, which is not a display bug: the reader
+  // hands the parsed record straight back to a writer, so the loss is persisted.
+  //
+  // This parser is an ALLOWLIST, and it is the fourth field in this repo to be
+  // eaten by one (`applied_output_style`, `served`, `depth_projection` before it).
+  // The symptom was a first turn recording `null` while the shim's log held the
+  // provider — measured 4/4 in the post-merge smoke and traced here:
+  //
+  //   13:20:30.582  write   provider="Wafer"   ← on disk, correct
+  //   13:20:30.589  read    onDisk=null        ← the parser dropped it 7 ms later
+  //   13:20:30.590  write   provider=null      ← …and the loss is written back
+  //
+  // ⚠️ IT ALSO EXPLAINS WHY THE EARLIER "RACE" FIX MEASURED 3/3 AND WAS WRONG:
+  // where no later writer happens to run, the on-disk value survives to be read
+  // by the test — so the bug is invisible in exactly the rig that has no
+  // late write, and present in production, where close() always runs.
+  assignLastTurnProvider(state, record.last_turn_provider);
+
   if (isStringArray(record.available_models)) {
     state.available_models = [...record.available_models];
   }
@@ -744,6 +763,28 @@ function isValidRoutingPolicyWarning(
     typeof record.at === "string" &&
     record.at.length > 0
   );
+}
+
+/**
+ * `acpx.last_turn_provider` — who SERVED the most recent OpenRouter turn.
+ *
+ * Both string fields are nullable and `null` is MEANINGFUL ("observed, but the
+ * response named no provider"), so this parses a present-and-null differently
+ * from an absent one: the block round-trips whenever it exists at all, and only
+ * a malformed block is dropped. `at` is required — a breadcrumb a reader cannot
+ * place in time is worse than none, because it reads as current.
+ */
+function assignLastTurnProvider(state: SessionAcpxState, value: unknown): void {
+  const record = asRecord(value);
+  if (!record || typeof record.at !== "string" || record.at.length === 0) {
+    return;
+  }
+  state.last_turn_provider = {
+    provider_name: typeof record.provider_name === "string" ? record.provider_name : null,
+    native_finish_reason:
+      typeof record.native_finish_reason === "string" ? record.native_finish_reason : null,
+    at: record.at,
+  };
 }
 
 function assignSessionOptionRoutingPolicyWarning(
