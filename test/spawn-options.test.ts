@@ -672,6 +672,105 @@ test("cb214e48: PI_CODING_AGENT_SESSION_DIR never survives the copy — for ANY 
   );
 });
 
+// ============================================================================
+// brick://27894f40 — the same scrub, extended to pi's five DESCRIPTIVE session
+// variables. cb214e48 deferred these because they are not OPERATIVE: pi drops
+// and re-derives all five for every tool subprocess, so an inherited value can
+// never steer a child pi. What it CAN do is mis-attribute one: measured on
+// devbox 2026-09-09, the pi-acp adapter of the child session `w8-depth-gate`
+// reported the PARENT's PI_SESSION_ID and PI_SESSION_FILE, sending anyone
+// reading /proc to the wrong transcript.
+// ============================================================================
+
+/** The five pi publishes about its own session — never legitimate as an inherited value. */
+const PI_DESCRIPTIVE_ENV_NAMES = [
+  "PI_SESSION_ID",
+  "PI_SESSION_FILE",
+  "PI_MODEL",
+  "PI_PROVIDER",
+  "PI_REASONING_LEVEL",
+] as const;
+
+/** Run `body` with every `[name, value]` forced into `process.env`, restored afterwards. */
+function withProcessEnvAll(entries: Array<[string, string]>, body: () => void): void {
+  const previous = entries.map(([name]) => [name, process.env[name]] as const);
+  for (const [name, value] of entries) {
+    process.env[name] = value;
+  }
+  try {
+    body();
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+
+/** The parent values measured in the rig (real pi parent 01a08a63-9a74, 2026-09-10). */
+const PARENT_PI_ENV: Array<[string, string]> = [
+  ["PI_SESSION_ID", "01a08a63-9a74-7fd1-a7ab-f41ae9528591"],
+  [
+    "PI_SESSION_FILE",
+    "/home/node/.pi/agent/sessions/--tmp--/2026-09-10T08-16-18-548Z_01a08a63-9a74-7fd1-a7ab-f41ae9528591.jsonl",
+  ],
+  ["PI_MODEL", "moonshotai/kimi-k2.6"],
+  ["PI_PROVIDER", "openrouter"],
+  ["PI_REASONING_LEVEL", "medium"],
+];
+
+test("27894f40: none of pi's five descriptive session vars survives the copy — for ANY harness", () => {
+  // Unconditional and harness-independent, unlike PI_CODING_AGENT_DIR above:
+  // these five are per-session OUTPUTS of a running pi, so there is no
+  // box-level value to preserve and an inherited one is always another
+  // session's. A claude or codex child of a pi parent carries them today too.
+  withProcessEnvAll(PARENT_PI_ENV, () => {
+    for (const agentCommand of [
+      undefined,
+      AGENT_REGISTRY.pi,
+      AGENT_REGISTRY.claude,
+      AGENT_REGISTRY.codex,
+    ]) {
+      const options = buildAgentSpawnOptions(
+        "/tmp/acpx-agent",
+        undefined,
+        { acpxRecordId: "child-id" },
+        undefined,
+        agentCommand,
+      );
+      for (const name of PI_DESCRIPTIVE_ENV_NAMES) {
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(options.env, name),
+          false,
+          `${agentCommand ?? "<no command>"} inherited ${name} — the child adapter would report the parent's pi session`,
+        );
+      }
+    }
+  });
+});
+
+test("27894f40: the scrub is scoped to those five — an unrelated PI_* var is untouched", () => {
+  // THE CONTROL that stops the scrub becoming a `PI_`-prefix sweep. Without it,
+  // deleting every key starting with `PI_` passes the row above — and would take
+  // PI_CODING_AGENT_DIR's legitimate box-level value (asserted separately above)
+  // and PI_CODING_AGENT with it. Measured in the rig on the fixed build:
+  // PI_UNRELATED_CONTROL=keep-me and PI_CODING_AGENT=true both reached the child
+  // adapter while all five were gone.
+  withProcessEnvAll(
+    [...PARENT_PI_ENV, ["PI_UNRELATED_CONTROL", "keep-me"], ["PI_CODING_AGENT", "true"]],
+    () => {
+      const options = buildAgentSpawnOptions("/tmp/acpx-agent", undefined, {
+        acpxRecordId: "child-id",
+      });
+      assert.equal(options.env.PI_UNRELATED_CONTROL, "keep-me");
+      assert.equal(options.env.PI_CODING_AGENT, "true");
+    },
+  );
+});
+
 test("buildTerminalSpawnOptions hides Windows console windows and maps env entries", () => {
   const options = buildTerminalSpawnOptions("node", "/tmp/acpx-terminal", [
     { name: "TMUX", value: "/tmp/tmux-1000/default,123,0" },
