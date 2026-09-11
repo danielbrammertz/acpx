@@ -184,8 +184,6 @@ function promotePrefixedAuthEnvironment(env: NodeJS.ProcessEnv): void {
   }
 }
 
-const DEFAULT_ACPX_UI_BASE_URL = "https://acpx.devbox.nativai.de";
-
 /** PID 1's environment — NUL-separated `KEY=value`. */
 export const PID1_ENVIRON_FILE = "/proc/1/environ";
 /** The in-pod authoritative namespace (`dev-<box>`). */
@@ -200,21 +198,6 @@ function boxTokenFromResolvConf(resolvConf: string): string | undefined {
     return undefined;
   }
   return match[1].match(/^dev-([a-z0-9-]+)\.svc\.cluster\.local$/i)?.[1];
-}
-
-/**
- * FW-20: derive the box's acpx-ui base URL from its K8s namespace. Each box runs
- * in namespace `dev-<box>` whose pods get a resolv.conf search domain
- * `dev-<box>.svc.cluster.local`; the box name maps to `https://acpx.<box>.nativai.de`.
- * Pure (content in, url out) so it is testable without touching the filesystem.
- * Returns undefined for non-cluster / unrecognized search domains.
- *
- * ⚠️ This yields the box's ALIAS host, not necessarily its canonical one — see the
- * ladder note on `resolveAcpxUiBaseUrl`. It is the last-resort rung, not the truth.
- */
-export function parseBoxBaseUrlFromResolvConf(resolvConf: string): string | undefined {
-  const box = boxTokenFromResolvConf(resolvConf);
-  return box ? `https://acpx.${box}.nativai.de` : undefined;
 }
 
 /** `search dev-konsiq.svc.cluster.local …` → `dev-konsiq`. Pure. */
@@ -289,10 +272,6 @@ export type BoxBaseUrlSources = {
   hostmapCache?: string;
 };
 
-/**
- * Rungs 2–4 of the ladder on `resolveAcpxUiBaseUrl`, as a pure function of the
- * file contents — so the ordering is testable without a filesystem or a box.
- */
 /** This box's namespace: the service-account file if present, else resolv.conf. */
 function namespaceFromSources(sources: BoxBaseUrlSources): string | undefined {
   return (
@@ -301,6 +280,24 @@ function namespaceFromSources(sources: BoxBaseUrlSources): string | undefined {
   );
 }
 
+/**
+ * Rungs 2–3 of the ladder on `resolveAcpxUiBaseUrl`, as a pure function of the
+ * file contents — so the ordering is testable without a filesystem or a box.
+ * Undefined when both miss; the caller then throws rather than inventing a host.
+ *
+ * ⚠️ DO NOT ADD A RUNG THAT BUILDS A HOSTNAME OUT OF THE NAMESPACE. It reads as a
+ * free safety net and it is the bug this function was cut back to remove. A rule
+ * of the shape `https://acpx.${box}.nativai.de` hardcodes two things that are
+ * CONFIGURATION, not structure: the service label (`acpx.`) and the order
+ * (`nativai.de`). It is already the WRONG host on konsiq, labidio and tubeyakker,
+ * which are canonically served at `acpx.devbox.konsiq.de` / `.labidio.de` /
+ * `.tubeyakker.com` — a third TLD no hostname rule can reach — and it mints a DEAD
+ * host on every box the moment the service label moves (brick f29ba473). resolv.conf
+ * still feeds this ladder, but only the NAMESPACE, which is a key into the map of
+ * hosts the fleet actually published — never a hostname of our own invention.
+ * Red on reintroduction: "ladder: resolv.conf alone yields NOTHING — it supplies a
+ * namespace, not a hostname" in `test/canonical-box-base-url.test.ts`.
+ */
 export function deriveBoxBaseUrlFrom(sources: BoxBaseUrlSources): string | undefined {
   const fromPid1 = sources.pid1Environ
     ? envValueFromEnviron(sources.pid1Environ, "ACPX_UI_BASE_URL")
@@ -309,14 +306,9 @@ export function deriveBoxBaseUrlFrom(sources: BoxBaseUrlSources): string | undef
     return fromPid1;
   }
   const namespace = namespaceFromSources(sources);
-  const fromHostmap =
-    namespace && sources.hostmapCache
-      ? canonicalBaseUrlFromHostmapCache(sources.hostmapCache, namespace)
-      : undefined;
-  if (fromHostmap) {
-    return fromHostmap;
-  }
-  return sources.resolvConf ? parseBoxBaseUrlFromResolvConf(sources.resolvConf) : undefined;
+  return namespace && sources.hostmapCache
+    ? canonicalBaseUrlFromHostmapCache(sources.hostmapCache, namespace)
+    : undefined;
 }
 
 /** Read a file as UTF-8, or undefined when missing / unreadable. Never throws. */
@@ -338,23 +330,58 @@ function hostmapCacheFile(env: NodeJS.ProcessEnv): string {
   return explicit ? resolvePath(explicit) : join(homedir(), ".acpx", "hostmap-cache.json");
 }
 
-// Cache the derived base URL: none of its inputs change within a process, and this
-// runs on every spawn. `null` = computed-and-absent; undefined = not computed.
-let cachedBoxBaseUrl: string | null | undefined;
+// Cache the box's files: none of them changes within a process, and this resolver
+// runs on every spawn. Undefined = not yet read.
+let cachedBoxBaseUrlSources: BoxBaseUrlSources | undefined;
 
-function deriveBoxBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
-  if (cachedBoxBaseUrl !== undefined) {
-    return cachedBoxBaseUrl ?? undefined;
-  }
-  const value = deriveBoxBaseUrlFrom({
+function boxBaseUrlSources(env: NodeJS.ProcessEnv): BoxBaseUrlSources {
+  cachedBoxBaseUrlSources ??= {
     pid1Environ: readFileOrUndefined(PID1_ENVIRON_FILE),
     namespaceFile: readFileOrUndefined(SERVICE_ACCOUNT_NAMESPACE_FILE),
     resolvConf: readFileOrUndefined(RESOLV_CONF_FILE),
     hostmapCache: readFileOrUndefined(hostmapCacheFile(env)),
-  });
-  cachedBoxBaseUrl = value ?? null;
-  return value;
+  };
+  return cachedBoxBaseUrlSources;
 }
+
+/**
+ * What the warning below says. Every rung missed, so the ONE thing that can fix it
+ * is configuration — name it, name the paths that were tried, and say plainly that
+ * acpx declines to guess, so the reader does not "helpfully" add the guess back.
+ * Carries NO example hostname on purpose: a "did you mean" here would be the
+ * fabrication coming back in through the diagnostic.
+ */
+export function unresolvedBaseUrlMessage(hostmapCachePath: string): string {
+  return [
+    "[acpx] cannot determine this box's acpx-ui base URL —",
+    "ACPX_SESSION_URL and ACPX_UI_BASE_URL will be left UNSET for spawned agents.",
+    `Tried, in order: $ACPX_UI_BASE_URL; ACPX_UI_BASE_URL in ${PID1_ENVIRON_FILE};`,
+    `the canonical host for this box's namespace in acpx-ui's hostmap cache (${hostmapCachePath}).`,
+    "Fix: set ACPX_UI_BASE_URL to this box's acpx-ui URL (the box's own pod env is where it belongs).",
+    "acpx will not build a hostname out of the Kubernetes namespace: the service label and the",
+    "domain are configuration, not structure, so a constructed host is already wrong on the",
+    "product boxes and dead on every box once the service label moves.",
+  ].join(" ");
+}
+
+/**
+ * Rung 1 plus `deriveBoxBaseUrlFrom`, as a pure function of an env and the box's
+ * file contents — so the whole ladder, including its miss, is testable without a
+ * filesystem or a box. Undefined when every rung misses; PURE, so the warning is
+ * the impure caller's job.
+ */
+export function acpxUiBaseUrlFrom(
+  env: NodeJS.ProcessEnv,
+  sources: BoxBaseUrlSources,
+): string | undefined {
+  const raw = env.ACPX_UI_BASE_URL?.trim();
+  const base = raw && raw.length > 0 ? raw : deriveBoxBaseUrlFrom(sources);
+  return base ? base.replace(/\/+$/, "") : undefined;
+}
+
+// One warning per process: the resolver runs on every spawn, and a per-spawn repeat
+// would bury the line it is trying to make visible.
+let warnedUnresolvedBaseUrl = false;
 
 /**
  * The acpx-ui base URL for THIS box. Every session URL acpx composes funnels
@@ -365,22 +392,30 @@ function deriveBoxBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
  *      not carry the container env, so a shell reached as `ssh-remote <box> -- …`
  *      sees an empty $ACPX_UI_BASE_URL while PID 1 still holds the real one.
  *   3. the CANONICAL host for this namespace from acpx-ui's hostmap cache
- *   4. the resolv.conf structural guess (rung 5 below is worse; see the warning)
- *   5. the hardcoded devbox default (non-cluster / unknown namespace)
+ *   4. there is no rung 4 — it returns UNDEFINED and warns once.
  *
- * ⚠️ Rungs 2 and 3 exist because rung 4 is STRUCTURALLY UNABLE to be right for
- * three of the five boxes, and no rule of that shape ever can be. FW-20 added
- * rung 4 to stop a missing ACPX_UI_BASE_URL falling through to the devbox default
- * (rung 5), which gave agents on other boxes an outright WRONG-BOX host. It fixed
- * that, but `https://acpx.<box>.nativai.de` is only the box's ALIAS: konsiq,
- * labidio and tubeyakker are canonically served at `acpx.devbox.konsiq.de`,
- * `acpx.devbox.labidio.de` and `acpx.devbox.tubeyakker.com` — a THIRD TLD, which
- * is why no hostname rule can cover the fleet. The alias is servable, so rung 4
- * yields a working-but-non-canonical URL whose host does not match the box's own
- * identity. Measured on konsiq 2026-08-20 (deployed acpx ff1cc2e7, read-only):
- * rung 4 alone → `https://acpx.konsiq.nativai.de`; rungs 2 and 3 both →
- * `https://acpx.devbox.konsiq.de`. Rung 4 stays as the fallback — still correct
- * for any future `*.nativai.de` box, and still better than rung 5.
+ * ⚠️ UNDEFINED IS AN ANSWER; DO NOT GIVE IT A FALLBACK. Two used to sit below
+ * rung 3 — a structural guess `https://acpx.<box>.nativai.de` built from the
+ * namespace, and a literal `https://acpx.devbox.nativai.de` default — and both
+ * mint a host that is merely PLAUSIBLE. The literal names another box outright;
+ * the guess is already wrong for konsiq, labidio and tubeyakker, canonically
+ * served at `acpx.devbox.konsiq.de` / `.labidio.de` / `.tubeyakker.com` (a third
+ * TLD, which is why no hostname rule can cover the fleet), and BOTH name a service
+ * label that stops existing when it moves. A fabricated URL is worse than a missing
+ * one: it is well-formed, it is stored forever in session records, commit trailers
+ * and `GIT_AUTHOR_EMAIL`, and nothing downstream can tell it from a real one.
+ * brick f29ba473.
+ *
+ * ⚠️ AND IT MUST NOT THROW EITHER — a throw here would block EVERY spawn on a host
+ * where no rung resolves, and the rung-5 literal's own comment ("non-cluster /
+ * unknown namespace") records that its authors expected exactly such a host to
+ * exist. The `string | undefined` return is deliberate: it makes every caller
+ * decide, under the typechecker, between omitting the URL and inventing one. This
+ * is the same rule the OS states for agents — with no session URL, SKIP the URL
+ * rather than guess — and the callers already had the shape for it
+ * (`applyGitCommitAttribution` has always returned early on an unusable host).
+ * Rungs 1–3 cover all five boxes today (measured 2026-09-11: rung 1 or 2 hits on
+ * every one), so the degraded path is unreachable in the deployed configuration.
  *
  * ⚠️ Kept SYNCHRONOUS deliberately: every rung is a `readFileSync`, and the call
  * sites are synchronous. acpx-ui's equivalent ladder has a further
@@ -388,10 +423,13 @@ function deriveBoxBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
  * async refactor of every caller for a case rungs 2–3 already cover on all five
  * boxes.
  */
-export function resolveAcpxUiBaseUrl(env: NodeJS.ProcessEnv): string {
-  const raw = env.ACPX_UI_BASE_URL?.trim();
-  const base = raw && raw.length > 0 ? raw : (deriveBoxBaseUrl(env) ?? DEFAULT_ACPX_UI_BASE_URL);
-  return base.replace(/\/+$/, "");
+export function resolveAcpxUiBaseUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const base = acpxUiBaseUrlFrom(env, boxBaseUrlSources(env));
+  if (!base && !warnedUnresolvedBaseUrl) {
+    warnedUnresolvedBaseUrl = true;
+    process.stderr.write(`${unresolvedBaseUrlMessage(hostmapCacheFile(env))}\n`);
+  }
+  return base;
 }
 
 /**
@@ -705,7 +743,28 @@ function buildAgentEnvironment(
   delete env.PI_REASONING_LEVEL;
   applyAgentTypeEnvironment(env, agentCommand);
   const baseUrl = resolveAcpxUiBaseUrl(env);
-  if (sessionContext && typeof sessionContext.acpxRecordId === "string") {
+  // ⚠️ HAND THE RESOLVED VALUE DOWN — this line is why the adapters do not each own
+  // a copy of the ladder above. claude-pty-acp used to carry a byte-for-byte port of
+  // it (`parseBoxBaseUrlFromResolvConf`, same devbox literal) purely because acpx
+  // resolved the host and then did not tell the child what it had decided: with
+  // ACPX_UI_BASE_URL unset in the pod env, acpx would answer from /proc/1/environ
+  // while the bridge answered from its own guess, and the child's OWN session URL
+  // could name a different host from its parent's. The two are now one answer by
+  // construction. Writing it here also NORMALIZES a trailing-slash or padded value,
+  // so the child sees exactly the string acpx used.
+  // ⚠️ And when nothing resolved, DELETE rather than leave the inherited value: the
+  // only way to reach this branch with the key still present is a blank/whitespace
+  // one (a usable value is rung 1 and cannot miss), and a blank ACPX_UI_BASE_URL is
+  // worse than an absent one — the bridge's own guard reads "unset" as fatal-and-
+  // legible but would have to special-case "set to nothing".
+  // Red on removal: "adapter env carries acpx's resolved base URL (the seam
+  // claude-pty-acp consumes)" in test/claude-pty-agent.test.ts.
+  if (baseUrl) {
+    env.ACPX_UI_BASE_URL = baseUrl;
+  } else {
+    delete env.ACPX_UI_BASE_URL;
+  }
+  if (baseUrl && sessionContext && typeof sessionContext.acpxRecordId === "string") {
     const trimmed = sessionContext.acpxRecordId.trim();
     if (trimmed.length > 0) {
       env.ACPX_SESSION_URL = `${baseUrl}/?session=${trimmed}`;
@@ -752,7 +811,10 @@ function buildAgentEnvironment(
       env.ACPX_AGENT_FOLDER = trimmedAgentFolder;
     }
   }
-  if (sessionContext) {
+  // No base URL means no host for `<recordId>@<host>` — the function's own
+  // unusable-host guard already skips in that case; the `baseUrl &&` is what makes
+  // that visible to the typechecker rather than relying on the guard.
+  if (baseUrl && sessionContext) {
     applyGitCommitAttribution(env, sessionContext, baseUrl);
   }
   // When a profileId is set the async applyProfileAuth path (called from
@@ -1504,14 +1566,17 @@ export function buildClaudeHomeSelectorMeta(
  */
 function resolveParentSessionUrl(
   sessionContext: AgentSessionContext | undefined,
-  baseUrl: string,
+  baseUrl: string | undefined,
 ): string | undefined {
   const explicitUrl = sessionContext?.parentSessionUrl?.trim();
   if (explicitUrl) {
     return explicitUrl;
   }
   const parentId = sessionContext?.parentSessionId?.trim();
-  if (!parentId) {
+  // An id with no base is not composable into a URL, and a parent id alone is not
+  // a URL — so there is nothing to report. The explicit URL above still works: it
+  // arrived whole and never needed this box's host.
+  if (!parentId || !baseUrl) {
     return undefined;
   }
   return `${baseUrl}/?session=${parentId}`;

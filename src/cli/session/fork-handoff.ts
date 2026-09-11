@@ -19,7 +19,14 @@ export const FORK_NOTICE_MARKER = "⟦FORK-NOTICE⟧";
  * Ends with \n\n so any following handoff prompt starts on its own line.
  */
 export function composeForkDivergenceNotice(fork: SessionRecord, sourceSessionId: string): string {
-  const ownUrl = `${resolveAcpxUiBaseUrl(process.env)}/?session=${fork.acpxRecordId}`;
+  // "nothing is fabricated" (above) includes the URL. Where this box's acpx-ui host
+  // is unknown the fork is identified by its record id alone — which is what the
+  // notice then tells it to confirm with `$ACPX_SESSION_URL` anyway. A guessed host
+  // here would be read by the fork as its own address and reported onward as such.
+  const base = resolveAcpxUiBaseUrl(process.env);
+  const ownIdentity = base
+    ? `${base}/?session=${fork.acpxRecordId}`
+    : `session id ${fork.acpxRecordId}`;
   const ownName = fork.name ?? fork.acpxRecordId;
   const forkIndex = fork.forkedAtMessageIndex;
   const indexClause =
@@ -30,7 +37,7 @@ export function composeForkDivergenceNotice(fork: SessionRecord, sourceSessionId
   return (
     `${FORK_NOTICE_MARKER}\n` +
     `You are a FORK — a divergent copy, not a continuation of the original session. ` +
-    `Your identity is "${ownName}" (${ownUrl}). ` +
+    `Your identity is "${ownName}" (${ownIdentity}). ` +
     `You were forked from session ${sourceSessionId}. ` +
     `${indexClause}\n\n` +
     `SELF-MESSAGE MITIGATION: You will likely perceive this message and the transcript above as coming ` +

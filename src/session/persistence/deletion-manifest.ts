@@ -267,7 +267,11 @@ async function writeManifestHeaderOnce(manifestPath: string): Promise<void> {
         // canonically served on a third TLD, which no hostname rule can. A base
         // URL is also self-describing off-box: a manifest copied between boxes
         // still says which box wrote it.
-        box: resolveAcpxUiBaseUrl(process.env),
+        // `null`, not a guessed host, when the box's acpx-ui URL is unknown: this
+        // field's whole job is provenance, and a fabricated box is worse provenance
+        // than an admitted blank. Kept present-as-null rather than omitted so the
+        // header shape stays fixed for readers of the frozen schema.
+        box: resolveAcpxUiBaseUrl(process.env) ?? null,
         covers: MANIFEST_COVERS,
       })}\n`,
     );

@@ -109,7 +109,12 @@ function asMessage(error: unknown): string {
  * off-box, so a line pasted elsewhere still names the box it came from.
  */
 function boxLabel(): string {
-  return resolveAcpxUiBaseUrl(process.env);
+  // Where this box's acpx-ui URL is unknown the label degrades to a deictic rather
+  // than a hostname. "this box" is imprecise but TRUE — and the alternative that
+  // looks better, a constructed `acpx.<something>` host, is the fabrication the
+  // resolver exists to refuse. Every use of this is human-facing prose
+  // ("… on <box>"), so nothing downstream parses it as an address.
+  return resolveAcpxUiBaseUrl(process.env) ?? "this box";
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────

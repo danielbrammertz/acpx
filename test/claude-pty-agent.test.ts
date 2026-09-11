@@ -13,7 +13,6 @@ import {
   INDEPENDENT_CLAUDE_HOME_MAP_ENV,
   INDEPENDENT_CLAUDE_HOME_META_KEY,
   INDEPENDENT_CLAUDE_PARENT_SESSION_URL_META_KEY,
-  parseBoxBaseUrlFromResolvConf,
   resolveAcpxUiBaseUrl,
 } from "../src/acp/auth-env.js";
 import { AcpClient, buildAgentSpawnOptions } from "../src/acp/client.js";
@@ -428,41 +427,119 @@ test("buildClaudeParentSessionMeta: undefined when there is no parent, or no age
 });
 
 // ---------------------------------------------------------------------------
-// FW-20 — auto-detect the box's acpx-ui base URL from the K8s namespace
+// The box's acpx-ui base URL, and the seam the bridge consumes (brick f29ba473)
+//
+// The ladder's own rungs — including the UNDEFINED that replaced the namespace
+// guess and the devbox literal — are pinned in `canonical-box-base-url.test.ts`,
+// which drives the pure entry point and therefore does not depend on which box the
+// suite runs on. What belongs HERE is the bridge contract: acpx resolves the host
+// once and hands the answer down, so claude-pty-acp has nothing left to re-derive.
 // ---------------------------------------------------------------------------
 
-test("parseBoxBaseUrlFromResolvConf (FW-20): derives the box host from the dev-<box> namespace search domain", () => {
-  assert.equal(
-    parseBoxBaseUrlFromResolvConf(
-      "search dev-tubeyakker.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.0.0.10\n",
-    ),
-    "https://acpx.tubeyakker.nativai.de",
-  );
-  assert.equal(
-    parseBoxBaseUrlFromResolvConf(
-      "search dev-devbox.svc.cluster.local svc.cluster.local\noptions ndots:5\n",
-    ),
-    "https://acpx.devbox.nativai.de",
-  );
-});
-
-test("parseBoxBaseUrlFromResolvConf (FW-20): undefined for non-cluster / unrecognized search domains", () => {
-  assert.equal(parseBoxBaseUrlFromResolvConf("nameserver 1.1.1.1\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf("search example.com lan\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf("search svc.cluster.local\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf(""), undefined);
-});
-
-test("resolveAcpxUiBaseUrl (FW-20): explicit ACPX_UI_BASE_URL wins over namespace detection and is trimmed", () => {
+test("resolveAcpxUiBaseUrl: explicit ACPX_UI_BASE_URL wins and is trimmed", () => {
   assert.equal(
     resolveAcpxUiBaseUrl({ ACPX_UI_BASE_URL: "https://acpx.labidio.nativai.de/" }),
     "https://acpx.labidio.nativai.de",
   );
-  // Empty/whitespace env is ignored → falls through to namespace/default (a valid https acpx url).
-  assert.match(
-    resolveAcpxUiBaseUrl({ ACPX_UI_BASE_URL: "   " }),
-    /^https:\/\/acpx\.[a-z0-9-]+\.nativai\.de$/,
-  );
+});
+
+test("adapter env carries acpx's resolved base URL (the seam claude-pty-acp consumes)", () => {
+  // ⚠️ SCRUB THE VARIABLE FIRST — without this the test passes on a build that has
+  // dropped the handoff entirely. `buildAgentEnvironment` starts from
+  // `{...process.env}`, so on any box whose pod env carries ACPX_UI_BASE_URL the
+  // child INHERITS the right answer and the assertion cannot tell inheritance from
+  // the assignment. Measured 2026-09-11 on devbox: deleting the handoff left this
+  // test green until the scrub was added. Scrubbed, the child can only obtain the
+  // value from acpx resolving it (rungs 2–3) and writing it down — which is the
+  // case the bridge's deleted copy existed to cover.
+  const restore = process.env.ACPX_UI_BASE_URL;
+  delete process.env.ACPX_UI_BASE_URL;
+  try {
+    // Pin to THIS box's own resolution rather than a literal: the claim is that the
+    // child is told what acpx decided, not that any one box's answer is a constant.
+    const expected = resolveAcpxUiBaseUrl(process.env);
+    // …but `undefined === undefined` would pass while proving nothing, so require
+    // that rungs 2–3 actually answered here. A box where they do not is covered by
+    // the degraded-path test below, not by this one.
+    assert.ok(
+      expected,
+      "rungs 2-3 must resolve on the box running this suite, or this assertion is vacuous",
+    );
+    for (const agentCommand of ["node /opt/claude-pty-acp/dist/index.js", "claude", "codex"]) {
+      const { env } = buildAgentSpawnOptions(process.cwd(), undefined, undefined, {}, agentCommand);
+      assert.equal(
+        env.ACPX_UI_BASE_URL,
+        expected,
+        `${agentCommand} must be handed acpx's resolved base URL`,
+      );
+    }
+  } finally {
+    if (restore === undefined) {
+      delete process.env.ACPX_UI_BASE_URL;
+    } else {
+      process.env.ACPX_UI_BASE_URL = restore;
+    }
+  }
+});
+
+test("adapter env: a padded / trailing-slash ACPX_UI_BASE_URL is NORMALIZED for the child", () => {
+  // The child must see the exact string acpx built its own URLs from. Handing the
+  // raw env value down instead would give the bridge `https://host//?session=…`
+  // where acpx composed `https://host/?session=…` — two spellings of one session.
+  const restore = process.env.ACPX_UI_BASE_URL;
+  process.env.ACPX_UI_BASE_URL = "  https://acpx.devbox.konsiq.de//  ";
+  try {
+    const spawnOptions = buildAgentSpawnOptions(
+      process.cwd(),
+      undefined,
+      { acpxRecordId: "rec-1" },
+      {},
+      "node /opt/claude-pty-acp/dist/index.js",
+    );
+    assert.equal(spawnOptions.env.ACPX_UI_BASE_URL, "https://acpx.devbox.konsiq.de");
+    assert.equal(spawnOptions.env.ACPX_SESSION_URL, "https://acpx.devbox.konsiq.de/?session=rec-1");
+  } finally {
+    if (restore === undefined) {
+      delete process.env.ACPX_UI_BASE_URL;
+    } else {
+      process.env.ACPX_UI_BASE_URL = restore;
+    }
+  }
+});
+
+test("adapter env: an unresolvable box leaves the URL keys UNSET — never fabricated", () => {
+  // The degraded path cannot be reached in-process: the source files are read once
+  // and cached, and on a control-plane pod /proc/1/environ answers rung 2 whatever
+  // the env says. So drive it in a CHILD with the env scrubbed and the hostmap cache
+  // pointed at nothing, and assert the SAME expression in both outcomes — the child
+  // env must carry exactly what the resolver returned, and nothing when it returned
+  // nothing. That way the test is meaningful on a pod where rung 2 answers (it pins
+  // the handoff) and on one where nothing answers (it pins the omission), and it can
+  // never pass by being vacuous. Re-add any constructed fallback and the branch that
+  // returned null here starts returning a host, failing the `?? undefined` equality.
+  const script = [
+    `process.env.ACPX_HOSTMAP_CACHE_FILE = "/nonexistent-f29ba473/hostmap-cache.json";`,
+    `delete process.env.ACPX_UI_BASE_URL;`,
+    `const { resolveAcpxUiBaseUrl } = await import("./dist-test/src/acp/auth-env.js");`,
+    `const { buildAgentSpawnOptions } = await import("./dist-test/src/acp/client.js");`,
+    `const resolved = resolveAcpxUiBaseUrl(process.env) ?? null;`,
+    `const { env } = buildAgentSpawnOptions(process.cwd(), undefined, { acpxRecordId: "rec-1" }, {}, "node /opt/claude-pty-acp/dist/index.js");`,
+    `process.stdout.write(JSON.stringify({ resolved, base: env.ACPX_UI_BASE_URL ?? null, session: env.ACPX_SESSION_URL ?? null }));`,
+  ].join("\n");
+  const childEnv = { ...process.env };
+  delete childEnv.ACPX_UI_BASE_URL;
+  const raw = execFileSync(process.execPath, ["--input-type=module", "--eval", script], {
+    cwd: process.cwd(),
+    env: childEnv,
+    encoding: "utf8",
+  });
+  const { resolved, base, session } = JSON.parse(raw) as {
+    resolved: string | null;
+    base: string | null;
+    session: string | null;
+  };
+  assert.equal(base, resolved, "the child's ACPX_UI_BASE_URL must be exactly what acpx resolved");
+  assert.equal(session, resolved === null ? null : `${resolved}/?session=rec-1`);
 });
 
 // ---------------------------------------------------------------------------
