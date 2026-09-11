@@ -6,6 +6,7 @@ import {
   deriveBoxBaseUrlFrom,
   envValueFromEnviron,
   parseNamespaceFromResolvConf,
+  unresolvedBaseUrlMessage,
 } from "../src/acp/auth-env.js";
 
 // PROD-2 (brick e437db49) + brick f29ba473 — the canonical-host ladder.
@@ -23,8 +24,10 @@ import {
 //
 // PROD-2 demoted the alias to a last-resort rung; f29ba473 DELETED it, along with
 // the `https://acpx.devbox.nativai.de` literal below it. The ladder is now
-// env → PID-1 → hostmap cache → THROW, and this file's job is to keep it that way:
-// the alias string must never again be producible from the box's own files.
+// env → PID-1 → hostmap cache → UNDEFINED (+ one warning), and this file's job is to
+// keep it that way: the alias string must never again be producible from the box's
+// own files, and the miss must stay a miss rather than becoming a throw — a throw
+// would block every spawn on a host where no rung resolves.
 
 const KONSIQ_RESOLV_CONF =
   "search dev-konsiq.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.109.0.10\noptions ndots:5\n";
@@ -137,7 +140,7 @@ test("PROD-2 ordering: resolv.conf supplies the namespace when the service-accou
 // This resolver runs on EVERY spawn.
 // ---------------------------------------------------------------------------
 
-test("PROD-2 fall-through: no usable input at all → undefined (the caller then throws)", () => {
+test("PROD-2 fall-through: no usable input at all → undefined (the caller then omits the URL)", () => {
   assert.equal(deriveBoxBaseUrlFrom({}), undefined);
   assert.equal(deriveBoxBaseUrlFrom({ resolvConf: "nameserver 1.1.1.1\n" }), undefined);
 });
@@ -190,26 +193,30 @@ test("ladder: resolv.conf alone yields NOTHING — it supplies a namespace, not 
   assert.equal(parseNamespaceFromResolvConf(KONSIQ_RESOLV_CONF), "dev-konsiq");
 });
 
-test("ladder: a resolv.conf-only box THROWS instead of minting a host", () => {
-  assert.throws(
-    () => acpxUiBaseUrlFrom({}, { resolvConf: KONSIQ_RESOLV_CONF }),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      // Actionable: it names the knob to set and the paths it tried.
-      assert.match(error.message, /ACPX_UI_BASE_URL/);
-      assert.match(error.message, /\/proc\/1\/environ/);
-      // ⚠️ And it must not hand the reader a hostname to paste. The whole point of
-      // the throw is that acpx does not know one; a "did you mean" in the message
-      // would be the fabrication coming back in through the error text.
-      assert.doesNotMatch(error.message, /https:\/\/acpx\./);
-      return true;
-    },
-  );
-  // Same for the deleted literal default: no inputs at all is still a throw.
-  assert.throws(() => acpxUiBaseUrlFrom({}, {}), /cannot determine/);
+test("ladder: a resolv.conf-only box yields UNDEFINED instead of minting a host", () => {
+  // Not a throw: a throw would block every spawn on a host where no rung resolves,
+  // and the deleted literal's own comment ("non-cluster / unknown namespace") records
+  // that its authors expected such a host to exist. Undefined makes each caller
+  // decide, under the typechecker, between omitting the URL and inventing one.
+  assert.equal(acpxUiBaseUrlFrom({}, { resolvConf: KONSIQ_RESOLV_CONF }), undefined);
+  // Same for the deleted literal default: no inputs at all is undefined too.
+  assert.equal(acpxUiBaseUrlFrom({}, {}), undefined);
 });
 
-test("ladder: rung 1 wins, is trimmed, and is the only thing that stops the throw", () => {
+test("ladder: the unresolved-warning names the knob and hands back NO hostname", () => {
+  const message = unresolvedBaseUrlMessage("/home/agent/.acpx/hostmap-cache.json");
+  // Actionable: it names the knob to set and the paths it tried.
+  assert.match(message, /ACPX_UI_BASE_URL/);
+  assert.match(message, /\/proc\/1\/environ/);
+  assert.match(message, /hostmap-cache\.json/);
+  // ⚠️ And it must not hand the reader a hostname to paste. The whole point of the
+  // degraded path is that acpx does not know one; a "did you mean" in the diagnostic
+  // would be the fabrication coming back in through the warning text.
+  assert.doesNotMatch(message, /https:\/\/acpx\./);
+  assert.doesNotMatch(message, /nativai\.de/);
+});
+
+test("ladder: rung 1 wins, is trimmed, and is the only thing that saves an otherwise-empty box", () => {
   assert.equal(
     acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "https://acpx.devbox.konsiq.de/" }, {}),
     CANONICAL,
@@ -219,8 +226,9 @@ test("ladder: rung 1 wins, is trimmed, and is the only thing that stops the thro
     acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "   " }, { pid1Environ: KONSIQ_PID1_ENVIRON }),
     CANONICAL,
   );
-  // …and when the rest of the ladder misses too, it throws rather than defaulting.
-  assert.throws(() => acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "   " }, {}), /cannot determine/);
+  // …and when the rest of the ladder misses too, it reports nothing rather than
+  // defaulting to somebody else's box.
+  assert.equal(acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "   " }, {}), undefined);
 });
 
 // ---------------------------------------------------------------------------

@@ -19,14 +19,17 @@ function formatSessionLabel(record: SessionRecord): string {
 
 // The created child's own acpx-ui URL (this box's base + ?session=<id>) — so a
 // spawning agent gets the child's address directly. Reuses the box-base resolver
-// the rest of the CLI uses (env override → PID-1 env → hostmap cache → throw; it
-// never invents a host, so this URL is either the box's real one or an error).
-function composeSessionUrl(record: SessionRecord): string {
+// the rest of the CLI uses (env override → PID-1 env → hostmap cache). UNDEFINED
+// when this box's host is unknown: printing `undefined/?session=…` would be a
+// fabricated address, and a missing one is the honest answer (the resolver has
+// already warned, naming the knob to set).
+function composeSessionUrl(record: SessionRecord): string | undefined {
   return composeSessionUrlForId(record.acpxRecordId);
 }
 
-function composeSessionUrlForId(acpxRecordId: string): string {
-  return `${resolveAcpxUiBaseUrl(process.env)}/?session=${acpxRecordId}`;
+function composeSessionUrlForId(acpxRecordId: string): string | undefined {
+  const base = resolveAcpxUiBaseUrl(process.env);
+  return base ? `${base}/?session=${acpxRecordId}` : undefined;
 }
 
 function formatRoutedFrom(sessionCwd: string, currentCwd: string): string | undefined {
@@ -389,13 +392,21 @@ export function warnEnsureCreatedOverClosed(
 ): void {
   const label = closed.nearestName ?? closed.nearestRecordId;
   const others = closed.count > 1 ? ` (${closed.count} closed matches; newest shown)` : "";
+  // The send-message route needs this box's acpx-ui URL. Where that is unknown the
+  // line is dropped rather than printed with a fabricated host — same rule as the
+  // doc comment above: a pointer an operator cannot follow costs more than silence.
+  const reopenUrl = composeSessionUrlForId(closed.nearestRecordId);
   const lines = [
     `⚠️  acpx: created a NEW EMPTY session ${record.acpxRecordId} — a CLOSED session of the same name/cwd already existed${others}.`,
     `    Its history is NOT carried over. Closed session: ${label} (${closed.nearestRecordId}).`,
     `    If you meant to REVIVE that one instead of starting over, reopen it:`,
     `      acpx sessions reopen ${closed.nearestRecordId}`,
-    `      # or, to reopen AND deliver in one step:`,
-    `      send-message.sh --reopen ${composeSessionUrlForId(closed.nearestRecordId)} '<text>'`,
+    ...(reopenUrl
+      ? [
+          `      # or, to reopen AND deliver in one step:`,
+          `      send-message.sh --reopen ${reopenUrl} '<text>'`,
+        ]
+      : []),
     `    If a fresh session was what you wanted, nothing is wrong — this is only a notice.`,
   ];
   process.stderr.write(`${lines.join("\n")}\n`);
@@ -550,7 +561,10 @@ export function printCreatedSessionBanner(
   process.stderr.write(`[acpx] created session ${label} (${record.acpxRecordId})\n`);
   process.stderr.write(`[acpx] agent: ${agentName}\n`);
   process.stderr.write(`[acpx] cwd: ${record.cwd}\n`);
-  process.stderr.write(`[acpx] url: ${composeSessionUrl(record)}\n`);
+  const url = composeSessionUrl(record);
+  if (url) {
+    process.stderr.write(`[acpx] url: ${url}\n`);
+  }
 }
 
 function formatBytes(bytes: number): string {
