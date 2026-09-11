@@ -444,19 +444,34 @@ test("resolveAcpxUiBaseUrl: explicit ACPX_UI_BASE_URL wins and is trimmed", () =
 });
 
 test("adapter env carries acpx's resolved base URL (the seam claude-pty-acp consumes)", () => {
-  // Pin the value to THIS process's own resolution rather than a literal: the test
-  // must assert that the child is told what acpx decided, not what any one box's
-  // answer happens to be. A literal here would pass on devbox and fail everywhere
-  // else, and would not notice the handoff being dropped on a box whose pod env is
-  // empty — the exact case the bridge's deleted copy existed for.
-  const expected = resolveAcpxUiBaseUrl(process.env);
-  for (const agentCommand of ["node /opt/claude-pty-acp/dist/index.js", "claude", "codex"]) {
-    const { env } = buildAgentSpawnOptions(process.cwd(), undefined, undefined, {}, agentCommand);
-    assert.equal(
-      env.ACPX_UI_BASE_URL,
-      expected,
-      `${agentCommand} must inherit acpx's resolved base URL`,
-    );
+  // ⚠️ SCRUB THE VARIABLE FIRST — without this the test passes on a build that has
+  // dropped the handoff entirely. `buildAgentEnvironment` starts from
+  // `{...process.env}`, so on any box whose pod env carries ACPX_UI_BASE_URL the
+  // child INHERITS the right answer and the assertion cannot tell inheritance from
+  // the assignment. Measured 2026-09-11 on devbox: deleting the handoff left this
+  // test green until the scrub was added. Scrubbed, the child can only obtain the
+  // value from acpx resolving it (rungs 2–3) and writing it down — which is the
+  // case the bridge's deleted copy existed to cover.
+  const restore = process.env.ACPX_UI_BASE_URL;
+  delete process.env.ACPX_UI_BASE_URL;
+  try {
+    // Pin to THIS box's own resolution rather than a literal: the claim is that the
+    // child is told what acpx decided, not that any one box's answer is a constant.
+    const expected = resolveAcpxUiBaseUrl(process.env);
+    for (const agentCommand of ["node /opt/claude-pty-acp/dist/index.js", "claude", "codex"]) {
+      const { env } = buildAgentSpawnOptions(process.cwd(), undefined, undefined, {}, agentCommand);
+      assert.equal(
+        env.ACPX_UI_BASE_URL,
+        expected,
+        `${agentCommand} must be handed acpx's resolved base URL`,
+      );
+    }
+  } finally {
+    if (restore === undefined) {
+      delete process.env.ACPX_UI_BASE_URL;
+    } else {
+      process.env.ACPX_UI_BASE_URL = restore;
+    }
   }
 });
 
