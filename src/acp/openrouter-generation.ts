@@ -220,7 +220,10 @@ export type ResolveTurnProviderOptions = {
   /** Injected in tests so a schedule spanning ~21 s does not cost 21 s. */
   sleep?: (ms: number) => Promise<void>;
   /** Injected in tests; the real one is a read-modify-write of the record. */
-  persist?: (sessionId: string, attribution: GenerationAttribution) => Promise<void>;
+  persist?: (
+    sessionId: string,
+    attribution: GenerationAttribution & { response_id: string },
+  ) => Promise<void>;
   /** Injected in tests; the real one writes one line to stderr, once. */
   warn?: (message: string) => void;
 };
