@@ -33,6 +33,7 @@ import { makeSessionRecord } from "./runtime-test-helpers.js";
 const WAFER: LastTurnProviderBreadcrumb = {
   provider_name: "Wafer",
   native_finish_reason: null,
+  response_id: null,
   at: "2026-09-10T13:20:30.582Z",
 };
 
@@ -76,6 +77,7 @@ test("PM-1 · a present-and-NULL provider round-trips too — null is meaningful
   const observed: LastTurnProviderBreadcrumb = {
     provider_name: null,
     native_finish_reason: null,
+    response_id: null,
     at: "2026-09-10T13:20:30.582Z",
   };
   const parsed = roundTrip(recordWith(observed));
@@ -159,6 +161,7 @@ test("PM-1 · but a NEWER in-memory value still wins — the preserve is one-dir
       recordWith({
         provider_name: "BaseTen",
         native_finish_reason: null,
+        response_id: null,
         at: "2026-09-10T14:00:00.000Z",
       }),
     );

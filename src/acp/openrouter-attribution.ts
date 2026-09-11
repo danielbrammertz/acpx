@@ -21,18 +21,23 @@
  * the preference by construction, including on every turn where the preference
  * did not hold. Absence is recorded as absence.
  *
- * ## ⚠️ THE pi PATH RECORDS `null`, AND THAT IS MEASURED, NOT LAZINESS
+ * ## ⚠️ THE pi PATH ANSWERS THROUGH A LOOKUP, NOT THROUGH pi (brick 77054e85)
  *
  * CONCEPTION §8 says the provider is on pi's own assistant-message record. It is
  * not, on the shipped build: `AssistantMessage.provider` is pi's **provider id**
  * (`"openrouter"` — the openai-completions chunk sets `provider: model.provider`,
- * `pi-ai/dist/types.d.ts:307-327`), `rawStopReason` is the **normalised**
- * `choice.finish_reason` rather than `native_finish_reason`, and pi-acp forwards
- * only `usage` in `_meta.piAcp.message`. pi talks to OpenRouter directly, so acpx
- * owns no seam on that path and cannot observe the answer. Recording pi's
- * `"openrouter"` here would be exactly the substitution the rule above forbids,
- * one level cruder. (Correction filed under CONCEPTION §0; the follow-up is
- * pi-acp forwarding `responseId` so acpx can resolve `/api/v1/generation` lazily.)
+ * `pi-ai/dist/types.d.ts:307-327`) and `rawStopReason` is the **normalised**
+ * `choice.finish_reason` rather than `native_finish_reason`. pi talks to
+ * OpenRouter directly, so acpx owns no seam on that path and cannot read the
+ * answer off the turn. Recording pi's `"openrouter"` would be exactly the
+ * substitution the rule above forbids, one level cruder.
+ *
+ * What pi's message DOES carry is `responseId` — OpenRouter's generation id. The
+ * nativai `pi-acp` fork forwards it on `_meta.piAcp.message`, and
+ * {@link ./openrouter-generation.ts} resolves it to a real `provider_name` with
+ * a lookup made off the turn path. **Until that lookup lands the record says
+ * `provider_name: null` with a `response_id`, and that is still "not recorded"** —
+ * an id is a handle, never an answer.
  */
 
 import fs from "node:fs";
@@ -46,6 +51,19 @@ export type TurnAttribution = {
   provider_name: string | null;
   /** The provider's own finish reason, un-normalised. */
   native_finish_reason: string | null;
+  /**
+   * OpenRouter's generation id for the response (`"gen-1789154639-…"`), or
+   * `null` when this path saw none (brick 77054e85).
+   *
+   * ⚠️ **THIS IS A HANDLE, NOT AN ANSWER.** It says only *which* generation
+   * served the message; `provider_name` is what a reader wants, and the two are
+   * independent — a record can carry an id with `provider_name: null` (the
+   * lookup has not resolved yet, or never will), and it can carry a
+   * `provider_name` with no id (the Claude shim read the provider straight off
+   * the response). Do not display it as attribution and do not infer one from
+   * the other.
+   */
+  response_id: string | null;
 };
 
 /**
@@ -161,6 +179,40 @@ export function attachAttribution(update: object, attribution: TurnAttribution):
   (acpx as { orAttribution?: TurnAttribution }).orAttribution = attribution;
 }
 
+/**
+ * OpenRouter's generation id off a **pi** usage update, or `undefined`
+ * (brick 77054e85).
+ *
+ * The nativai `pi-acp` fork puts `responseId` on the same
+ * `_meta.piAcp.message` block as the per-message counts. Read here rather than
+ * inline in the client so the wire path lives beside {@link attachAttribution} —
+ * the pair of `_meta` literals this file exists to keep in one place, since a
+ * typo in either is silent in both directions.
+ *
+ * ⚠️ **`message.provider` IS NOT AN ALTERNATIVE TO THIS.** pi-acp forwards it
+ * too, and on OpenRouter it is the constant `"openrouter"` — pi's provider ID,
+ * never the serving provider. It is carried for diagnosis; a reader that
+ * substituted it for `provider_name` would publish a value that agrees with
+ * itself on every turn, which is the un-falsifiability this module's header
+ * forbids.
+ */
+export function piGenerationId(update: object): string | undefined {
+  const meta = (update as { _meta?: { piAcp?: { message?: unknown } } })._meta;
+  const message = meta?.piAcp?.message;
+  if (typeof message !== "object" || message === null) {
+    return undefined;
+  }
+  const responseId = (message as { responseId?: unknown }).responseId;
+  return typeof responseId === "string" && responseId.trim().length > 0
+    ? responseId.trim()
+    : undefined;
+}
+
+/** A non-empty string, or `null` — the shape every field on this type takes. */
+export function nullableString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function parseLine(line: string): TurnAttribution | undefined {
   try {
     const parsed: unknown = JSON.parse(line);
@@ -168,14 +220,18 @@ function parseLine(line: string): TurnAttribution | undefined {
       return undefined;
     }
     const record = parsed as Record<string, unknown>;
-    const provider = typeof record.provider === "string" ? record.provider : null;
+    const provider = nullableString(record.provider);
     if (!provider) {
       return undefined;
     }
     return {
       provider_name: provider,
-      native_finish_reason:
-        typeof record.native_finish_reason === "string" ? record.native_finish_reason : null,
+      native_finish_reason: nullableString(record.native_finish_reason),
+      // The shim has recorded `gen_id` since it was written (its own comment
+      // points at `/api/v1/generation?id=` as the deeper source); carrying it
+      // here makes `response_id` mean ONE thing on both harness paths, so the
+      // lazy resolver needs no per-path branch.
+      response_id: nullableString(record.gen_id),
     };
   } catch {
     return undefined;

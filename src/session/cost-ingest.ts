@@ -1,3 +1,4 @@
+import type { TurnAttribution } from "../acp/openrouter-attribution.js";
 import {
   type CostUnit,
   deriveCostFigure,
@@ -57,7 +58,7 @@ export type UsageObservation = {
    * Absent ⇒ the unit records `null`, which means "not recorded" and must never
    * be filled in with the provider the box merely preferred.
    */
-  attribution?: { provider_name: string | null; native_finish_reason: string | null };
+  attribution?: TurnAttribution;
 };
 
 type RateLookup = (modelId: string) => UnitRates | null;
@@ -202,11 +203,30 @@ function stampedUnit(
     ts: now().toISOString(),
     model: modelId ?? null,
     cost_usd: priceUnit(priceable),
-    // ⚠️ `?? null`, NOT a fallback to anything else. The absent case is recorded
-    // as absent — see `CostUnit.provider_name` for why a "sensible default" here
-    // (the preferred provider) would make the routing feature un-falsifiable.
-    provider_name: observation.attribution?.provider_name ?? null,
-    native_finish_reason: observation.attribution?.native_finish_reason ?? null,
+    ...attributionFields(observation.attribution),
+  };
+}
+
+/**
+ * The three attribution stamps on a unit, all `null` when the path observed none.
+ *
+ * ⚠️ `?? null`, NOT a fallback to anything else. The absent case is recorded as
+ * absent — see `CostUnit.provider_name` for why a "sensible default" here (the
+ * preferred provider) would make the routing feature un-falsifiable.
+ *
+ * brick 77054e85 — on the pi path `response_id` is the ONLY one of the three the
+ * unit can carry: the names are resolved ~10 s later, onto `last_turn_provider`,
+ * long after this unit is written. Stamping the id is what leaves the turn
+ * identifiable at all. (Split out so {@link stampedUnit} stays under the repo's
+ * complexity ceiling of 8 — the third stamp pushed it to 9.)
+ */
+function attributionFields(
+  attribution: TurnAttribution | undefined,
+): Pick<CostUnit, "provider_name" | "native_finish_reason" | "response_id"> {
+  return {
+    provider_name: attribution?.provider_name ?? null,
+    native_finish_reason: attribution?.native_finish_reason ?? null,
+    response_id: attribution?.response_id ?? null,
   };
 }
 
