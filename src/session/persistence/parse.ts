@@ -784,6 +784,12 @@ function assignLastTurnProvider(state: SessionAcpxState, value: unknown): void {
     provider_name: typeof record.provider_name === "string" ? record.provider_name : null,
     native_finish_reason:
       typeof record.native_finish_reason === "string" ? record.native_finish_reason : null,
+    // brick 77054e85 — the NESTED key, and this leg is the one brick d07129e7's
+    // residual is about: `assertEveryKeySurvived` compares the whole block with
+    // `deepEqual`, so a field dropped HERE reds the parse row by name only
+    // because the contract's sentinel carries it. Adding one without the other
+    // is how a nested key slips through the guard that exists for exactly this.
+    response_id: typeof record.response_id === "string" ? record.response_id : null,
     at: record.at,
   };
 }

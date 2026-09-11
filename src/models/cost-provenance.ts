@@ -171,14 +171,28 @@ export type CostUnit = {
    * on every turn where the preference did not hold.
    *
    * Populated on the Claude/OpenRouter shim path, where acpx owns the proxy and
-   * sees the real response. `null` on pi and on every non-OpenRouter path: pi
-   * talks to OpenRouter directly and its own message record carries only its
-   * PROVIDER ID (`"openrouter"`), not the serving provider — see
-   * `src/acp/openrouter-attribution.ts` for the measurement.
+   * sees the real response. `null` on every non-OpenRouter path, and `null` ON
+   * THE pi PATH AT INGEST TIME even when the turn is ultimately attributed: pi
+   * talks to OpenRouter directly, so the unit is stamped with a
+   * {@link CostUnit.response_id} and the provider is resolved ~10 s later, by
+   * which time this unit is already on disk. **Read `acpx.last_turn_provider`,
+   * not this field, for "who served the most recent turn" on pi.**
    */
   provider_name?: string | null;
   /** The provider's own, un-normalised finish reason; `null` = not recorded. */
   native_finish_reason?: string | null;
+  /**
+   * OpenRouter's generation id for the response this unit priced, or `null`
+   * (brick 77054e85).
+   *
+   * ⚠️ **A HANDLE, NOT AN ANSWER, AND NOT BACKFILLED.** It says which generation
+   * produced the unit — enough for a human or a later tool to ask
+   * `/api/v1/generation?id=` — but the lazy resolver writes its answer to
+   * `acpx.last_turn_provider` only, never back onto historical units. So a unit
+   * routinely carries `response_id` beside `provider_name: null`, and that pair
+   * means "identified, resolved elsewhere", not "unresolvable".
+   */
+  response_id?: string | null;
 };
 
 /**

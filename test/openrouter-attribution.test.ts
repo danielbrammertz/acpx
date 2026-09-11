@@ -61,6 +61,9 @@ test("the cursor CONSUMES: a second read with no new response returns undefined"
   assert.deepEqual(log.takeLatest(), {
     provider_name: "Modal",
     native_finish_reason: "stop",
+    // brick 77054e85 — the shim has always recorded `gen_id`; it now travels as
+    // `response_id`, so the field means one thing on both harness paths.
+    response_id: "gen-1",
   });
   assert.equal(log.takeLatest(), undefined, "nothing new ⇒ nothing to attribute");
 
@@ -68,6 +71,7 @@ test("the cursor CONSUMES: a second read with no new response returns undefined"
   assert.deepEqual(log.takeLatest(), {
     provider_name: "BaseTen",
     native_finish_reason: "eos_token",
+    response_id: "gen-1",
   });
 });
 
@@ -116,7 +120,7 @@ test("T9 · a recorded turn carries the SERVED provider on its cost unit", () =>
       output: 10,
       cacheRead: 0,
       cacheWrite: 0,
-      attribution: { provider_name: "Modal", native_finish_reason: "eos_token" },
+      attribution: { provider_name: "Modal", native_finish_reason: "eos_token", response_id: null },
     },
     () => RATES,
   );
@@ -138,7 +142,11 @@ test("T9 · the client's WRITER and the record's READER are one pair, end to end
     size: 200_000,
     _meta: { piAcp: { message: { input: 100, output: 10, cacheRead: 0, cacheWrite: 0 } } },
   };
-  attachAttribution(update, { provider_name: "Modal", native_finish_reason: "eos_token" });
+  attachAttribution(update, {
+    provider_name: "Modal",
+    native_finish_reason: "eos_token",
+    response_id: null,
+  });
 
   const conversation = createSessionConversation();
   const acpx = recordSessionUpdate(conversation, { current_model_id: "z-ai/glm-5.3-flash" }, {
@@ -163,7 +171,11 @@ test("T9 · attribution lands on the record even with NO cost unit — the shim-
     used: 26_052,
     size: 1_000_000,
   };
-  attachAttribution(update, { provider_name: "Z.AI", native_finish_reason: "stop" });
+  attachAttribution(update, {
+    provider_name: "Z.AI",
+    native_finish_reason: "stop",
+    response_id: null,
+  });
 
   const acpx = recordSessionUpdate(createSessionConversation(), {}, {
     sessionId: "s-2",
@@ -181,7 +193,11 @@ test("T9 · a later usage update with NO attribution does not blank the recorded
   // moments after writing it.
   const conversation = createSessionConversation();
   const first: Record<string, unknown> = { sessionUpdate: "usage_update", used: 10, size: 1000 };
-  attachAttribution(first, { provider_name: "BaseTen", native_finish_reason: null });
+  attachAttribution(first, {
+    provider_name: "BaseTen",
+    native_finish_reason: null,
+    response_id: null,
+  });
   let acpx = recordSessionUpdate(conversation, {}, {
     sessionId: "s-3",
     update: first,
@@ -201,12 +217,14 @@ test("T9 · the field survives cloneSessionAcpxState — the allowlist that ate 
     last_turn_provider: {
       provider_name: "BaseTen",
       native_finish_reason: "stop",
+      response_id: null,
       at: "2026-09-10T09:00:00.000Z",
     },
   });
   assert.deepEqual(cloned?.last_turn_provider, {
     provider_name: "BaseTen",
     native_finish_reason: "stop",
+    response_id: null,
     at: "2026-09-10T09:00:00.000Z",
   });
 });
@@ -225,6 +243,7 @@ test("T9 · both index legs carry it — projection AND reconcile-preservation",
       last_turn_provider: {
         provider_name: "Z.AI",
         native_finish_reason: "stop",
+        response_id: null,
         at: "2026-09-10T09:00:00.000Z",
       },
     },
@@ -245,6 +264,7 @@ test("T9 · the index entry survives the read-back — else a daemon rewrite str
       last_turn_provider: {
         provider_name: "BaseTen",
         native_finish_reason: "stop",
+        response_id: null,
         at: "2026-09-10T09:00:00.000Z",
       },
     },
@@ -302,6 +322,7 @@ test("F-3 · the turn-END leg writes the record even when no usage update carrie
     lastTurnProvider: {
       provider_name: "Together",
       native_finish_reason: null,
+      response_id: null,
       at: "2026-09-10T10:45:00.000Z",
     },
   });

@@ -7,6 +7,7 @@ import type {
   ToolCallUpdate,
   UsageUpdate,
 } from "@agentclientprotocol/sdk";
+import type { TurnAttribution } from "../acp/openrouter-attribution.js";
 import { textPrompt } from "../prompt-content.js";
 import type {
   AgentProgress,
@@ -1269,9 +1270,7 @@ function rememberTurnProvider(acpx: SessionAcpxState, update: UsageUpdate): void
  * pi, Codex, a native Claude subscription — carries no block, and the unit
  * records `null`. That is the honest answer, not a gap to be filled.
  */
-function attributionFromUpdate(
-  update: UsageUpdate,
-): { provider_name: string | null; native_finish_reason: string | null } | undefined {
+function attributionFromUpdate(update: UsageUpdate): TurnAttribution | undefined {
   const block = asRecord(asRecord(asRecord(asRecord(update)?._meta)?.acpx)?.orAttribution);
   if (!block) {
     return undefined;
@@ -1280,6 +1279,11 @@ function attributionFromUpdate(
     provider_name: typeof block.provider_name === "string" ? block.provider_name : null,
     native_finish_reason:
       typeof block.native_finish_reason === "string" ? block.native_finish_reason : null,
+    // brick 77054e85 — the pi path's block carries ONLY this: a generation id
+    // with both names still `null`, because the answer needs a lookup the turn
+    // does not wait for. Recording it is what makes that lookup possible later,
+    // and what makes "asked but unresolved" distinguishable from "never asked".
+    response_id: typeof block.response_id === "string" ? block.response_id : null,
   };
 }
 

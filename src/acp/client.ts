@@ -145,8 +145,10 @@ import {
   attachAttribution,
   type LastTurnProviderBreadcrumb,
   OpenRouterAttributionLog,
+  piGenerationId,
   type TurnAttribution,
 } from "./openrouter-attribution.js";
+import { resolveTurnProvider } from "./openrouter-generation.js";
 import type {
   RoutingPolicyWarning,
   RoutingPolicyWarningBreadcrumb,
@@ -3302,10 +3304,64 @@ export class AcpClient {
    * tinguishable from a right one.
    */
   private decorateWithAttribution(update: SessionNotification["update"]): void {
-    const attribution = this.refreshAttribution();
-    if (attribution) {
-      attachAttribution(update, attribution);
+    const attribution = this.turnAttributionFor(update);
+    if (!attribution) {
+      return;
     }
+    attachAttribution(update, attribution);
+    this.scheduleAttributionResolve(attribution);
+  }
+
+  /**
+   * The attribution for this usage update, from whichever harness path can
+   * observe one (brick 77054e85).
+   *
+   * ⚠️ **THE SHIM LOG WINS, AND THE ORDER IS NOT ARBITRARY.** Its `provider_name`
+   * is read off the response itself — the answer, already in hand — while pi's
+   * `responseId` is only a handle that costs a round trip and up to ~21 s to turn
+   * into one. Asking pi first would pay for a lookup on a path that already knows.
+   *
+   * ⚠️ AND `refreshAttribution()` CONSUMES, SO IT MUST STAY ON EVERY USAGE
+   * UPDATE, NOT BEHIND THE pi CHECK. It advances the log cursor; skipping a call
+   * would leave an unconsumed line to be handed to a LATER update that it does
+   * not describe.
+   */
+  private turnAttributionFor(update: SessionNotification["update"]): TurnAttribution | undefined {
+    const fromShim = this.refreshAttribution();
+    if (fromShim) {
+      return fromShim;
+    }
+    const responseId = piGenerationId(update);
+    return responseId
+      ? { provider_name: null, native_finish_reason: null, response_id: responseId }
+      : undefined;
+  }
+
+  /**
+   * Start the lazy `/api/v1/generation` lookup, off the turn path.
+   *
+   * 🛑 **DELIBERATELY NOT AWAITED.** The lookup runs for up to ~21 s because the
+   * generation record is not minted until ~10 s after the completion (measured —
+   * `openrouter-generation.ts`). Awaiting it here would put that entire window on
+   * the turn, which is the one cost this feature is not allowed to have.
+   *
+   * Only fires where there is something to resolve and nothing already resolved:
+   * a Claude-shim turn normally arrives with `provider_name` filled in and makes
+   * no request at all.
+   */
+  private scheduleAttributionResolve(attribution: TurnAttribution): void {
+    if (attribution.provider_name !== null || !attribution.response_id) {
+      return;
+    }
+    // A transient creation spawn carries `acpxRecordId: ""` and serves no turn,
+    // so there is no record to write — the same guard the brick-context read uses.
+    const sessionId = this.options.sessionContext?.acpxRecordId?.trim();
+    if (!sessionId) {
+      return;
+    }
+    void resolveTurnProvider({ sessionId, responseId: attribution.response_id }).catch(() => {
+      // Enrichment: it may never cost a turn, and the turn is over regardless.
+    });
   }
 
   /**

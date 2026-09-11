@@ -106,6 +106,7 @@ export const PERSISTED_ACPX_SENTINEL = {
       cost_usd: 1.5,
       provider_name: "SentinelProvider",
       native_finish_reason: "sentinel-native-finish",
+      response_id: "sentinel-unit-response-id",
     },
   ],
   served: {
@@ -117,6 +118,15 @@ export const PERSISTED_ACPX_SENTINEL = {
   last_turn_provider: {
     provider_name: "SentinelLastProvider",
     native_finish_reason: "sentinel-last-native",
+    // ⚠️ A NESTED KEY NEEDS ITS OWN SENTINEL (brick d07129e7 residual, and
+    // brick 77054e85 is the first field to actually exercise it). The compiler
+    // half of this guard only forces the TOP-LEVEL keys — `satisfies
+    // Required<SessionAcpxState>` says nothing about a new optional field INSIDE
+    // `last_turn_provider`. What catches a dropped nested key is the round-trip
+    // row's `deepEqual` over the whole block, and that only fires if the value
+    // is here to be compared. Omit it and the parse leg can silently stop
+    // carrying `response_id` with every row green.
+    response_id: "sentinel-last-response-id",
     at: "2026-09-10T00:00:03.000Z",
   },
   harness_config_dir: "/tmp/sentinel-harness-config-dir",
