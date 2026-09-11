@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { AcpClient } from "../src/acp/client.js";
 import { attachAttribution, piGenerationId } from "../src/acp/openrouter-attribution.js";
 import {
   fetchGeneration,
@@ -280,7 +281,16 @@ test("one lookup in flight per SESSION — overlapping ids do not stack retry lo
     ]);
     const base = { ...resolverOptions(home, fetchImpl), persist: async () => {} };
     const first = resolveTurnProvider(base);
-    const second = await resolveTurnProvider({ ...base, responseId: `${GEN_ID}-2` });
+    // ⚠️ RACED AGAINST A TIMER RATHER THAN AWAITED BARE, AND THAT IS THE
+    // DIFFERENCE BETWEEN A RED AND A HANG. Without the guard the second call
+    // blocks on the same gate as the first, which the line below only opens
+    // afterwards — so a bare `await` deadlocks the whole suite instead of
+    // failing it. Measured by removing the guard: the run stalled and reported
+    // nothing. A guard whose absence produces a hang is untestable in practice.
+    const second = await Promise.race([
+      resolveTurnProvider({ ...base, responseId: `${GEN_ID}-2` }),
+      new Promise((resolve) => setTimeout(() => resolve("BLOCKED"), 250)),
+    ]);
     assert.equal(second, undefined, "the second id is dropped while a lookup is running");
     release?.();
     assert.deepEqual(await first, { provider_name: "BaseTen", native_finish_reason: "stop" });
@@ -337,6 +347,47 @@ test("piGenerationId reads the id off the pi block, and nothing else", () => {
   );
   assert.equal(piGenerationId({ _meta: { piAcp: { message: { responseId: "  " } } } }), undefined);
   assert.equal(piGenerationId({ sessionUpdate: "usage_update" }), undefined);
+});
+
+test("the CLIENT puts pi's id on the canonical `_meta.acpx.orAttribution` path", () => {
+  // ⚠️ THE SEAM THE OTHER ROWS CANNOT SEE. `piGenerationId` is a reader and
+  // `attachAttribution` is a writer; both can be perfect while the client wires
+  // neither to the other, and that failure is silent in both directions — no
+  // error, no type failure, just a record that never carries a provider on the
+  // pi path. So this drives the client's own decoration and asserts what the
+  // INGEST would read back, not what the client meant to write.
+  const client = new AcpClient({
+    agentCommand: "node ./test/mock-agent.js",
+    cwd: process.cwd(),
+    permissionMode: "approve-reads",
+  });
+  const update: Record<string, unknown> = {
+    sessionUpdate: "usage_update",
+    used: 1000,
+    size: 200_000,
+    _meta: { piAcp: { message: { input: 100, output: 10, responseId: GEN_ID } } },
+  };
+  (
+    client as unknown as { decorateWithAttribution: (update: object) => void }
+  ).decorateWithAttribution(update);
+
+  const meta = update._meta as { acpx?: { orAttribution?: Record<string, unknown> } };
+  assert.deepEqual(
+    meta.acpx?.orAttribution,
+    { provider_name: null, native_finish_reason: null, response_id: GEN_ID },
+    "an id with both names null is the honest intermediate state — identified, not yet attributed",
+  );
+
+  // CONTROL: no id on the block ⇒ no attribution block at all, so the record
+  // records "not recorded" rather than an empty shell that reads as observed.
+  const bare: Record<string, unknown> = {
+    sessionUpdate: "usage_update",
+    _meta: { piAcp: { message: { input: 1, output: 1 } } },
+  };
+  (
+    client as unknown as { decorateWithAttribution: (update: object) => void }
+  ).decorateWithAttribution(bare);
+  assert.equal((bare._meta as { acpx?: unknown }).acpx, undefined);
 });
 
 test("a pi usage update lands an UNRESOLVED breadcrumb: the id, both names null", () => {
