@@ -1,27 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  acpxUiBaseUrlFrom,
   canonicalBaseUrlFromHostmapCache,
   deriveBoxBaseUrlFrom,
   envValueFromEnviron,
-  parseBoxBaseUrlFromResolvConf,
   parseNamespaceFromResolvConf,
 } from "../src/acp/auth-env.js";
 
-// PROD-2 (brick e437db49) — the canonical-host ladder.
+// PROD-2 (brick e437db49) + brick f29ba473 — the canonical-host ladder.
 //
 // Fixtures below are konsiq's and devbox's REAL file contents, measured read-only
-// on 2026-08-20 against deployed acpx ff1cc2e7 (konsiq) / 9566e7c (devbox). The
-// point of the ladder is that rung 4 (`parseBoxBaseUrlFromResolvConf`) is
-// structurally unable to be right for the three product-domain boxes, so the two
+// on 2026-08-20 against deployed acpx ff1cc2e7 (konsiq) / 9566e7c (devbox). Two
 // strings must be kept apart everywhere in this file:
 //
-//   https://acpx.konsiq.nativai.de     ← rung 4's ALIAS. Servable, but NOT canonical.
+//   https://acpx.konsiq.nativai.de     ← the structural ALIAS. Servable, NOT canonical.
 //   https://acpx.devbox.konsiq.de      ← the CANONICAL host. What rungs 2 and 3 give.
 //
 // ⚠️ DO NOT rewrite these as "assert the result is a valid acpx URL". Both strings
 // are valid acpx URLs; the whole defect is which one comes out. Every assertion
 // here names the exact expected string on purpose.
+//
+// PROD-2 demoted the alias to a last-resort rung; f29ba473 DELETED it, along with
+// the `https://acpx.devbox.nativai.de` literal below it. The ladder is now
+// env → PID-1 → hostmap cache → THROW, and this file's job is to keep it that way:
+// the alias string must never again be producible from the box's own files.
 
 const KONSIQ_RESOLV_CONF =
   "search dev-konsiq.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.109.0.10\noptions ndots:5\n";
@@ -66,12 +69,8 @@ const CANONICAL = "https://acpx.devbox.konsiq.de";
 // The transition the brick exists for
 // ---------------------------------------------------------------------------
 
-test("PROD-2 transition: konsiq's real inputs yield the CANONICAL host where rung 4 alone yields the ALIAS", () => {
-  // BEFORE — rung 4 in isolation is what the deployed resolver fell through to on
-  // konsiq, because $ACPX_UI_BASE_URL is empty in an ssh shell. Measured live.
-  assert.equal(parseBoxBaseUrlFromResolvConf(KONSIQ_RESOLV_CONF), ALIAS);
-
-  // AFTER — the full ladder over the same box's real files.
+test("PROD-2 transition: konsiq's real inputs yield the CANONICAL host", () => {
+  // The full ladder over the box's real files.
   assert.equal(
     deriveBoxBaseUrlFrom({
       pid1Environ: KONSIQ_PID1_ENVIRON,
@@ -85,7 +84,6 @@ test("PROD-2 transition: konsiq's real inputs yield the CANONICAL host where run
 
 test("PROD-2 control: devbox is unchanged by the ladder — every rung agrees", () => {
   const devboxHost = "https://acpx.devbox.nativai.de";
-  assert.equal(parseBoxBaseUrlFromResolvConf(DEVBOX_RESOLV_CONF), devboxHost);
   assert.equal(
     deriveBoxBaseUrlFrom({
       pid1Environ: `ACPX_UI_BASE_URL=${devboxHost}\0`,
@@ -114,7 +112,7 @@ test("PROD-2 ordering: /proc/1/environ (rung 2) beats the hostmap cache and reso
   );
 });
 
-test("PROD-2 ordering: the hostmap cache (rung 3) beats resolv.conf (rung 4)", () => {
+test("PROD-2 ordering: the hostmap cache (rung 3) is what resolv.conf's namespace keys into", () => {
   assert.equal(
     deriveBoxBaseUrlFrom({
       namespaceFile: "dev-konsiq\n",
@@ -139,24 +137,24 @@ test("PROD-2 ordering: resolv.conf supplies the namespace when the service-accou
 // This resolver runs on EVERY spawn.
 // ---------------------------------------------------------------------------
 
-test("PROD-2 fall-through: no usable input at all → undefined (caller applies the devbox default)", () => {
+test("PROD-2 fall-through: no usable input at all → undefined (the caller then throws)", () => {
   assert.equal(deriveBoxBaseUrlFrom({}), undefined);
   assert.equal(deriveBoxBaseUrlFrom({ resolvConf: "nameserver 1.1.1.1\n" }), undefined);
 });
 
-test("PROD-2 fall-through: a missing / malformed / stale hostmap cache demotes to the alias, never throws", () => {
+test("PROD-2 fall-through: a missing / malformed / stale hostmap cache is a MISS, never a throw", () => {
   const withoutCache = { namespaceFile: "dev-konsiq\n", resolvConf: KONSIQ_RESOLV_CONF };
   // Absent file.
-  assert.equal(deriveBoxBaseUrlFrom(withoutCache), ALIAS);
+  assert.equal(deriveBoxBaseUrlFrom(withoutCache), undefined);
   // Truncated mid-write / not JSON at all.
-  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: '{"entries":[' }), ALIAS);
-  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "" }), ALIAS);
+  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: '{"entries":[' }), undefined);
+  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "" }), undefined);
   // Valid JSON, wrong shape.
-  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "null" }), ALIAS);
-  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "[]" }), ALIAS);
+  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "null" }), undefined);
+  assert.equal(deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: "[]" }), undefined);
   assert.equal(
     deriveBoxBaseUrlFrom({ ...withoutCache, hostmapCache: '{"entries":"nope"}' }),
-    ALIAS,
+    undefined,
   );
   // Stale: a real cache that predates this box joining the fleet.
   assert.equal(
@@ -164,8 +162,65 @@ test("PROD-2 fall-through: a missing / malformed / stale hostmap cache demotes t
       ...withoutCache,
       hostmapCache: JSON.stringify({ entries: [{ host: "a.b", namespace: "dev-other" }] }),
     }),
-    ALIAS,
+    undefined,
   );
+});
+
+// ---------------------------------------------------------------------------
+// f29ba473 — the deleted rungs. These are the tests that go RED if anyone
+// re-introduces a constructed hostname or a literal default.
+// ---------------------------------------------------------------------------
+
+test("ladder: resolv.conf alone yields NOTHING — it supplies a namespace, not a hostname", () => {
+  // The exact inputs the deleted rung 4 turned into `https://acpx.<box>.nativai.de`:
+  // a cluster resolv.conf and nothing else. Re-add any rule of that shape — for
+  // konsiq or for devbox — and this goes red on the first assertion it produces.
+  for (const resolvConf of [KONSIQ_RESOLV_CONF, DEVBOX_RESOLV_CONF]) {
+    for (const sources of [
+      { resolvConf },
+      { resolvConf, namespaceFile: "dev-konsiq\n" },
+      // A cache present but useless: the namespace is known, the host is not.
+      { resolvConf, hostmapCache: '{"entries":[]}' },
+    ]) {
+      assert.equal(deriveBoxBaseUrlFrom(sources), undefined);
+      assert.notEqual(deriveBoxBaseUrlFrom(sources), ALIAS);
+    }
+  }
+  // And the namespace itself is still read — the rung was removed, not the parser.
+  assert.equal(parseNamespaceFromResolvConf(KONSIQ_RESOLV_CONF), "dev-konsiq");
+});
+
+test("ladder: a resolv.conf-only box THROWS instead of minting a host", () => {
+  assert.throws(
+    () => acpxUiBaseUrlFrom({}, { resolvConf: KONSIQ_RESOLV_CONF }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      // Actionable: it names the knob to set and the paths it tried.
+      assert.match(error.message, /ACPX_UI_BASE_URL/);
+      assert.match(error.message, /\/proc\/1\/environ/);
+      // ⚠️ And it must not hand the reader a hostname to paste. The whole point of
+      // the throw is that acpx does not know one; a "did you mean" in the message
+      // would be the fabrication coming back in through the error text.
+      assert.doesNotMatch(error.message, /https:\/\/acpx\./);
+      return true;
+    },
+  );
+  // Same for the deleted literal default: no inputs at all is still a throw.
+  assert.throws(() => acpxUiBaseUrlFrom({}, {}), /cannot determine/);
+});
+
+test("ladder: rung 1 wins, is trimmed, and is the only thing that stops the throw", () => {
+  assert.equal(
+    acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "https://acpx.devbox.konsiq.de/" }, {}),
+    CANONICAL,
+  );
+  // Blank env is not a value — it falls through to the rest of the ladder…
+  assert.equal(
+    acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "   " }, { pid1Environ: KONSIQ_PID1_ENVIRON }),
+    CANONICAL,
+  );
+  // …and when the rest of the ladder misses too, it throws rather than defaulting.
+  assert.throws(() => acpxUiBaseUrlFrom({ ACPX_UI_BASE_URL: "   " }, {}), /cannot determine/);
 });
 
 // ---------------------------------------------------------------------------

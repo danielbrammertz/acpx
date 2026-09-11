@@ -13,7 +13,6 @@ import {
   INDEPENDENT_CLAUDE_HOME_MAP_ENV,
   INDEPENDENT_CLAUDE_HOME_META_KEY,
   INDEPENDENT_CLAUDE_PARENT_SESSION_URL_META_KEY,
-  parseBoxBaseUrlFromResolvConf,
   resolveAcpxUiBaseUrl,
 } from "../src/acp/auth-env.js";
 import { AcpClient, buildAgentSpawnOptions } from "../src/acp/client.js";
@@ -428,41 +427,62 @@ test("buildClaudeParentSessionMeta: undefined when there is no parent, or no age
 });
 
 // ---------------------------------------------------------------------------
-// FW-20 — auto-detect the box's acpx-ui base URL from the K8s namespace
+// The box's acpx-ui base URL, and the seam the bridge consumes (brick f29ba473)
+//
+// The ladder's own rungs — including the throw that replaced the namespace guess
+// and the devbox literal — are pinned in `canonical-box-base-url.test.ts`, which
+// drives the pure entry point and therefore does not depend on which box the suite
+// runs on. What belongs HERE is the bridge contract: acpx resolves the host once
+// and hands the answer down, so claude-pty-acp has nothing left to re-derive.
 // ---------------------------------------------------------------------------
 
-test("parseBoxBaseUrlFromResolvConf (FW-20): derives the box host from the dev-<box> namespace search domain", () => {
-  assert.equal(
-    parseBoxBaseUrlFromResolvConf(
-      "search dev-tubeyakker.svc.cluster.local svc.cluster.local cluster.local\nnameserver 10.0.0.10\n",
-    ),
-    "https://acpx.tubeyakker.nativai.de",
-  );
-  assert.equal(
-    parseBoxBaseUrlFromResolvConf(
-      "search dev-devbox.svc.cluster.local svc.cluster.local\noptions ndots:5\n",
-    ),
-    "https://acpx.devbox.nativai.de",
-  );
-});
-
-test("parseBoxBaseUrlFromResolvConf (FW-20): undefined for non-cluster / unrecognized search domains", () => {
-  assert.equal(parseBoxBaseUrlFromResolvConf("nameserver 1.1.1.1\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf("search example.com lan\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf("search svc.cluster.local\n"), undefined);
-  assert.equal(parseBoxBaseUrlFromResolvConf(""), undefined);
-});
-
-test("resolveAcpxUiBaseUrl (FW-20): explicit ACPX_UI_BASE_URL wins over namespace detection and is trimmed", () => {
+test("resolveAcpxUiBaseUrl: explicit ACPX_UI_BASE_URL wins and is trimmed", () => {
   assert.equal(
     resolveAcpxUiBaseUrl({ ACPX_UI_BASE_URL: "https://acpx.labidio.nativai.de/" }),
     "https://acpx.labidio.nativai.de",
   );
-  // Empty/whitespace env is ignored → falls through to namespace/default (a valid https acpx url).
-  assert.match(
-    resolveAcpxUiBaseUrl({ ACPX_UI_BASE_URL: "   " }),
-    /^https:\/\/acpx\.[a-z0-9-]+\.nativai\.de$/,
-  );
+});
+
+test("adapter env carries acpx's resolved base URL (the seam claude-pty-acp consumes)", () => {
+  // Pin the value to THIS process's own resolution rather than a literal: the test
+  // must assert that the child is told what acpx decided, not what any one box's
+  // answer happens to be. A literal here would pass on devbox and fail everywhere
+  // else, and would not notice the handoff being dropped on a box whose pod env is
+  // empty — the exact case the bridge's deleted copy existed for.
+  const expected = resolveAcpxUiBaseUrl(process.env);
+  for (const agentCommand of ["node /opt/claude-pty-acp/dist/index.js", "claude", "codex"]) {
+    const { env } = buildAgentSpawnOptions(process.cwd(), undefined, undefined, {}, agentCommand);
+    assert.equal(
+      env.ACPX_UI_BASE_URL,
+      expected,
+      `${agentCommand} must inherit acpx's resolved base URL`,
+    );
+  }
+});
+
+test("adapter env: a padded / trailing-slash ACPX_UI_BASE_URL is NORMALIZED for the child", () => {
+  // The child must see the exact string acpx built its own URLs from. Handing the
+  // raw env value down instead would give the bridge `https://host//?session=…`
+  // where acpx composed `https://host/?session=…` — two spellings of one session.
+  const restore = process.env.ACPX_UI_BASE_URL;
+  process.env.ACPX_UI_BASE_URL = "  https://acpx.devbox.konsiq.de//  ";
+  try {
+    const spawnOptions = buildAgentSpawnOptions(
+      process.cwd(),
+      undefined,
+      { acpxRecordId: "rec-1" },
+      {},
+      "node /opt/claude-pty-acp/dist/index.js",
+    );
+    assert.equal(spawnOptions.env.ACPX_UI_BASE_URL, "https://acpx.devbox.konsiq.de");
+    assert.equal(spawnOptions.env.ACPX_SESSION_URL, "https://acpx.devbox.konsiq.de/?session=rec-1");
+  } finally {
+    if (restore === undefined) {
+      delete process.env.ACPX_UI_BASE_URL;
+    } else {
+      process.env.ACPX_UI_BASE_URL = restore;
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------

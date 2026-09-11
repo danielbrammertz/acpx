@@ -19,7 +19,8 @@ function formatSessionLabel(record: SessionRecord): string {
 
 // The created child's own acpx-ui URL (this box's base + ?session=<id>) — so a
 // spawning agent gets the child's address directly. Reuses the box-base resolver
-// the rest of the CLI uses (env override → namespace-derived → devbox default).
+// the rest of the CLI uses (env override → PID-1 env → hostmap cache → throw; it
+// never invents a host, so this URL is either the box's real one or an error).
 function composeSessionUrl(record: SessionRecord): string {
   return composeSessionUrlForId(record.acpxRecordId);
 }
