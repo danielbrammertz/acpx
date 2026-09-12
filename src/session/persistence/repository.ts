@@ -453,7 +453,7 @@ async function guardedMessagesWrite(
   );
 }
 function outboxForRecord(record: SessionRecord): BrickOutbox | undefined {
-  return openRecordOutbox(record.metadata);
+  return openRecordOutbox(record.metadata, sessionBaseDir());
 }
 async function persistRecordFile(
   file: string,
@@ -919,7 +919,12 @@ async function hardDeleteSessionRecord(entry: SessionIndexEntry): Promise<void> 
     },
   ]);
 
-  await unlinkHardDeletedFiles(sessionDir, acpxRecordId, safeId);
+  const expected = record
+    ? (serializeSessionRecordForDisk(record) as DiskRecord)
+    : { acpx_record_id: acpxRecordId, acp_session_id: entry.acpSessionId };
+  await withCanonicalDeletion(sessionDir, expected, () =>
+    unlinkHardDeletedFiles(sessionDir, acpxRecordId, safeId),
+  );
   await rebuildSessionIndex(sessionDir, "template-rollback-delete").catch(() => {
     // best-effort cache rebuild; the record files are already gone
   });
@@ -1974,6 +1979,33 @@ function isBeforeCutoff(record: SessionRecord, cutoffIso: string | undefined): b
 }
 
 async function pruneSessionFiles(
+  record: SessionRecord,
+  sessionDir: string,
+  streamFilesBySafeId: Map<string, string[]>,
+  includeHistory: boolean,
+): Promise<number> {
+  return withCanonicalDeletion(
+    sessionDir,
+    serializeSessionRecordForDisk(record) as DiskRecord,
+    () => unlinkPrunedSessionFiles(record, sessionDir, streamFilesBySafeId, includeHistory),
+  );
+}
+
+async function withCanonicalDeletion<T>(
+  sessionDir: string,
+  expected: DiskRecord,
+  action: () => Promise<T>,
+): Promise<T> {
+  const outbox = openRecordOutbox(expected.metadata, sessionDir);
+  if (!outbox) {return action();}
+  try {
+    return await outbox.withRecordDeletion(String(expected.acpx_record_id), expected, action);
+  } finally {
+    outbox.close();
+  }
+}
+
+async function unlinkPrunedSessionFiles(
   record: SessionRecord,
   sessionDir: string,
   streamFilesBySafeId: Map<string, string[]>,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { BrickOutbox, writeRecordAtomic, type DiskRecord } from "../../src/brick-outbox.js";
 import { parseSessionRecord } from "../../src/session/persistence/parse.js";
 
@@ -45,6 +46,82 @@ try {
     "negative parser control",
   );
   acted++;
+  if (scenario === "drain-exit") {
+    outbox.prepareProjection(id, record, identity);
+    outbox.setDrain("owned-exit");
+    const observer = new DatabaseSync(outbox.dbPath);
+    const snapshot = () =>
+      JSON.stringify(
+        observer
+          .prepare(
+            "SELECT key,value FROM meta WHERE key IN ('drain','admission_frontier') ORDER BY key",
+          )
+          .all(),
+      );
+    const before = snapshot();
+    assert.equal(JSON.parse(before).length, 2, "both durable marker values are observed");
+    let called = false;
+    assert.throws(
+      () =>
+        outbox.exitDrainWithMutationGate("wrong-owner", () => {
+          called = true;
+        }),
+      /expected cutover/,
+    );
+    assert.equal(called, false);
+    assert.equal(snapshot(), before);
+    assert.throws(
+      () =>
+        outbox.exitDrainWithMutationGate("owned-exit", () =>
+          outbox.withUserMutationGate(() => {
+            assert.equal(outbox.inventory().drain, null);
+            assert.equal(
+              snapshot(),
+              before,
+              "independent reader must not observe the uncommitted marker removal",
+            );
+            assert.throws(() => new BrickOutbox(), /outbox-busy/);
+            throw new Error("reopen-failed-control");
+          }),
+        ),
+      /reopen-failed-control/,
+    );
+    assert.equal(snapshot(), before);
+    assert.throws(
+      () => outbox.exitDrainWithMutationGate("owned-exit", async () => 1),
+      /synchronous/,
+    );
+    assert.equal(snapshot(), before);
+    const thenable = {
+      // eslint-disable-next-line unicorn/no-thenable -- Adversarial control for B8's synchronous-only drain-exit callback contract.
+      then() {},
+    };
+    assert.throws(
+      () => outbox.exitDrainWithMutationGate("owned-exit", () => thenable),
+      /synchronous/,
+    );
+    assert.equal(snapshot(), before);
+    const result = outbox.exitDrainWithMutationGate("owned-exit", () =>
+      outbox.withUserMutationGate(() =>
+        outbox.withUserMutationGate(() => {
+          assert.throws(() => new BrickOutbox(), /outbox-busy/);
+          return 42;
+        }),
+      ),
+    );
+    assert.equal(result, 42);
+    assert.equal(outbox.inventory().drain, null);
+    assert.deepEqual(outbox.inventory().admission_frontier, []);
+    assert.equal(snapshot(), "[]");
+    assert.equal(
+      outbox.withUserMutationGate(() => 43),
+      43,
+    );
+    observer.close();
+    acted++;
+    console.log(`ACTED=${acted}`);
+    process.exit(0);
+  }
   if (scenario === "gate") {
     assert.equal(
       outbox.withUserMutationGate(() => outbox.withUserMutationGate(() => 42)),

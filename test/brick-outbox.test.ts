@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 for (const scenario of [
+  "drain-exit",
   "frontier",
   "lookup-error",
   "gate",

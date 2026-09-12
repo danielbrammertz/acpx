@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import type {
   CentralRunReceipt,
   LocalDrainInventory,
@@ -16,30 +17,31 @@ import type {
 export type * from "./brick-outbox-types.js";
 
 export const BRICK_OUTBOX_API_VERSION = 1;
+export const BRICK_OUTBOX_CANONICAL_WRITER_VERSION = 1;
 export function requiresBrickOutbox(metadata: Record<string, string> | undefined): boolean {
   return ["brick", "spawn_key", "brick_projection_revision"].some((key) =>
     Boolean(metadata?.[key]),
   );
 }
 export function openRecordOutbox(
-  metadata: Record<string, string> | undefined,
+  _metadata: Record<string, string> | undefined,
+  directory = path.join(os.homedir(), ".acpx", "sessions"),
 ): BrickOutbox | undefined {
-  if (!requiresBrickOutbox(metadata)) {
-    return undefined;
+  if (!isCanonicalSessionDirectory(directory)) {return undefined;}
+  // C0 §1.4/§7.1: exclusion applies to canonical writers even before projection binding.
+  // Opening unconditionally removes the existence-check race with a concurrent drain entry.
+  return new BrickOutbox();
+}
+export function isCanonicalSessionDirectory(directory: string): boolean {
+  const actual = fs.realpathSync(directory);
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(path.join(os.homedir(), ".acpx", "sessions"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {throw error;}
+    return false;
   }
-  const mandatory = Boolean(
-    metadataValue({ metadata }, "spawn_key") ||
-    metadataValue({ metadata }, "brick_projection_revision"),
-  );
-  if (!mandatory && !fs.existsSync(path.join(os.homedir(), ".acpx", "brick-outbox.db"))) {
-    return undefined;
-  }
-  const outbox = new BrickOutbox();
-  if (mandatory || outbox.isBound()) {
-    return outbox;
-  }
-  outbox.close();
-  return undefined;
+  return actual === canonical;
 }
 export type DiskRecord = Record<string, unknown> & { metadata?: Record<string, string> };
 export type OutboxState = "prepared" | "applied" | "acknowledged" | "superseded" | "abandoned";
@@ -142,14 +144,20 @@ function now(): string {
   return new Date().toISOString();
 }
 function synchronousResult<T>(value: T): T {
-  if (value instanceof Promise) {
+  if (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as { then?: unknown }).then === "function"
+  ) {
     throw new OutboxError("outbox-async-callback", "outbox gate requires a synchronous callback");
   }
   return value;
 }
 function publicationErrorDisposition(error: unknown, comparison: number): "abandoned" {
   const refused = error instanceof OutboxError && error.code === "invalid-spawn-transition";
-  if (comparison < 0 && refused) {return "abandoned";}
+  if (comparison < 0 && refused) {
+    return "abandoned";
+  }
   throw error;
 }
 function assertBatchLimit(limit: number): void {
@@ -330,6 +338,34 @@ function preserveProjectionMetadata(result: DiskRecord, current: DiskRecord | un
     delete result.metadata.brick;
   }
 }
+function preserveStaleProjectionMetadata(
+  record: DiskRecord,
+  current: DiskRecord | undefined,
+): void {
+  const currentRevision = metadataValue(current, "brick_projection_revision");
+  if (currentRevision && metadataValue(record, "brick_projection_revision") !== currentRevision) {
+    preserveProjectionMetadata(record, current);
+  }
+}
+function assertDeletionSnapshot(expected: DiskRecord, current: DiskRecord | undefined): void {
+  if (!current) {return;}
+  const fields = ["closed", "closed_at", "last_used_at", "updated_at", "template"];
+  for (const key of fields) {
+    const before = JSON.parse(JSON.stringify(expected[key] ?? null));
+    const after = JSON.parse(JSON.stringify(current[key] ?? null));
+    if (!isDeepStrictEqual(before, after))
+      {throw new OutboxError("record-changed", "record changed since deletion selection; retry");}
+  }
+  if (
+    metadataValue(expected, "brick_projection_revision") !==
+    metadataValue(current, "brick_projection_revision")
+  ) {
+    throw new OutboxError(
+      "record-changed",
+      "record projection changed since deletion selection; retry",
+    );
+  }
+}
 interface TransitionContext {
   owned: boolean;
   unadopted: boolean;
@@ -486,6 +522,28 @@ export class BrickOutbox {
       this.userGateDepth++;
       try {
         return synchronousResult(action());
+      } finally {
+        this.userGateDepth--;
+      }
+    });
+  }
+
+  exitDrainWithMutationGate<T>(expectedCutoverId: string, reopen: () => T): T {
+    return this.locked(() => {
+      const encoded = this.meta("drain");
+      if (
+        !encoded ||
+        (JSON.parse(encoded) as { cutover_id?: string }).cutover_id !== expectedCutoverId
+      ) {
+        throw new OutboxError(
+          "outbox-drain-owner",
+          "drain does not belong to the expected cutover",
+        );
+      }
+      this.db.prepare("DELETE FROM meta WHERE key IN ('drain','admission_frontier')").run();
+      this.userGateDepth++;
+      try {
+        return synchronousResult(reopen());
       } finally {
         this.userGateDepth--;
       }
@@ -933,8 +991,8 @@ export class BrickOutbox {
     }
   }
   recordPath(id: string): string {
-    assertUuid(id);
-    return path.join(this.sessionsDir, `${id}.json`);
+    if (!id) {throw new OutboxError("invalid-record-id", "local record id is required");}
+    return path.join(this.sessionsDir, `${encodeURIComponent(id)}.json`);
   }
   readRecord(id: string): DiskRecord | undefined {
     try {
@@ -974,13 +1032,33 @@ export class BrickOutbox {
     writer: DiskRecord,
     action: (current: DiskRecord | undefined) => Promise<T>,
   ): Promise<T> {
+    return this.withAsyncMutation(async () => {
+      const current = this.readRecord(id);
+      this.assertOwnership(id, writer, current);
+      return action(current);
+    });
+  }
+
+  async withRecordDeletion<T>(
+    id: string,
+    expected: DiskRecord,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    return this.withAsyncMutation(async () => {
+      const current = this.readRecord(id);
+      assertRecordIdentity(id, expected, current);
+      assertDeletionSnapshot(expected, current);
+      return action();
+    });
+  }
+
+  private async withAsyncMutation<T>(action: () => Promise<T>): Promise<T> {
     let acquired = false;
     try {
       this.db.exec("BEGIN IMMEDIATE");
       acquired = true;
-      const current = this.readRecord(id);
-      this.assertOwnership(id, writer, current);
-      const result = await action(current);
+      this.refuseDrain();
+      const result = await action();
       this.db.exec("COMMIT");
       acquired = false;
       return result;
@@ -999,6 +1077,7 @@ export class BrickOutbox {
     build: (current: DiskRecord | undefined) => DiskRecord,
   ): DiskRecord {
     return this.locked(() => {
+      this.refuseDrain();
       const current = this.readRecord(id);
       this.assertOwnership(id, writer, current);
       const result = build(current);
@@ -1010,7 +1089,12 @@ export class BrickOutbox {
   }
   saveRecord(record: DiskRecord): DiskRecord {
     const id = String(record.acpx_record_id);
-    if (unpublishedRecord(record)) {
+    if (
+      unpublishedRecord(record) ||
+      (!this.isBound() &&
+        !metadataValue(record, "brick_projection_revision") &&
+        !metadataValue(record, "spawn_key"))
+    ) {
       return this.writeOwnedRecord(id, record, () => record);
     }
     const intent = this.prepareProjection(id, record, this.identityForRecord(record));
@@ -1038,6 +1122,7 @@ export class BrickOutbox {
       } else {
         this.assertOwnership(id, record, current);
       }
+      preserveStaleProjectionMetadata(record, current);
       if (unpublishedRecord(record)) {
         return undefined;
       }
@@ -1045,6 +1130,7 @@ export class BrickOutbox {
       if (!brick) {
         return undefined;
       }
+      assertUuid(id);
       assertUuid(brick);
       this.checkProjectionInstance(identity.instance_id);
       const { epoch, revision, history } = this.nextProjectionCounter(id, current);
