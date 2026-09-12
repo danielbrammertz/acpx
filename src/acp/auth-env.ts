@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deleteBricksCredentialEnv } from "../bricks-credential.js";
 import {
   hasKnownDeadAccounts,
   hasKnownDeadSubs,
@@ -59,19 +60,10 @@ export const ACPX_EFFECTIVE_ACCOUNT_ENV = "ACPX_EFFECTIVE_ACCOUNT";
 export const ACPX_EFFECTIVE_ADAPTER_ENV = "ACPX_EFFECTIVE_ADAPTER";
 export const ACPX_EFFECTIVE_AUTH_MODE_ENV = "ACPX_EFFECTIVE_AUTH_MODE";
 export const ACPX_EFFECTIVE_ANCHOR_ENV = "ACPX_EFFECTIVE_ANCHOR";
-/**
- * The bricks-realm CREDENTIAL family, stripped from every child environment by PREFIX in
- * `buildAgentEnvironment` — see the long note at that call site for why a name list is not enough
- * and why the trailing `S` is load-bearing.
- *
- * ⚠️ TWO REPOS, ONE VALUE. `acpx-ui` declares the same constant in `brick/module/realm.ts`
- * (`BRICKS_CREDENTIAL_ENV_PREFIX`) and names the knobs there. acpx cannot import from acpx-ui, so
- * the string is re-declared — and the two MUST stay in agreement. If acpx-ui ever renames the
- * family, this strip silently stops matching and the credential starts reaching agents with nothing
- * failing. That is the same allow-by-omission hazard one level up, so treat a rename as a
- * both-repos change.
- */
-export const ACPX_BRICKS_CREDENTIAL_ENV_PREFIX = "ACPX_BRICKS_";
+// The bricks-realm credential family and its strip live in ONE place for this repo — and they have
+// to, because this file is only LAYER 2 of three. The two sites that spawn the brick CLI itself
+// never reach this file at all. See src/bricks-credential.ts.
+export { ACPX_BRICKS_CREDENTIAL_ENV_PREFIX } from "../bricks-credential.js";
 
 export type EffectiveAccountMetadata = {
   effectiveAccount: string;
@@ -634,11 +626,7 @@ function buildAgentEnvironment(
   // NOT guarantee no agent can obtain it — every agent runs as the same uid and the credential is a
   // mounted file, so a same-uid process can read it. That is an accidental-cross-realm tripwire, not
   // adversarial isolation, and claiming the stronger property would be false.
-  for (const name of Object.keys(env)) {
-    if (name.startsWith(ACPX_BRICKS_CREDENTIAL_ENV_PREFIX)) {
-      delete env[name];
-    }
-  }
+  deleteBricksCredentialEnv(env);
   delete env.ACPX_OWNER_LOG;
   delete env.ACPX_AGENT_TYPE;
   // brick://6530d3b4 — the ACCOUNT stamp is spawn context too, and was missing
