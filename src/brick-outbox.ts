@@ -24,15 +24,20 @@ export function requiresBrickOutbox(metadata: Record<string, string> | undefined
 export function openRecordOutbox(
   metadata: Record<string, string> | undefined,
 ): BrickOutbox | undefined {
-  if (!requiresBrickOutbox(metadata)) {return undefined;}
+  if (!requiresBrickOutbox(metadata)) {
+    return undefined;
+  }
   const mandatory = Boolean(
     metadataValue({ metadata }, "spawn_key") ||
     metadataValue({ metadata }, "brick_projection_revision"),
   );
-  if (!mandatory && !fs.existsSync(path.join(os.homedir(), ".acpx", "brick-outbox.db")))
-    {return undefined;}
+  if (!mandatory && !fs.existsSync(path.join(os.homedir(), ".acpx", "brick-outbox.db"))) {
+    return undefined;
+  }
   const outbox = new BrickOutbox();
-  if (mandatory || outbox.isBound()) {return outbox;}
+  if (mandatory || outbox.isBound()) {
+    return outbox;
+  }
   outbox.close();
   return undefined;
 }
@@ -137,9 +142,15 @@ function now(): string {
   return new Date().toISOString();
 }
 function synchronousResult<T>(value: T): T {
-  if (value instanceof Promise)
-    {throw new OutboxError("outbox-async-callback", "outbox gate requires a synchronous callback");}
+  if (value instanceof Promise) {
+    throw new OutboxError("outbox-async-callback", "outbox gate requires a synchronous callback");
+  }
   return value;
+}
+function publicationErrorDisposition(error: unknown, comparison: number): "abandoned" {
+  const refused = error instanceof OutboxError && error.code === "invalid-spawn-transition";
+  if (comparison < 0 && refused) {return "abandoned";}
+  throw error;
 }
 function assertBatchLimit(limit: number): void {
   if (!Number.isInteger(limit) || limit < 1 || limit > 256) {
@@ -597,7 +608,7 @@ export class BrickOutbox {
     );
   }
   private async acknowledgePrefix(send: ProjectionTransport): Promise<void> {
-    const highWater = this.inventory().high_water;
+    const highWater = this.inventory().dispositioned_prefix;
     if (highWater.length) {
       const abandoned = this.db
         .prepare(
@@ -1182,10 +1193,7 @@ export class BrickOutbox {
       try {
         this.assertPublicationEligible(publication, current, intent.session_id);
       } catch (error) {
-        if (comparison < 0) {
-          return "abandoned";
-        }
-        throw error;
+        return publicationErrorDisposition(error, comparison);
       }
     }
     return comparison < 0 ? "apply" : "complete";
@@ -1577,7 +1585,8 @@ export class BrickOutbox {
       projection_heads: Number(
         this.db.prepare("SELECT COUNT(*) AS n FROM projection_head").get()!.n,
       ),
-      high_water: highWater,
+      high_water: this.acknowledgedFrontier(highWater),
+      dispositioned_prefix: highWater,
       attempts: counts,
       admission_frontier: JSON.parse(this.meta("admission_frontier") ?? "[]") as ProjectionTuple[],
       runs: {
@@ -1591,5 +1600,22 @@ export class BrickOutbox {
       },
       drain: drain ? (JSON.parse(drain) as LocalDrainInventory["drain"]) : null,
     };
+  }
+  private acknowledgedFrontier(prefix: ProjectionTuple[]): ProjectionTuple[] {
+    return prefix.flatMap((point) => {
+      const row = this.db
+        .prepare(`SELECT MAX(revision) AS revision FROM (
+        SELECT revision FROM outbox WHERE session_id=? AND projection_epoch=? AND state='acknowledged'
+        UNION ALL SELECT acked_revision AS revision FROM projection_head WHERE session_id=? AND acked_epoch=?
+      ) WHERE revision<=?`)
+        .get(
+          point.session_id,
+          point.projection_epoch,
+          point.session_id,
+          point.projection_epoch,
+          point.revision,
+        );
+      return row?.revision == null ? [] : [{ ...point, revision: Number(row.revision) }];
+    });
   }
 }

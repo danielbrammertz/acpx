@@ -52,6 +52,7 @@ export interface LocalDrainInventory {
   oldest_unacknowledged: string | null;
   projection_heads: number;
   high_water: ProjectionTuple[];
+  dispositioned_prefix: ProjectionTuple[];
   admission_frontier: ProjectionTuple[];
   attempts: Record<SpawnAttemptState, number>;
   runs: { adopted_without_ack_confirmation: number };

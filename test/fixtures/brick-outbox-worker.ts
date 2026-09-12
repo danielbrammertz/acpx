@@ -45,6 +45,47 @@ try {
     "negative parser control",
   );
   acted++;
+  if (scenario === "gate") {
+    assert.equal(
+      outbox.withUserMutationGate(() => outbox.withUserMutationGate(() => 42)),
+      42,
+    );
+    outbox.withUserMutationGate(() => {
+      assert.throws(() => new BrickOutbox(), /outbox-busy/);
+    });
+    assert.throws(() => outbox.withUserMutationGate(async () => 1), /synchronous/);
+    outbox.setDrain("gate-refusal");
+    let invoked = false;
+    assert.throws(
+      () =>
+        outbox.withUserMutationGate(() => {
+          invoked = true;
+        }),
+      /maintenance/,
+    );
+    assert.equal(invoked, false);
+    acted++;
+    console.log(`ACTED=${acted}`);
+    process.exit(0);
+  }
+  if (scenario === "frontier") {
+    for (let revision = 1; revision <= 3; revision++) {
+      const intent = outbox.prepareProjection(id, record, identity)!;
+      outbox.applyProjection(intent.id);
+      outbox.acknowledge(intent.id);
+    }
+    const abandoned = outbox.prepareProjection(id, record, identity)!;
+    outbox.setDrain("frontier-cut");
+    assert.throws(() => outbox.applyProjection(abandoned.id), /maintenance/);
+    const inventory = outbox.inventory();
+    assert.equal(inventory.admission_frontier[0]?.revision, 4);
+    assert.equal(inventory.high_water[0]?.revision, 3);
+    assert.equal(inventory.dispositioned_prefix[0]?.revision, 4);
+    assert.equal(inventory.outbox_depth, 0);
+    acted++;
+    console.log(`ACTED=${acted}`);
+    process.exit(0);
+  }
   if (["projection", "drain", "rename-cut", "superseded"].includes(scenario ?? "")) {
     const first = outbox.prepareProjection(id, record, identity)!;
     assert.equal(first.state, "prepared");
@@ -102,7 +143,25 @@ try {
     };
     outbox.writeOwnedRecord(id, pending, () => pending);
     assert.equal(outbox.prepareProjection(id, pending, identity), undefined);
-    if (scenario === "ownership") {
+    if (scenario === "lookup-error") {
+      const intent = outbox.prepareProjection(
+        id,
+        { ...pending, metadata: { ...pending.metadata, spawn_state: "published" } },
+        identity,
+        { run_id: "run-1", fence: 1, next: "published" },
+      )!;
+      const original = outbox.getSpawnAttempt.bind(outbox);
+      outbox.getSpawnAttempt = () => {
+        throw Object.assign(new Error("fixture SQLITE_IOERR"), { code: "SQLITE_IOERR" });
+      };
+      assert.throws(() => outbox.applyProjection(intent.id), /SQLITE_IOERR/);
+      assert.equal(outbox.getIntent(intent.id)?.state, "prepared");
+      assert.equal(outbox.readRecord(id)?.metadata?.spawn_state, "pending");
+      outbox.getSpawnAttempt = original;
+      outbox.applyProjection(intent.id);
+      assert.equal(outbox.getIntent(intent.id)?.state, "applied");
+      assert.equal(outbox.readRecord(id)?.metadata?.spawn_state, "published");
+    } else if (scenario === "ownership") {
       outbox.transitionSpawn("run-1", 1, "revoked");
       assert.throws(() => outbox.writeOwnedRecord(id, pending, () => pending), /refused/);
       assert.throws(() => outbox.transitionSpawn("run-1", 1, "published"), {
