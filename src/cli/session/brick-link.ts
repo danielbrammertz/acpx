@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { InvalidArgumentError } from "commander";
-import { bricksCredentialFreeEnv } from "../../bricks-credential.js";
+import { brickChildEnv } from "../../bricks-credential.js";
 import type { SessionRecord } from "../../types.js";
 
 export const BRICK_CLI_TIMEOUT_MS = 3_000;
@@ -206,7 +206,7 @@ function execBrick(
         // ⚠️ SEE brick-context.ts. Until B1 this passed no `env`, so the brick CLI inherited
         // `process.env` wholesale including the realm credential — silently, successfully, and
         // out of reach of `auth-env.ts`'s delete list, which this path never touches.
-        env: bricksCredentialFreeEnv(),
+        env: brickChildEnv(),
       },
       (error, stdout, stderr) => {
         if (error) {

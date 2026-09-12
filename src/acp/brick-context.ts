@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { TextDecoder } from "node:util";
-import { bricksCredentialFreeEnv } from "../bricks-credential.js";
+import { brickChildEnv } from "../bricks-credential.js";
 // ONE definition of the pool default for this repo. This file used to carry its own PRIVATE copy of
 // the string — so the two acpx sites could (and did) drift together onto a path removed 2026-07-22,
 // and fixing either one alone would have left the other resolving the dead path with nothing
@@ -55,7 +55,7 @@ function execBrickContext(
         // `process.env` WHOLESALE, realm credential included. There was no error and no warning;
         // the child worked perfectly. This path never reaches `auth-env.ts`'s delete list, so the
         // contract's prefix-strip remedy could not cover it: the list is never consulted here.
-        env: bricksCredentialFreeEnv(),
+        env: brickChildEnv(),
       });
     } catch (error) {
       warnBrickContext(brickId, `spawn failed: ${describeError(error)}`);

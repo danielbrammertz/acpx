@@ -63,15 +63,20 @@ export function deleteBricksCredentialEnv(env: NodeJS.ProcessEnv): void {
 }
 
 /**
- * A child environment with the credential family removed — for a spawn site that would otherwise
- * pass no `env` at all and inherit `process.env` wholesale (layer 3 above).
+ * `brickChildEnv()` — acpx's peer of acpx-ui's `acpxChildEnv()`, applying the SAME deny-by-prefix
+ * policy at the acpx->brick leaf hop.
+ *
+ * ⚠️ THE CONTRACT NAMES THE CONSTRUCTION POINT, NOT MERELY THE DELETION (C0-RULES (b2)). The two
+ * leaf sites pass NO `env` option at all, so they never reach `auth-env.ts` and its deletion CANNOT
+ * RUN ON THEM — deleting from an environment the hop never builds is a no-op. This is why layer 2
+ * is closed on its own rather than only transitively.
  *
  * ⚠️ PASSING THIS IS NOT OPTIONAL AT THOSE SITES, AND OMITTING IT LOOKS LIKE NOTHING. A `spawn`
  * with no `env` option inherits the parent's environment silently and successfully; there is no
  * error, no warning, and the child works perfectly. The only observable difference is that the
  * credential is now readable by the brick CLI and everything it spawns.
  */
-export function bricksCredentialFreeEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function brickChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const childEnv: NodeJS.ProcessEnv = { ...env };
   deleteBricksCredentialEnv(childEnv);
   return childEnv;
