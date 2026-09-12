@@ -94,6 +94,10 @@ test("neutral usage survives checkpoint, null pricing, model switch and cold-res
       ts: first.ts,
       provider_name: null,
       native_finish_reason: null,
+      // Stamped unconditionally by `attributionFields` (cost-ingest.ts) — `null`
+      // whenever the update carries no attribution, as here. Landed on dev in
+      // brick 77054e85 after this test was written against the pre-merge shape.
+      response_id: null,
     });
     assert.ok(Date.parse(first.ts ?? "") >= before);
     assert.ok(Date.parse(first.ts ?? "") <= Date.now());
