@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+// ONE definition of the pool default for this repo. This file used to carry its own PRIVATE copy of
+// the string — so the two acpx sites could (and did) drift together onto a path removed 2026-07-22,
+// and fixing either one alone would have left the other resolving the dead path with nothing
+// failing. See the note on the constant itself.
+import { DEFAULT_BRICK_POOL_DIR } from "../cli/session/brick-link.js";
 
 export const BRICK_CONTEXT_TIMEOUT_MS = 5_000;
 export const BRICK_CONTEXT_MAX_BYTES = 32_768;
 
 const BRICK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const DEFAULT_BRICK_POOL_DIR = "/wisdom/Operating System/Bricks";
 
 type BrickContextOptions = {
   timeoutMs?: number;

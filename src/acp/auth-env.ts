@@ -59,6 +59,19 @@ export const ACPX_EFFECTIVE_ACCOUNT_ENV = "ACPX_EFFECTIVE_ACCOUNT";
 export const ACPX_EFFECTIVE_ADAPTER_ENV = "ACPX_EFFECTIVE_ADAPTER";
 export const ACPX_EFFECTIVE_AUTH_MODE_ENV = "ACPX_EFFECTIVE_AUTH_MODE";
 export const ACPX_EFFECTIVE_ANCHOR_ENV = "ACPX_EFFECTIVE_ANCHOR";
+/**
+ * The bricks-realm CREDENTIAL family, stripped from every child environment by PREFIX in
+ * `buildAgentEnvironment` — see the long note at that call site for why a name list is not enough
+ * and why the trailing `S` is load-bearing.
+ *
+ * ⚠️ TWO REPOS, ONE VALUE. `acpx-ui` declares the same constant in `brick/module/realm.ts`
+ * (`BRICKS_CREDENTIAL_ENV_PREFIX`) and names the knobs there. acpx cannot import from acpx-ui, so
+ * the string is re-declared — and the two MUST stay in agreement. If acpx-ui ever renames the
+ * family, this strip silently stops matching and the credential starts reaching agents with nothing
+ * failing. That is the same allow-by-omission hazard one level up, so treat a rename as a
+ * both-repos change.
+ */
+export const ACPX_BRICKS_CREDENTIAL_ENV_PREFIX = "ACPX_BRICKS_";
 
 export type EffectiveAccountMetadata = {
   effectiveAccount: string;
@@ -601,6 +614,31 @@ function buildAgentEnvironment(
   delete env.ACPX_TASK_FOLDER;
   delete env.ACPX_BRICK;
   delete env.ACPX_BRICK_PATH;
+  // ── THE BRICKS-REALM CREDENTIAL — STRIPPED BY PREFIX, NOT BY NAME ────────────────────────────
+  //
+  // ⚠️ A NEW NAME ADDED TO THE LIST ABOVE WOULD NOT BE GOOD ENOUGH, AND THIS FILE IS ITS OWN
+  // EVIDENCE. The list is ALLOW-BY-OMISSION: a variable nobody names is inherited. Three separate
+  // bricks have now fixed variables it missed — brick://6530d3b4 (the account stamp),
+  // brick://1820be37 (CLAUDE_CONFIG_DIR) and brick://cb214e48 — each one a name someone had to
+  // think of first. A prefix rule cannot be defeated by a SECOND credential variable added later,
+  // which a name list can, and historically does.
+  //
+  // 🛑 THE `S` IS WHAT MAKES THIS SAFE, AND WIDENING IT TO `ACPX_BRICK` IS A FLEET-WIDE OUTAGE.
+  // `ACPX_BRICKS_*` (with the S) is the credential family — `ACPX_BRICKS_CREDENTIAL_FILE` today.
+  // `ACPX_BRICK_*` (no S) is ordinary, legitimately-inherited configuration: ACPX_BRICK_POOL_DIR,
+  // ACPX_BRICK_DB_PATH, ACPX_BRICK_DB_EXPORT_DIR, ACPX_BRICK_REALM. Stripping on `ACPX_BRICK`
+  // would take the pool dir out of every agent on every box and break `brick context` everywhere.
+  // The two families were named apart deliberately so that this rule could be a prefix.
+  //
+  // Stated boundary, kept honest: this guarantees NO AGENT'S ENVIRONMENT CARRIES THE TOKEN. It does
+  // NOT guarantee no agent can obtain it — every agent runs as the same uid and the credential is a
+  // mounted file, so a same-uid process can read it. That is an accidental-cross-realm tripwire, not
+  // adversarial isolation, and claiming the stronger property would be false.
+  for (const name of Object.keys(env)) {
+    if (name.startsWith(ACPX_BRICKS_CREDENTIAL_ENV_PREFIX)) {
+      delete env[name];
+    }
+  }
   delete env.ACPX_OWNER_LOG;
   delete env.ACPX_AGENT_TYPE;
   // brick://6530d3b4 — the ACCOUNT stamp is spawn context too, and was missing
